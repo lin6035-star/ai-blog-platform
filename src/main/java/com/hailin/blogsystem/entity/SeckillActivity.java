@@ -41,5 +41,13 @@ public class SeckillActivity {
     /** DRAFT / ACTIVE / ENDED */
     private String status;
 
+    /**
+     * 状态最后一次流转的时间，由 {@code casStatus} 写入。
+     *
+     * <p>刻意不叫 {@code updated_at}：{@code sold_count} 每发一份额度就 UPDATE 一行，
+     * 那个列会让每次抢购都刷新时间戳，排查「这次结束是超时还是售罄判的」就失效了。
+     */
+    private LocalDateTime statusChangedAt;
+
     private LocalDateTime createdAt;
 }

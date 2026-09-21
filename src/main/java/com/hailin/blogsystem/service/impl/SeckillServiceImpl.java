@@ -138,11 +138,27 @@ public class SeckillServiceImpl implements SeckillService {
      */
     private static final long LAZY_KEY_TTL_SECONDS = Duration.ofDays(30).toSeconds();
 
+    /**
+     * 列表单次最多返回多少场。
+     *
+     * <p><b>这是安全上限，不是产品窗口</b>——真正的过滤器是 {@code end_at > now}，
+     * 每天一场的话这里能装下 20 天。它防的是「有人手工批量造活动把页面撑爆」。
+     */
+    private static final int MAX_LIST_SIZE = 20;
+
     @Override
     public List<SeckillActivityVO> listActivities(Long userId) {
         List<SeckillActivity> activities = seckillActivityMapper.selectList(
                 new LambdaQueryWrapper<SeckillActivity>()
-                        .orderByDesc(SeckillActivity::getStartAt));
+                        // 过滤口径 = 「现在还能不能抢」，与抢购脚本 Lua 里的 now < endAt 同构。
+                        // 刻意不用 status != 'ENDED'：排空门期间活动仍然是 ACTIVE（到点了但 PEL 没清），
+                        // 那样会把它以「已结束」的置灰卡片漏在列表上
+                        .gt(SeckillActivity::getEndAt, LocalDateTime.now())
+                        // 最快结束的排最前。原来是 startAt DESC，但列表语义已经从「历史流水」
+                        // 变成「接下来能抢什么」——DESC 会把最晚开始的排最前，而配合 LIMIT
+                        // 截掉的恰好是最老开始的那批，也就是今天正在跑、此刻唯一能抢的那场
+                        .orderByAsc(SeckillActivity::getEndAt)
+                        .last("LIMIT " + MAX_LIST_SIZE));
 
         return activities.stream().map(activity -> {
             SeckillActivityVO vo = new SeckillActivityVO();

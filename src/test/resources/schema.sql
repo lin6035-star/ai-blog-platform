@@ -455,6 +455,7 @@ CREATE TABLE IF NOT EXISTS seckill_activity (
     start_at TIMESTAMP NOT NULL,
     end_at TIMESTAMP NOT NULL,
     status VARCHAR(16) NOT NULL,
+    status_changed_at TIMESTAMP NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

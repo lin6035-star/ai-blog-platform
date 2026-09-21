@@ -9,7 +9,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.hailin.blogsystem.ai.rag.ArticleRagIndexService;
 import com.hailin.blogsystem.ai.rag.ArticleRagSyncService;
-import com.hailin.blogsystem.component.AfterCommitExecutor;
+import com.hailin.blogsystem.component.DelayedCacheEvictor;
 import com.hailin.blogsystem.component.CacheTtlSupport;
 import com.hailin.blogsystem.component.RedisKeyScanner;
 import com.hailin.blogsystem.component.UserActivityTracker;
@@ -158,7 +158,7 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
     private final RedisKeyScanner redisKeyScanner;
 
     private final UserSetCache userSetCache;
-    private final AfterCommitExecutor afterCommitExecutor;
+    private final DelayedCacheEvictor delayedCacheEvictor;
     private final UserActivityTracker userActivityTracker;
     /** 站内搜索：keyword 非空时走 ES 全文检索，ES 不可用则降级回原本的 LIKE。 */
     private final ArticleSearchService articleSearchService;
@@ -812,8 +812,7 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
 
         updateById(articles);
 
-        deleteArticleDetailCache(id);
-        deleteArticleListCache();
+        evictArticleCaches(id);
 
         syncArticleRagIndex(articles);  //更新文章之后要判断文章的状态，是否隐藏
     }
@@ -862,8 +861,7 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
             throw new IllegalArgumentException("文章标题已变化，请重新发起修改");
         }
 
-        deleteArticleDetailCache(id);
-        deleteArticleListCache();
+        evictArticleCaches(id);
         syncArticleRagIndex(articles);  // 状态取自更新前行（改名不动状态）：已发布 → 重刷 RAG doc（含标题）
     }
 
@@ -909,8 +907,7 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
             throw new IllegalArgumentException("文章状态已变化，请重新发起修改");
         }
 
-        deleteArticleDetailCache(id);
-        deleteArticleListCache();
+        evictArticleCaches(id);
         if (Objects.equals(targetStatus, BlogConstants.ArticlesStatus.PUBLISHED)) {
             safelyIndexArticleRag(id);      // 公开：建 RAG 索引（对齐 publishArticle）
         } else {
@@ -932,8 +929,7 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
 
         removeById(id);
 
-        deleteArticleDetailCache(id);
-        deleteArticleListCache();
+        evictArticleCaches(id);
         safelyDeleteArticleRagIndex(id);  //删除时自动同步 RAG 索引。
     }
 
@@ -955,8 +951,7 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
 
         updateById(articles);
 
-        deleteArticleDetailCache(id);
-        deleteArticleListCache();
+        evictArticleCaches(id);
 
         safelyDeleteArticleRagIndex(id);  //隐藏时自动同步 RAG 索引。
     }
@@ -980,8 +975,7 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
 
         updateById(articles);
 
-        deleteArticleDetailCache(id);
-        deleteArticleListCache();
+        evictArticleCaches(id);
 
         safelyIndexArticleRag(id);  //发布文章时自动同步 RAG 索引。
 
@@ -1462,29 +1456,31 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
     }
 
     /**
-     * 文章变更时删除详情缓存。走 {@link AfterCommitExecutor}：调用方里
+     * 文章元数据变更的统一失效出口：详情 + 列表。
+     *
+     * **为什么单独收一个方法**：这两行必须成对出现（详情页和列表页都展示文章元数据），
+     * 此前分开写重复了 6 处，新增写路径时漏掉一个就是**静默的脏缓存**——直到 TTL 过期都没人发现。
+     */
+    private void evictArticleCaches(Long id) {
+        deleteArticleDetailCache(id);
+        deleteArticleListCache();
+    }
+
+    /**
+     * 文章变更时删除详情缓存。走 {@link DelayedCacheEvictor}：调用方里
      * `updateArticleTitle` / `updateArticleVisibility` 带 `@Transactional`，
-     * 事务内删会留下"删完到提交之间读到旧值并回填"的窗口（详见该组件类注释）。
+     * 事务内删会留下"删完到提交之间读到旧值并回填"的窗口（详见该组件类注释），
+     * 它先把删除推到提交后，再延迟重删一次堵住"读请求跨提交写回旧值"的迟到写回。
      */
     private void deleteArticleDetailCache(Long id) {
-        String key = RedisConstants.ARTICLE_DETAIL_KEY_PREFIX + id;
-        afterCommitExecutor.execute(() -> {
-            try {
-                stringRedisTemplate.delete(key);
-            } catch (Exception e) {
-                // 删不掉不影响文章变更本身，但必须留下可检索的痕迹——
-                // 静默吞掉的话，缓存会一直脏到 TTL（详情 10 分钟），排查时无迹可寻
-                log.warn("[CACHE-EVICT-FAIL] 文章详情缓存删除失败，将靠 TTL 兜底: key={}", key, e);
-            }
-        });
+        delayedCacheEvictor.evict(RedisConstants.ARTICLE_DETAIL_KEY_PREFIX + id);
     }
 
     private void deleteArticleListCache() {
         // SCAN 游标迭代 + UNLINK 异步回收。原 KEYS 会阻塞 Redis 服务端单线程，
         // 连带卡住同实例上的限流、分布式锁与其它缓存。
         // SCAN 的失败日志在 RedisKeyScanner 内部
-        afterCommitExecutor.execute(() ->
-                redisKeyScanner.scanAndDelete(RedisConstants.ARTICLE_LIST_KEY_PREFIX + "*"));
+        delayedCacheEvictor.evictPattern(RedisConstants.ARTICLE_LIST_KEY_PREFIX + "*");
     }
 
     //但如果 ES 没开、Embedding API 超时、额度没了，现在可能会导致“文章发布失败”

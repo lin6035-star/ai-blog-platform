@@ -195,7 +195,7 @@ blog:
     enabled: false
 
   # 钱包（设计稿：docs/redis/钱包与秒杀计划.md §4.5）
-  # ⚠️ 前端只传 packageCode，应付金额与到账额度都由后端按这里决定——让前端传金额等于自助发钱。
+  # ⚠️ 套餐入口前端只传 packageCode，应付金额与到账额度都由后端按这里决定——让前端传金额等于自助发钱。
   wallet:
     # 注册赠送的初始额度（credit）。0 = 不送。
     # 计费开关默认开启，不送的话新账号注册完立刻就是「额度不足」——注册可用性和计费上线本来是冲突的。
@@ -211,6 +211,14 @@ blog:
         pay-amount: 9800
         credit-amount: 118000  # 送 20%
 
+    # 自定义金额充值（§4.6）：金额**由用户填**（整数元），到账额度仍由后端按 credit-per-yuan 算。
+    # credit-per-yuan 必须低于所有套餐（PACK_30 = 1100、PACK_98 = 1204）：
+    # 自定义卖的是「想充多少充多少」的灵活度，套餐卖的是折扣，两者都便宜就没人买套餐了。
+    custom:
+      min-yuan: 1
+      max-yuan: 1000
+      credit-per-yuan: 1000    # 基准比例，无优惠
+
   # 秒杀（设计稿：docs/redis/钱包与秒杀计划.md §6）
   seckill:
     # 可调用预热接口的 userId 白名单。**默认空 = 谁都不能调**。
@@ -218,6 +226,36 @@ blog:
     admin-user-ids: []
     # 启动完成后自动预热全部 ACTIVE 活动
     preheat-on-startup: true
+    # 活动状态自动流转：DRAFT --到点--> ACTIVE(+预热)，ACTIVE --到期/售罄且已排空--> ENDED。
+    # 注意这层只管运营视图，抢购的正确性边界是 Lua 里的时间窗与库存（见设计稿 §6.6）
+    lifecycle-enabled: true
+
+    # 每日自动开场：活动由 SeckillDailyTask 自动创建，激活/预热/结束全交给上面的生命周期流转。
+    # ⚠️ start-time / end-time 的引号**必须加**：不加的话 YAML 1.1 会把 10:00 当成
+    # 60 进制整数解析成 600，绑定 LocalTime 失败、启动直接挂。
+    # end-time 必须晚于 start-time（否则启动失败，见 SeckillDailyValidator）。
+    daily:
+      enabled: true
+      start-time: "10:00"
+      end-time: "10:30"
+      total-stock: 50
+      credit-amount: 5000
+
+  # 缓存（设计稿：docs/redis/delayed-double-delete-design.md）
+  cache:
+    # 延迟双删：提交后删一次，D 毫秒后再删一次。
+    # 解决"读请求在写事务提交前查库（拿到旧值）、在缓存删除之后才写回"的残留窗口。
+    double-delete:
+      # 关掉 = 退化成"提交后删一次"（加这一刀之前的行为）。用于反向验证与线上止血
+      enabled: true
+      # 第二次删除的延迟。⚠️ **由实测决定，不是拍脑袋**。
+      # 实测（2026-09-20，16 并发 × 320 样本，真 MySQL + 真 Redis）：
+      #   文章详情冷读 P99=16ms / max=28ms；文章列表冷读 P99=22ms / max=26ms。
+      # 取 200ms ≈ 实测 max 的 7 倍——本地无网络延迟，生产还要叠加 RTT、GC 与更大的数据量。
+      # 方向性：偏大是安全的（代价只是多一次 DB 回源），偏小则窗口还在。
+      delay-ms: 200
+      # 延迟重删的积压上限，超过就丢弃本次（退化成单次删除），不阻塞业务线程
+      max-pending: 4096
 
   ai:
     project-key: global

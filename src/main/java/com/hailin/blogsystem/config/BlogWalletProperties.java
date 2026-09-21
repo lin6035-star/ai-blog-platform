@@ -44,4 +44,33 @@ public class BlogWalletProperties {
         /** 到账额度（credit） */
         private long creditAmount;
     }
+
+    /**
+     * 自定义金额充值：金额由用户填（整数元）。
+     *
+     * <p><b>与 {@link Package} 的关键差别是金额来自请求体</b>——所以这个入口必须自己长出一道
+     * 「金额合法性」的闸门（{@code WalletRechargeServiceImpl#requireWholeYuan}），
+     * 套餐那条路不需要，因为套餐金额本来就由后端从配置里取。
+     *
+     * <p><b>但到账额度仍由后端算</b>：{@code 元 × creditPerYuan}。用户能决定「充多少钱」，
+     * 决定不了「到账多少 credit」——那条线才是「自助发钱」的实质，
+     * 详见 docs/redis/钱包与秒杀计划.md §4.6。
+     */
+    private Custom custom = new Custom();
+
+    @Data
+    public static class Custom {
+        /** 单笔下限（元，整数） */
+        private long minYuan = 1;
+        /** 单笔上限（元，整数） */
+        private long maxYuan = 1000;
+        /**
+         * 兑换比例：1 元 = 多少 credit。
+         *
+         * <p>必须**低于所有套餐**（PACK_30 是 1100、PACK_98 是 1204）——产品口径是
+         * 「自定义卖灵活度、套餐卖折扣」。追平了就等于套餐卖不动，但那是产品决策不是错误，
+         * 所以只在启动时 WARN 不 fail-fast。
+         */
+        private long creditPerYuan = 1000;
+    }
 }

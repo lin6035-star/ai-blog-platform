@@ -2,7 +2,7 @@ package com.hailin.blogsystem.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import com.hailin.blogsystem.component.AfterCommitExecutor;
+import com.hailin.blogsystem.component.DelayedCacheEvictor;
 import com.hailin.blogsystem.component.UserSetCache;
 import com.hailin.blogsystem.constants.RedisConstants;
 import com.hailin.blogsystem.entity.ArticleFavorites;
@@ -26,7 +26,7 @@ public class ArticleFavoritesServiceImpl extends ServiceImpl<ArticleFavoritesMap
     private final ArticlesMapper articlesMapper;
     private final StringRedisTemplate stringRedisTemplate;
     private final UserSetCache userSetCache;
-    private final AfterCommitExecutor afterCommitExecutor;
+    private final DelayedCacheEvictor delayedCacheEvictor;
 
     @Override  //1.收藏文章
     public void favoriteArticle(Long articleId) {
@@ -93,18 +93,11 @@ public class ArticleFavoritesServiceImpl extends ServiceImpl<ArticleFavoritesMap
 
     /**
      * 收藏数会展示在文章详情页，所以收藏/取消要失效详情缓存。
-     * 走 {@link AfterCommitExecutor}（本类当前无事务，等价于立即执行，但去掉 `@Transactional`
-     * 或将来补上时行为自动正确）；原来这里没有 try-catch，Redis 一抖会让收藏直接失败——
-     * 缓存删不掉不该拦着用户收藏。
+     * 走 {@link DelayedCacheEvictor}：它内部先经 {@code AfterCommitExecutor} 推到提交后
+     * （本类当前无事务，等价于立即执行，但去掉 `@Transactional` 或将来补上时行为自动正确），
+     * 再延迟重删一次堵住"读请求在提交前查库、在删除之后才写回"的迟到写回。
      */
     private void evictArticleDetailCache(Long articleId) {
-        String key = RedisConstants.ARTICLE_DETAIL_KEY_PREFIX + articleId;
-        afterCommitExecutor.execute(() -> {
-            try {
-                stringRedisTemplate.delete(key);
-            } catch (Exception e) {
-                log.warn("[CACHE-EVICT-FAIL] 文章详情缓存删除失败，将靠 TTL 兜底: key={}", key, e);
-            }
-        });
+        delayedCacheEvictor.evict(RedisConstants.ARTICLE_DETAIL_KEY_PREFIX + articleId);
     }
 }

@@ -10,12 +10,11 @@ import com.hailin.blogsystem.mapper.SeckillActivityMapper;
 import com.hailin.blogsystem.mapper.SeckillOrderMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.core.RedisCallback;
+import org.springframework.data.redis.connection.stream.PendingMessagesSummary;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -131,27 +130,31 @@ public class SeckillReconcileTask {
     }
 
     /**
-     * PEL 待处理条数（XPENDING 的 summary 形式：{@code [count, minId, maxId, consumers]}）。
+     * PEL 待处理条数。
      *
      * <p>NOGROUP 要吞掉：活动刚预热、还没人抢过的时候，events key 和消费组都还不存在，
      * 这时 pending 就是 0——它是「还没开始」而不是「不一致」。
      * 让它抛出去的话，这一轮对账会在这里中断，后面两条检查全都跑不到。
+     *
+     * <p>⚠️ 必须走类型化的 {@code opsForStream().pending()}，<b>不能用</b>
+     * {@code connection.execute("XPENDING", ...)} 那样的原生命令：XPENDING 的 summary
+     * 首元素是**整数**，而原生调用用的 {@code ByteArrayOutput} 解析不了整数，会抛
+     * {@code UnsupportedOperationException}（被 Lettuce 包成「Unknown redis exception」）。
+     * 上面那个 {@code catch (RuntimeException)} 会把它一起吞掉 → <b>这个方法恒返回 0</b>
+     * → 「在途多于 PEL 待处理」永远按 pending=0 判，正常的在途（刚抢到、正在入账）
+     * 会被报成「事件可能已经丢失」。
+     *
+     * <p>这个坑是 2026-09-20 做活动生命周期时在 {@code SeckillLifecycleServiceImpl}
+     * 里踩到并定位的，回头才发现这里一直在静默失效。
      */
     private long pendingCount(String eventsKey) {
-        Object raw;
         try {
-            raw = redisTemplate.execute((RedisCallback<Object>) connection ->
-                    connection.execute("XPENDING",
-                            eventsKey.getBytes(StandardCharsets.UTF_8),
-                            RedisConstants.SECKILL_CONSUMER_GROUP.getBytes(StandardCharsets.UTF_8)));
+            PendingMessagesSummary summary = redisTemplate.opsForStream()
+                    .pending(eventsKey, RedisConstants.SECKILL_CONSUMER_GROUP);
+            return summary == null ? 0 : summary.getTotalPendingMessages();
         } catch (RuntimeException e) {
             return 0;
         }
-        if (raw instanceof List<?> summary && !summary.isEmpty()
-                && summary.get(0) instanceof Number count) {
-            return count.longValue();
-        }
-        return 0;
     }
 
     private static long parseLong(String raw, long fallback) {

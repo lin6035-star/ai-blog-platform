@@ -68,6 +68,15 @@ public class BlogConstants {
          */
         public static final long BALANCE_FLOOR = -1000000L;
 
+        /**
+         * 自定义金额订单的 package_code。
+         *
+         * <p>该列是 {@code VARCHAR(32) NOT NULL}，自定义订单没有套餐码但必须填一个。
+         * 刻意不用「CUSTOM_500」这种带金额的形式——金额已经在 {@code pay_amount} 列上，
+         * 再编码一次就多一个会漂移的真源。
+         */
+        public static final String CUSTOM_PACKAGE_CODE = "CUSTOM";
+
         private Wallet() {
         }
     }

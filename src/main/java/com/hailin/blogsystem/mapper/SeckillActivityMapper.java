@@ -45,4 +45,30 @@ public interface SeckillActivityMapper extends BaseMapper<SeckillActivity> {
               AND sold_count > 0
             """)
     int decreaseSoldCount(@Param("activityId") Long activityId);
+
+    /**
+     * 状态流转（CAS）：只在当前状态确实是 {@code expected} 时才推进。
+     *
+     * <p><b>返回 0 要静默忽略，不能当失败</b>——说明别人已经推过了（多实例、
+     * 或运维手工改过）。调用方是幂等的定时任务，失败的下场只是「下一轮不用再做」。
+     * 对照：用户动作型的 CAS 失败必须报错（见 {@code ArticlesServiceImpl#updateArticleVisibility}），
+     * 两者方向相反，别照抄错的那个。
+     *
+     * <p>这把多实例下的流转变成天然安全的，<b>不需要分布式锁</b>。
+     *
+     * <p>⚠️ {@code status_changed_at} 显式写进语句里，而不是给列加
+     * {@code ON UPDATE CURRENT_TIMESTAMP}：{@link #increaseSoldCount} 每发一份额度
+     * 就 UPDATE 一行，用 updated_at 的话它每次抢购都会跳，
+     * 「这次 ENDED 是超时判的还是售罄判的」就再也查不出来了。
+     * 显式写还有第二个好处——MySQL 与 H2 行为一致，测试才能真正锁住它。
+     */
+    @Update("""
+            UPDATE seckill_activity
+            SET status = #{target}, status_changed_at = NOW()
+            WHERE id = #{id}
+              AND status = #{expected}
+            """)
+    int casStatus(@Param("id") Long id,
+                  @Param("expected") String expected,
+                  @Param("target") String target);
 }

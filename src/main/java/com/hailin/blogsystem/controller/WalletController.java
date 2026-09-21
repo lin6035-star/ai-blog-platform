@@ -1,9 +1,11 @@
 package com.hailin.blogsystem.controller;
 
+import com.hailin.blogsystem.entity.dto.WalletCustomRechargeDTO;
 import com.hailin.blogsystem.entity.dto.WalletRechargeDTO;
 import com.hailin.blogsystem.entity.vo.PageVO;
 import com.hailin.blogsystem.entity.vo.RechargeOrderVO;
 import com.hailin.blogsystem.entity.vo.WalletBillEntryVO;
+import com.hailin.blogsystem.entity.vo.WalletCustomConfigVO;
 import com.hailin.blogsystem.entity.vo.WalletPackageVO;
 import com.hailin.blogsystem.entity.vo.WalletVO;
 import com.hailin.blogsystem.service.WalletRechargeService;
@@ -56,10 +58,36 @@ public class WalletController {
         return Result.success(walletRechargeService.listPackages());
     }
 
+    /**
+     * 自定义充值的配置（上下限 + 兑换比例）。
+     *
+     * <p>给前端做输入提示用。前端硬编码这两个数的话，改了配置前端不同步，
+     * 用户按提示填了却被后端拒——两边都显得没道理。
+     */
+    @GetMapping("/recharge/custom-config")
+    public Result<WalletCustomConfigVO> getCustomConfig() {
+        return Result.success(walletRechargeService.getCustomConfig());
+    }
+
     /** 下单：只传 packageCode，金额与到账额度由后端按套餐决定 */
     @PostMapping("/recharge/orders")
     public Result<RechargeOrderVO> createOrder(@RequestBody WalletRechargeDTO dto) {
         return Result.success(walletRechargeService.createOrder(dto.getPackageCode()));
+    }
+
+    /**
+     * 自定义金额下单。
+     *
+     * <p>刻意独立成一个接口、而不是给 {@link WalletRechargeDTO} 加一个可选金额字段：
+     * 套餐入口「请求体里根本没有金额字段」是靠<b>类型</b>保证的（不可能发生），
+     * 合并后变成靠 if 判断（可能发生）——在钱的路径上那是降级。
+     *
+     * <p>传的是<b>元</b>（整数），到账额度仍由后端按配置算。
+     * 支付走的是同一个 {@code /recharge/orders/{orderNo}/pay}，不另开支付路径。
+     */
+    @PostMapping("/recharge/orders/custom")
+    public Result<RechargeOrderVO> createCustomOrder(@RequestBody WalletCustomRechargeDTO dto) {
+        return Result.success(walletRechargeService.createCustomOrder(dto.getPayYuan()));
     }
 
     /**

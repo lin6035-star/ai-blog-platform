@@ -3,8 +3,10 @@ package com.hailin.blogsystem.service;
 import com.baomidou.mybatisplus.extension.service.IService;
 import com.hailin.blogsystem.entity.WalletRechargeOrder;
 import com.hailin.blogsystem.entity.vo.RechargeOrderVO;
+import com.hailin.blogsystem.entity.vo.WalletCustomConfigVO;
 import com.hailin.blogsystem.entity.vo.WalletPackageVO;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 /**
@@ -17,8 +19,19 @@ public interface WalletRechargeService extends IService<WalletRechargeOrder> {
     /** 充值套餐列表（来自 blog.wallet.packages 配置） */
     List<WalletPackageVO> listPackages();
 
+    /** 自定义充值的配置（上下限 + 兑换比例），给前端做提示用（见 §4.6） */
+    WalletCustomConfigVO getCustomConfig();
+
     /** 下单：按套餐快照落订单行，状态 PENDING */
     RechargeOrderVO createOrder(String packageCode);
+
+    /**
+     * 自定义金额下单：金额由用户填（整数元），**到账额度仍由后端算**。
+     *
+     * <p>落下来的订单和套餐订单同构，支付走的是同一个 {@link #pay(String)}
+     * ——不新开支付路径，那会把状态 CAS 那道防线绕掉。
+     */
+    RechargeOrderVO createCustomOrder(BigDecimal payYuan);
 
     /** 支付：五分支（不存在 / 越权 / 已取消 / 已支付幂等 / PENDING 走 CAS） */
     RechargeOrderVO pay(String orderNo);
