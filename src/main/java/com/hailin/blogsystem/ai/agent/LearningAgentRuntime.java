@@ -291,6 +291,7 @@ public class LearningAgentRuntime extends AbstractAgentRuntime implements AgentR
                 done,
                 "RENAME".equals(writeType) ? newTitle : null,
                 null,
+                null,
                 null
         );
 

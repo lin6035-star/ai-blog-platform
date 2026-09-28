@@ -2,11 +2,14 @@ package com.hailin.blogsystem.entity.dto;
 
 import lombok.Data;
 
+import java.util.List;
+
 @Data
 public class AiIntent {
     private String intent;  //大类，比如 general_chat / user_profile_insight / article_action
     private Double confidence;  //LLM 对当前意图判断的置信度；分类失败时由后端置为 0
     private String actionType;  //细分动作，比如 likeArticle / followAuthor
+    private List<String> requestedActions; // 文章复合动作候选；后端仍需白名单、冲突和完整性校验
     private String articleId;  //文章ID
     private String authorId;
     private String userId;

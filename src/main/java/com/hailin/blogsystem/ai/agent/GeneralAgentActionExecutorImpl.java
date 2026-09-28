@@ -48,7 +48,7 @@ public class GeneralAgentActionExecutorImpl implements GeneralAgentActionExecuto
             case SEARCH_RAG -> searchRag(decision);
             case QUERY_LEARNING_DASHBOARD, QUERY_ARTICLE ->
                     throw new UnsupportedOperationException("领域动作不经过通用域执行器");
-            case ASK_USER, FINAL_ANSWER, SUGGEST_WORKFLOW, SUGGEST_WRITE ->
+            case ASK_USER, FINAL_ANSWER, SUGGEST_WORKFLOW, SUGGEST_WRITE, ARTICLE_INTERACTION_BATCH ->
                     throw new UnsupportedOperationException("终态动作不经过执行器");
         };
     }

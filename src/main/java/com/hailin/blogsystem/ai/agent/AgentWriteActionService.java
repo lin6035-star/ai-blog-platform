@@ -188,7 +188,10 @@ public class AgentWriteActionService {
                     Boolean.parseBoolean(node.path("done").asText("false")),
                     node.path("newTitle").asText(null),
                     node.path("articleId").asText(null),
-                    node.path("articleTitle").asText(null)
+                    node.path("articleTitle").asText(null),
+                    // ⚠️ 钱包域。漏写这一行编译器**不会**报错（参数个数照样对，只是少一个），
+                    // 表现是提案落库了但 confirm 时金额为 null —— 靠 executor 的必填校验兜住
+                    node.path("payYuan").asText(null)
             );
         } catch (Exception e) {
             return null;

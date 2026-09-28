@@ -15,6 +15,7 @@ import com.hailin.blogsystem.ai.agent.AgentWorkflowSuggestion;
 import com.hailin.blogsystem.ai.agent.AgentWriteProposal;
 import com.hailin.blogsystem.ai.agent.AgentRuntimeRouteRegistry;
 import com.hailin.blogsystem.ai.agent.ArticleSessionAnchorService;
+import com.hailin.blogsystem.ai.agent.ArticleInteractionBatchService;
 import com.hailin.blogsystem.ai.agent.LearningPlanAnchorService;
 import com.hailin.blogsystem.ai.agent.ArticleAgentRuntime;
 import com.hailin.blogsystem.ai.agent.GeneralAgentRuntime;
@@ -100,6 +101,7 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
     private final GeneralAgentRuntime generalAgentRuntime;
     private final AgentRuntimeRouteRegistry agentRuntimeRouteRegistry;
     private final ArticleSessionAnchorService articleSessionAnchorService;
+    private final ArticleInteractionBatchService articleInteractionBatchService;
     private final LearningPlanAnchorService learningPlanAnchorService;
     private final AgentFollowUpResolver agentFollowUpResolver;
     private final LearningProgressHandoffResolver learningProgressHandoffResolver;
@@ -313,6 +315,18 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             );
         }
 
+        if (routeDecision.getArticleActionBatch() != null) {
+            return streamArticleInteractionBatch(
+                    sessionId,
+                    userId,
+                    message,
+                    rawPageContextJson,
+                    session,
+                    routeDecision.getArticleActionBatch(),
+                    routeUsage
+            );
+        }
+
         // 统一处理 Workflow。
         if (routeDecision.getAction() == AgentAction.WORKFLOW) {
             /*
@@ -520,6 +534,75 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         "message", text
                 ))
                 .build());
+    }
+
+    private Flux<AiChatEventVO> streamArticleInteractionBatch(
+            Long sessionId,
+            Long userId,
+            String message,
+            String rawPageContextJson,
+            AiSessions session,
+            ArticleActionBatch batch,
+            TokenUsageAccumulator routeUsage
+    ) {
+        AiMessages userMessage = new AiMessages();
+        userMessage.setSessionId(sessionId);
+        userMessage.setRole(ROLE_USER);
+        userMessage.setContent(message);
+        userMessage.setPageContext(rawPageContextJson);
+        userMessage.setCreatedAt(LocalDateTime.now());
+        save(userMessage);
+
+        ArticleInteractionBatchService.Execution execution = articleInteractionBatchService.execute(
+                userId,
+                sessionId,
+                message,
+                batch
+        );
+        articleSessionAnchorService.mark(
+                sessionId,
+                batch.articleId(),
+                ArticleSessionAnchorService.SOURCE_PAGE_ACTION
+        );
+
+        AiMessages assistantMessage = saveStreamAssistantMessage(
+                sessionId,
+                userId,
+                rawPageContextJson,
+                execution.message(),
+                null,
+                execution.agentRunId()
+        );
+        if (routeUsage != null && routeUsage.getTotalTokens() > 0) {
+            assistantMessage.setTokenCount((long) routeUsage.getTotalTokens());
+            updateById(assistantMessage);
+        }
+
+        AiChatEventVO paramEvent = AiChatEventVO.builder()
+                .eventType(AiChatEventType.PARAM.getValue())
+                .eventData(Map.of(
+                        "session", AiSessionVO.from(session),
+                        "userMessage", AiMessageVO.from(userMessage)
+                ))
+                .build();
+
+        Flux<AiChatEventVO> dataEvents = Flux.fromIterable(splitIntoChunks(execution.message(), 32))
+                .map(chunk -> AiChatEventVO.builder()
+                        .eventType(AiChatEventType.DATA.getValue())
+                        .eventData(chunk)
+                        .build());
+
+        Map<String, Object> stopData = new HashMap<>();
+        stopData.put("session", AiSessionVO.from(getOwnedSession(sessionId, userId)));
+        stopData.put("assistantMessage", AiMessageVO.from(assistantMessage));
+        stopData.put("references", List.of());
+        stopData.put("actionResults", execution.actionResults());
+        AiChatEventVO stopEvent = AiChatEventVO.builder()
+                .eventType(AiChatEventType.STOP.getValue())
+                .eventData(stopData)
+                .build();
+
+        return Flux.concat(Flux.just(paramEvent), dataEvents, Flux.just(stopEvent));
     }
 
     /**
@@ -2808,6 +2891,10 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             return "文章优化助手需要登录后使用，请先登录后再试。";
         }
 
+        if ("WALLET_AGENT".equals(currentIntent)) {
+            return "充值和余额查询需要登录后使用，请先登录后再试。";
+        }
+
         return "这个功能需要登录后使用，请先登录后再试。";
     }
 
@@ -2924,7 +3011,7 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             String rawPageContextJson,
             String content
     ) {
-        return saveStreamAssistantMessage(sessionId, userId, rawPageContextJson, content, null);
+        return saveStreamAssistantMessage(sessionId, userId, rawPageContextJson, content, null, null);
     }
     private AiMessages saveStreamAssistantMessage(
             Long sessionId,
@@ -2932,12 +3019,25 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             String rawPageContextJson,
             String content,
             Long workflowRunId
+    ) {
+        return saveStreamAssistantMessage(
+                sessionId, userId, rawPageContextJson, content, workflowRunId, null);
+    }
+
+    private AiMessages saveStreamAssistantMessage(
+            Long sessionId,
+            Long userId,
+            String rawPageContextJson,
+            String content,
+            Long workflowRunId,
+            Long agentRunId
     ){
         AiMessages assistantMessage = new AiMessages();
         assistantMessage.setSessionId(sessionId);
         if (workflowRunId != null) {
             assistantMessage.setWorkflowRunId(String.valueOf(workflowRunId));
         }
+        assistantMessage.setAgentRunId(agentRunId);
         assistantMessage.setRole(ROLE_ASSISTANT);
         assistantMessage.setContent(content);
         assistantMessage.setPageContext(rawPageContextJson);

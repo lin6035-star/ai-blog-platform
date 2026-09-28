@@ -6,6 +6,7 @@ import com.hailin.blogsystem.ai.agent.AgentRuntimeRouteRegistry;
 import com.hailin.blogsystem.ai.agent.ArticleAgentRuntime;
 import com.hailin.blogsystem.ai.agent.GeneralAgentRuntime;
 import com.hailin.blogsystem.ai.agent.LearningAgentRuntime;
+import com.hailin.blogsystem.ai.agent.WalletAgentRuntime;
 import com.hailin.blogsystem.ai.planner.AgentPlannerSupport;
 import com.hailin.blogsystem.config.BlogAiProperties;
 import com.hailin.blogsystem.entity.AiSessions;
@@ -64,7 +65,8 @@ class AgentPlannerEvaluationTests {
         AgentRuntimeRouteRegistry routeRegistry = new AgentRuntimeRouteRegistry(
                 mock(LearningAgentRuntime.class),
                 mock(ArticleAgentRuntime.class),
-                mock(GeneralAgentRuntime.class)
+                mock(GeneralAgentRuntime.class),
+                mock(WalletAgentRuntime.class)
         );
         planner = new AgentPlannerSupport(
                 properties,

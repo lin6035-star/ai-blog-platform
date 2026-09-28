@@ -6,6 +6,7 @@ import com.hailin.blogsystem.ai.agent.AgentWriteActionService;
 import com.hailin.blogsystem.ai.agent.AgentWriteActionView;
 import com.hailin.blogsystem.ai.agent.ArticleAgentWriteActionExecutor;
 import com.hailin.blogsystem.ai.agent.LearningAgentWriteActionExecutor;
+import com.hailin.blogsystem.ai.agent.WalletAgentWriteActionExecutor;
 import com.hailin.blogsystem.ai.workflow.WorkflowActionLock;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.Articles;
@@ -15,8 +16,13 @@ import com.hailin.blogsystem.entity.vo.LearningPlansDetailVO;
 import com.hailin.blogsystem.exception.BusinessException;
 import com.hailin.blogsystem.mapper.AiAgentRunMapper;
 import com.hailin.blogsystem.mapper.LearningStageMapper;
+import com.hailin.blogsystem.entity.vo.RechargeOrderVO;
 import com.hailin.blogsystem.service.ArticlesService;
 import com.hailin.blogsystem.service.LearningPlansService;
+import com.hailin.blogsystem.service.WalletRechargeService;
+import com.hailin.blogsystem.service.WalletService;
+
+import java.math.BigDecimal;
 import com.hailin.blogsystem.utils.UserContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -102,6 +108,8 @@ class AgentWriteActionServiceTests {
     private WorkflowActionLock actionLock;
     private LearningPlansService learningPlansService;
     private ArticlesService articlesService;
+    private WalletRechargeService walletRechargeService;
+    private WalletService walletService;
     private AgentWriteActionService service;
 
     @BeforeEach
@@ -113,15 +121,19 @@ class AgentWriteActionServiceTests {
                 .thenReturn(new WorkflowActionLock.LockHandle(1L, "key", "token"));
         learningPlansService = mock(LearningPlansService.class);
         articlesService = mock(ArticlesService.class);
+        walletRechargeService = mock(WalletRechargeService.class);
+        walletService = mock(WalletService.class);
 
         // V3.6 壳化：壳只收公共骨架，域执行器注入各自域 mock service（行为断言全部平移不变）
         AgentWriteActionExecutor learningExecutor =
                 new LearningAgentWriteActionExecutor(learningStageMapper, learningPlansService);
         AgentWriteActionExecutor articleExecutor =
                 new ArticleAgentWriteActionExecutor(articlesService);
+        AgentWriteActionExecutor walletExecutor =
+                new WalletAgentWriteActionExecutor(walletRechargeService, walletService);
         service = new AgentWriteActionService(
                 runMapper, new ObjectMapper(), actionLock,
-                List.of(learningExecutor, articleExecutor)
+                List.of(learningExecutor, articleExecutor, walletExecutor)
         );
         UserContext.set(100L);
     }
@@ -611,5 +623,50 @@ class AgentWriteActionServiceTests {
         stage.setId(11L);
         stage.setTasks(tasksJson);
         return stage;
+    }
+
+    // ---------- 钱包域（2026-09-21） ----------
+
+    private static final String PROPOSAL_RECHARGE_CONTEXT = "{\"pendingWriteAction\":{"
+            + "\"actionType\":\"RECHARGE_WALLET\","
+            + "\"payYuan\":\"10\"}}";
+
+    /**
+     * 充值提案走一遍**解析点**。
+     *
+     * <p>这条锁的是 {@code AgentWriteActionService.parseWriteAction} 里那行
+     * {@code node.path("payYuan")}——漏写的话<b>编译器不会报错</b>（参数个数照样对），
+     * 表现是提案落库了但 confirm 时金额为 null。能抓到它的只有「真走一遍解析再执行」。
+     */
+    @Test
+    void confirmRechargeWalletParsesAmountAndExecutes() {
+        when(runMapper.selectById(1L)).thenReturn(
+                run(1L, "WAITING_WRITE_CONFIRM", PROPOSAL_RECHARGE_CONTEXT));
+        when(runMapper.update(any(AiAgentRun.class), any())).thenReturn(1);
+
+        RechargeOrderVO order = new RechargeOrderVO();
+        order.setOrderNo("W-TEST-1");
+        order.setCreditAmount(10_000L);
+        when(walletRechargeService.createCustomOrder(new BigDecimal("10"))).thenReturn(order);
+
+        String result = service.confirmWrite(1L);
+
+        // 解析出来的必须是 "10" 而不是 null——那就说明 parseWriteAction 漏写了 payYuan
+        verify(walletRechargeService).createCustomOrder(new BigDecimal("10"));
+        verify(walletRechargeService).pay("W-TEST-1");
+        assertThat(result).contains("到账");
+    }
+
+    /** 提案里没有金额时不执行任何写操作（executor 的必填校验兜住解析漏写的那种情况） */
+    @Test
+    void confirmRechargeWalletWithoutAmountIsRejected() {
+        when(runMapper.selectById(1L)).thenReturn(run(1L, "WAITING_WRITE_CONFIRM",
+                "{\"pendingWriteAction\":{\"actionType\":\"RECHARGE_WALLET\"}}"));
+        when(runMapper.update(any(AiAgentRun.class), any())).thenReturn(1);
+
+        assertThatThrownBy(() -> service.confirmWrite(1L))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("缺少充值金额");
+        verify(walletRechargeService, never()).createCustomOrder(any());
     }
 }

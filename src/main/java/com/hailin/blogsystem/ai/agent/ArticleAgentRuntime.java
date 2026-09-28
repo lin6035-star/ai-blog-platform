@@ -492,7 +492,7 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
             AgentWriteProposal proposal = new AgentWriteProposal(
                     AgentWriteProposal.TYPE_UPDATE_ARTICLE_TITLE,
                     null, null, null, false, newTitle.trim(),
-                    String.valueOf(targetId), article.getTitle()
+                    String.valueOf(targetId), article.getTitle(), null
             );
             String actionLabel = "提案将文章《" + article.getTitle() + "》标题改为《" + newTitle.trim() + "》";
             String finalAnswer = "已为你准备好将文章《" + article.getTitle() + "》标题改为《"
@@ -521,7 +521,7 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
         AgentWriteProposal proposal = new AgentWriteProposal(
                 hideDirection ? AgentWriteProposal.TYPE_HIDE_ARTICLE : AgentWriteProposal.TYPE_PUBLISH_ARTICLE,
                 null, null, null, false, null,
-                String.valueOf(targetId), article.getTitle()
+                String.valueOf(targetId), article.getTitle(), null
         );
         String actionLabel = "提案将文章《" + article.getTitle() + "》" + (hideDirection ? "设为隐藏" : "公开");
         String finalAnswer = "已为你准备好将文章《" + article.getTitle() + "》"

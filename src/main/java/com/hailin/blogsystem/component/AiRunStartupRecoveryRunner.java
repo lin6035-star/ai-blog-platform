@@ -1,11 +1,16 @@
 package com.hailin.blogsystem.component;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.hailin.blogsystem.entity.AiAgentRun;
+import com.hailin.blogsystem.entity.AiAgentStep;
 import com.hailin.blogsystem.entity.AiWorkflowRun;
+import com.hailin.blogsystem.entity.dto.AgentStepActionType;
 import com.hailin.blogsystem.entity.dto.AiAgentRunStatus;
+import com.hailin.blogsystem.entity.dto.AiAgentStepStatus;
 import com.hailin.blogsystem.entity.dto.AiWorkflowStatus;
 import com.hailin.blogsystem.mapper.AiAgentRunMapper;
+import com.hailin.blogsystem.mapper.AiAgentStepMapper;
 import com.hailin.blogsystem.mapper.AiWorkflowRunMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -14,6 +19,7 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 启动恢复：把遗留的 {@code RUNNING} 长任务标记为中断。
@@ -60,15 +66,20 @@ public class AiRunStartupRecoveryRunner implements ApplicationRunner {
 
     private final AiWorkflowRunMapper aiWorkflowRunMapper;
     private final AiAgentRunMapper aiAgentRunMapper;
+    private final AiAgentStepMapper aiAgentStepMapper;
 
     @Override
     public void run(ApplicationArguments args) {
         try {
+            List<Long> staleBatchRunIds = findStaleBatchRunIds();
             int workflows = markWorkflowRunsInterrupted();
             int agentRuns = markAgentRunsInterrupted();
+            int batchSteps = markBatchStepsInterrupted(staleBatchRunIds);
+            normalizeBatchRunCounters(staleBatchRunIds);
             if (workflows + agentRuns > 0) {
-                log.warn("[AI-RECOVERY] 启动恢复：遗留 RUNNING 已标记为中断 workflowRuns={} agentRuns={}",
-                        workflows, agentRuns);
+                log.warn("[AI-RECOVERY] 启动恢复：遗留 RUNNING 已标记为中断 "
+                                + "workflowRuns={} agentRuns={} articleBatchSteps={}",
+                        workflows, agentRuns, batchSteps);
             }
         } catch (RuntimeException e) {
             log.error("[AI-RECOVERY] 启动恢复失败。DB 里会继续留着 RUNNING 记录"
@@ -93,6 +104,57 @@ public class AiRunStartupRecoveryRunner implements ApplicationRunner {
                         .eq(AiAgentRun::getStatus, AiAgentRunStatus.RUNNING.name())
                         .set(AiAgentRun::getStatus, AiAgentRunStatus.FAILED.name())
                         .set(AiAgentRun::getErrorMessage, INTERRUPTED_MESSAGE)
+                        .set(AiAgentRun::getUpdatedAt, LocalDateTime.now()));
+    }
+
+    private List<Long> findStaleBatchRunIds() {
+        List<Long> runningRunIds = aiAgentRunMapper.selectList(
+                        new LambdaQueryWrapper<AiAgentRun>()
+                                .select(AiAgentRun::getId)
+                                .eq(AiAgentRun::getStatus, AiAgentRunStatus.RUNNING.name()))
+                .stream()
+                .map(AiAgentRun::getId)
+                .toList();
+        if (runningRunIds.isEmpty()) {
+            return List.of();
+        }
+        return aiAgentStepMapper.selectList(
+                        new LambdaQueryWrapper<AiAgentStep>()
+                                .select(AiAgentStep::getAgentRunId)
+                                .in(AiAgentStep::getAgentRunId, runningRunIds)
+                                .eq(AiAgentStep::getActionType,
+                                        AgentStepActionType.ARTICLE_INTERACTION_BATCH.name())
+                                .eq(AiAgentStep::getStatus, AiAgentStepStatus.RUNNING.name()))
+                .stream()
+                .map(AiAgentStep::getAgentRunId)
+                .distinct()
+                .toList();
+    }
+
+    private int markBatchStepsInterrupted(List<Long> staleBatchRunIds) {
+        if (staleBatchRunIds.isEmpty()) {
+            return 0;
+        }
+        return aiAgentStepMapper.update(null,
+                new LambdaUpdateWrapper<AiAgentStep>()
+                        .in(AiAgentStep::getAgentRunId, staleBatchRunIds)
+                        .eq(AiAgentStep::getActionType,
+                                AgentStepActionType.ARTICLE_INTERACTION_BATCH.name())
+                        .eq(AiAgentStep::getStatus, AiAgentStepStatus.RUNNING.name())
+                        .set(AiAgentStep::getStatus, AiAgentStepStatus.FAILED.name())
+                        .set(AiAgentStep::getErrorMessage, INTERRUPTED_MESSAGE));
+    }
+
+    private void normalizeBatchRunCounters(List<Long> staleBatchRunIds) {
+        if (staleBatchRunIds.isEmpty()) {
+            return;
+        }
+        aiAgentRunMapper.update(null,
+                new LambdaUpdateWrapper<AiAgentRun>()
+                        .in(AiAgentRun::getId, staleBatchRunIds)
+                        .eq(AiAgentRun::getStatus, AiAgentRunStatus.FAILED.name())
+                        .set(AiAgentRun::getCurrentStep, 1)
+                        .set(AiAgentRun::getUsedSteps, 1)
                         .set(AiAgentRun::getUpdatedAt, LocalDateTime.now()));
     }
 }

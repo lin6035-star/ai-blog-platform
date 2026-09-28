@@ -44,6 +44,7 @@ public class AiModelServiceImpl implements AiModelService {
     private final AiUserProfileTools aiUserProfileTools;
     private final AiIntentClassifier aiIntentClassifier;
     private final AiLearningDashboardTool aiLearningDashboardTool;
+    private final WalletBalanceTool walletBalanceTool;
 
     /**
      * 普通聊天的输出上限。
@@ -55,13 +56,14 @@ public class AiModelServiceImpl implements AiModelService {
     private final int chatMaxTokens;
 
 
-    public AiModelServiceImpl(ChatClient.Builder chatClientBuilder, BlogAiProperties blogAiProperties, AiArticleTools aiArticleTools, AiNavigationToolsFactory aiNavigationToolsFactory, AiEditorToolFactory aiEditorToolFactory, AiArticleActionToolsFactory aiArticleActionToolsFactory, AiUserProfileTools aiUserProfileTools, AiIntentClassifier aiIntentClassifier, AiLearningDashboardTool aiLearningDashboardTool) {
+    public AiModelServiceImpl(ChatClient.Builder chatClientBuilder, BlogAiProperties blogAiProperties, AiArticleTools aiArticleTools, AiNavigationToolsFactory aiNavigationToolsFactory, AiEditorToolFactory aiEditorToolFactory, AiArticleActionToolsFactory aiArticleActionToolsFactory, AiUserProfileTools aiUserProfileTools, AiIntentClassifier aiIntentClassifier, AiLearningDashboardTool aiLearningDashboardTool, WalletBalanceTool walletBalanceTool) {
         this.aiArticleTools = aiArticleTools;
         this.aiEditorToolFactory = aiEditorToolFactory;
         this.aiArticleActionToolsFactory = aiArticleActionToolsFactory;
         this.aiUserProfileTools = aiUserProfileTools;
         this.aiIntentClassifier = aiIntentClassifier;
         this.aiLearningDashboardTool = aiLearningDashboardTool;
+        this.walletBalanceTool = walletBalanceTool;
         this.chatClient = chatClientBuilder
                 .defaultSystem(blogAiProperties.getSystemPrompt())
                 .build();
@@ -287,7 +289,11 @@ public class AiModelServiceImpl implements AiModelService {
         if (prompt != null && prompt.isLearningDashboardToolEnabled()) {
             return new ToolCallback[]{aiLearningDashboardTool};
         }
-        return new ToolCallback[]{};
+        // 钱包余额查询：默认分支就是非 dashboard 模式所有聊天（普通 + 文章）的出口，
+        // 所以挂一行就够了——不需要新开关、也不用碰上面那三个 buildTools 数组。
+        // 代价是每次聊天的 tool schema 多几十 token，换掉的是「新意图 + Planner 分支 +
+        // toolName 透传」那一整套（「我余额多少」是 GENERAL_CHAT，Planner 不插手）
+        return new ToolCallback[]{walletBalanceTool};
     }
 
 

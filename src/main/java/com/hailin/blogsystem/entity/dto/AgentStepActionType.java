@@ -33,5 +33,6 @@ public enum AgentStepActionType {
     ASK_USER,
     FINAL_ANSWER,
     SUGGEST_WORKFLOW,
-    SUGGEST_WRITE
+    SUGGEST_WRITE,
+    ARTICLE_INTERACTION_BATCH
 }

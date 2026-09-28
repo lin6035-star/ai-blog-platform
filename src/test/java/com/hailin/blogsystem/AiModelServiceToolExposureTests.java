@@ -9,9 +9,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.annotation.Tool;
 
 import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -29,6 +31,7 @@ class AiModelServiceToolExposureTests {
     private AiArticleActionTools articleActionTools;
     private AiUserProfileTools userProfileTools;
     private AiLearningDashboardTool dashboardTool;
+    private WalletBalanceTool walletBalanceTool;
     private AiNavigationToolsFactory navigationToolsFactory;
     private AiEditorToolFactory editorToolFactory;
     private AiArticleActionToolsFactory articleActionToolsFactory;
@@ -63,6 +66,7 @@ class AiModelServiceToolExposureTests {
 
         userProfileTools = mock(AiUserProfileTools.class);
         dashboardTool = mock(AiLearningDashboardTool.class);
+        walletBalanceTool = mock(WalletBalanceTool.class);
 
         service = new AiModelServiceImpl(
                 builder,
@@ -73,7 +77,8 @@ class AiModelServiceToolExposureTests {
                 articleActionToolsFactory,
                 userProfileTools,
                 mock(AiIntentClassifier.class),
-                dashboardTool
+                dashboardTool,
+                walletBalanceTool
         );
     }
 
@@ -96,7 +101,8 @@ class AiModelServiceToolExposureTests {
         Object[] tools = invokeBuildTools(prompt);
         ToolCallback[] callbacks = invokeBuildToolCallbacks(prompt);
 
-        assertThat(callbacks).isEmpty();
+        // 钱包余额查询挂在默认分支上——它是只读的，和不带参数的普通聊天共用同一条出口
+        assertThat(callbacks).containsExactly(walletBalanceTool);
         assertThat(tools).containsExactly(
                 navigationTools,
                 editorTools,
@@ -125,6 +131,25 @@ class AiModelServiceToolExposureTests {
                 .doesNotContain("AiLearningPlanTools", "QueryLearningPlansTool");
     }
 
+    @Test
+    void onlyClientSideArticleActionsRemainExposedAsTools() throws Exception {
+        for (String methodName : List.of(
+                "likeArticle",
+                "unlikeArticle",
+                "favoriteArticle",
+                "unfavoriteArticle",
+                "followAuthor",
+                "unfollowAuthor")) {
+            assertThat(toolAnnotation(methodName))
+                    .as("服务端动作 %s 不得继续暴露给回答模型", methodName)
+                    .isNull();
+        }
+
+        assertThat(toolAnnotation("commentArticle", String.class, String.class)).isNotNull();
+        assertThat(toolAnnotation("scrollToComments")).isNotNull();
+        assertThat(toolAnnotation("copyArticleLink")).isNotNull();
+    }
+
     private Object[] invokeBuildTools(AiPrompt prompt) throws Exception {
         Method method = AiModelServiceImpl.class.getDeclaredMethod(
                 "buildTools",
@@ -141,5 +166,12 @@ class AiModelServiceToolExposureTests {
         Method method = AiModelServiceImpl.class.getDeclaredMethod("buildToolCallbacks", AiPrompt.class);
         method.setAccessible(true);
         return (ToolCallback[]) method.invoke(service, prompt);
+    }
+
+    private Tool toolAnnotation(String methodName, Class<?>... parameterTypes) throws Exception {
+        Class<?>[] types = parameterTypes.length == 0
+                ? new Class<?>[]{String.class}
+                : parameterTypes;
+        return AiArticleActionTools.class.getDeclaredMethod(methodName, types).getAnnotation(Tool.class);
     }
 }

@@ -242,12 +242,15 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
                                 - LEARNING_ASSIST
                                 - LEARNING_AGENT
                                 - ARTICLE_AGENT
+                                - WALLET_AGENT
 
                                 当用户只是问普通技术问题、闲聊、解释概念时，输出 GENERAL_CHAT。
                 
                                 当 pageType 是 profile 或 public-profile，且用户询问这个人/自己/我的主页、主要信息、发过什么文章、点赞收藏评论情况时，输出 USER_PROFILE_INSIGHT，并填写 userId（从页面上下文中获取）。
                 
-                                当 pageType 是 article-detail，且用户要求点赞、取消点赞、收藏、取消收藏、关注作者、取消关注作者、分享、复制链接、跳到评论区时，输出 ARTICLE_ACTION，并填写 actionType。
+                                当 pageType 是 article-detail，且用户要求点赞、取消点赞、收藏、取消收藏、关注作者、取消关注作者、分享、复制链接、跳到评论区时，输出 ARTICLE_ACTION。
+                                ARTICLE_ACTION 必须填写 requestedActions 数组，按用户表达顺序列出全部动作；actionType 仅兼容单动作，取数组第一项。
+                                例如“点赞并收藏”必须输出 requestedActions=["likeArticle","favoriteArticle"]，不能只保留一个。
                                 当 pageType 是 article-detail，且用户询问“这篇文章讲了什么”“总结这篇文章”“这篇文章重点是什么”“这篇文章里的某个内容是什么意思”“分析当前文章”时，输出 ARTICLE_DETAIL_QA。
                                 当 pageType 是 article-detail，且用户要求回到顶部、回到文章开头、滚动到顶部时，输出 ARTICLE_ACTION，actionType=scrollToTop。
                                 注意区分：“看看开头”“先看开头再看结尾”是**阅读文章内容**，不是滚动动作；
@@ -285,7 +288,7 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
                                   只要句子里有多个并列的子目标，即使每个子目标单独看都像 QA，也判 ARTICLE_AGENT
                                 - 明确要求结合长期记忆 / 写作偏好 -> ARTICLE_AGENT
                                  
-                                actionType 可选：likeArticle, unlikeArticle, favoriteArticle, unfavoriteArticle, followAuthor, unfollowAuthor, copyArticleLink, scrollToComments, saveDraft, publish, fillArticle, scrollToTop。
+                                actionType / requestedActions 元素可选：likeArticle, unlikeArticle, favoriteArticle, unfavoriteArticle, followAuthor, unfollowAuthor, copyArticleLink, scrollToComments, saveDraft, publish, fillArticle, scrollToTop。
 
                                 当用户要求跳转页面、打开页面、进入页面、回到某页时，输出 NAVIGATE。
                                 当 pageType 是 article-detail，且用户要求查看该作者或者进入该作者的主页时，输出 NAVIGATE。
@@ -654,7 +657,7 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
 
                                 页面动作规则：
 
-                                - ARTICLE_ACTION、NAVIGATE、EDITOR_ACTION 都属于客户端页面动作。
+                                - ARTICLE_ACTION 中点赞/收藏/关注六类低风险写动作会由后端执行；滚动、复制链接等仍属于客户端页面动作。
                                 - 这三类意图的 suggestedAction 固定输出 CHAT。
                                 - 这三类意图的 suggestedWorkflowType 必须输出 null。
                                 - 是否真正执行，由后端 AgentPlannerSupport 决定。
@@ -666,7 +669,15 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
                 
                                 只有 pageType 是 editor-new 或 editor-edit 时，才输出 EDITOR_ACTION。
                                 如果用户不在编辑器页面却要求保存或发布，仍然输出 EDITOR_ACTION，让后端/前端提示用户先进入编辑器。
-                                
+
+                                当用户要求给钱包充值、充值额度、充钱、充 N 元或 N 块时，输出 WALLET_AGENT，
+                                suggestedAction 固定输出 AGENT。
+                                ⚠️ 金额不用你提取，也不要在输出里加任何金额字段——后端会自己从用户原话里解析。
+
+                                反例（同样重要）：问余额、够不够、还差多少、还能用多久，这些都是**查询**不是充值，
+                                输出 GENERAL_CHAT——**即使句子里带数字**（比如「我余额够1000吗」「充值比例是多少」）。
+                                只有用户明确表达「要充钱」的意思时才输出 WALLET_AGENT。
+
                                 只输出纯 JSON，禁止 markdown、代码块或任何额外文本。
                                 规则、示例、注释这些说明性文字一律禁止出现在输出里。
                                 输出必须直接以 { 开始，不能有任何前缀文字。

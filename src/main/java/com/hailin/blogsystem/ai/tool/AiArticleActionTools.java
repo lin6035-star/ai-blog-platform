@@ -10,7 +10,6 @@ public class AiArticleActionTools {
     private final String requestId;
     private final AiToolActionRegistry registry;
 
-    @Tool(description = "在文章详情页点赞当前文章。用户说点赞这篇文章，喜欢该文章是调用")
     public String likeArticle(
             @ToolParam(description = "当前文章的ID，来自页面上下文 articleId") String articleId
     ){
@@ -22,7 +21,6 @@ public class AiArticleActionTools {
         return "已准备点赞当前文章";
     }
 
-    @Tool(description = "在文章详情页取消点赞当前文章。用户说取消当前文章时调用")
     public String unlikeArticle(
             @ToolParam(description = "当前文章ID，来自页面上下文articleId") String articleId
     ){
@@ -34,7 +32,6 @@ public class AiArticleActionTools {
     }
 
 
-    @Tool(description = "在文章详情页收藏当前文章。用户说收藏这篇文章、加入收藏时调用。")
     public String favoriteArticle(
             @ToolParam(description = "当前文章ID，来自页面上下文 articleId") String articleId
     ) {
@@ -45,7 +42,6 @@ public class AiArticleActionTools {
         return "已准备收藏当前文章。";
     }
 
-    @Tool(description = "在文章详情页取消收藏当前文章。用户说取消收藏这篇文章时调用。")
     public String unfavoriteArticle(
             @ToolParam(description = "当前文章ID，来自页面上下文 articleId") String articleId
     ) {
@@ -99,7 +95,6 @@ public class AiArticleActionTools {
     }
 
 
-    @Tool(description = "在文章详情页关注当前文章作者。用户说关注作者、关注这个作者时调用。")
     public String followAuthor(
             @ToolParam(description = "当前文章ID，来自页面上下文 articleId") String articleId
     ) {
@@ -112,7 +107,6 @@ public class AiArticleActionTools {
         return "已准备关注当前文章作者。";
     }
 
-    @Tool(description = "在文章详情页取消关注当前文章作者。用户说取消关注作者、不再关注这个作者时调用。")
     public String unfollowAuthor(
             @ToolParam(description = "当前文章ID，来自页面上下文 articleId") String articleId
     ) {

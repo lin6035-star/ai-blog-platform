@@ -18,7 +18,8 @@ public record AgentWriteProposal(
         boolean done,
         String newTitle,
         String articleId,
-        String articleTitle
+        String articleTitle,
+        String payYuan
 ) {
 
     /** 写动作类型（V2.4）：勾选 / 取消勾选已有任务（done 生效） */
@@ -47,4 +48,17 @@ public record AgentWriteProposal(
 
     /** 写动作类型（V3.7，文章域可见性批次）：把当前自己的文章公开/取消隐藏（前置 = 当前 HIDDEN）。 */
     public static final String TYPE_PUBLISH_ARTICLE = "PUBLISH_ARTICLE";
+
+    /**
+     * 写动作类型（2026-09-21，钱包域）：给钱包充值自定义金额。
+     *
+     * <p>{@code payYuan} = 充值金额（**元**，整数串）。它是<b>从用户原话里确定性解析出来的</b>
+     * （见 {@code WalletAmountParser}），不是 LLM 给的——金额是事实不是语义，
+     * 让它过一遍 LLM 就多一次「模型编一个用户没说的数字、卡片就弹出来」的机会。
+     *
+     * <p>其余字段对钱包域无意义（null / false）。**到账额度刻意不在这里快照**：
+     * 它是兑换比例（配置）派生出来的，提案时刻算好、confirm 时刻配置可能已经变了，
+     * 卡片上说「到账 10000」而实际到账 20000 是没法解释的。权威数字由执行器写在结果文案里。
+     */
+    public static final String TYPE_RECHARGE_WALLET = "RECHARGE_WALLET";
 }

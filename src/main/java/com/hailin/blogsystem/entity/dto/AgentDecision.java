@@ -67,6 +67,9 @@ public class AgentDecision {
      */
     private String clientActionType;
 
+    /** 后端已校验的低风险文章交互批次；客户端不得再次执行这些写操作。 */
+    private ArticleActionBatch articleActionBatch;
+
     /**
      * 后端命中的确定性规则。
      * 用于解释为什么允许或拒绝某个动作。

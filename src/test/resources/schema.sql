@@ -99,14 +99,16 @@ CREATE TABLE IF NOT EXISTS article_likes (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     article_id BIGINT NOT NULL,
     user_id BIGINT NOT NULL,
-    create_time TIMESTAMP
+    create_time TIMESTAMP,
+    CONSTRAINT uk_article_like_user UNIQUE (article_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS article_favorites (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     article_id BIGINT NOT NULL,
     user_id BIGINT NOT NULL,
-    create_time TIMESTAMP
+    create_time TIMESTAMP,
+    CONSTRAINT uk_article_favorite_user UNIQUE (article_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS ai_sessions (
@@ -145,6 +147,9 @@ CREATE TABLE IF NOT EXISTS ai_messages (
     token_count BIGINT,
     created_at TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_ai_messages_agent_run_id
+    ON ai_messages (agent_run_id);
 
 CREATE TABLE IF NOT EXISTS ai_workflow_runs (
     id BIGINT PRIMARY KEY,

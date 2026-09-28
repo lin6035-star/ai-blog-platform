@@ -81,7 +81,7 @@ spring:
       read-timeout: 60s
       chat:
         options:
-          model: ${AI_CHAT_MODEL:qwen3.6-flash}
+          model: ${AI_CHAT_MODEL:qwen3.7-flash}
       embedding:
         options:
           model: text-embedding-v3

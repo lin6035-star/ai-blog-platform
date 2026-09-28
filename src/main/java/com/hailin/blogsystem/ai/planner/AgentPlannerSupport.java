@@ -12,6 +12,8 @@ import com.hailin.blogsystem.entity.dto.AiIntent;
 import com.hailin.blogsystem.entity.dto.CtaKind;
 import com.hailin.blogsystem.entity.dto.AiWorkflowType;
 import com.hailin.blogsystem.entity.dto.PageContextDTO;
+import com.hailin.blogsystem.entity.dto.ArticleActionBatch;
+import com.hailin.blogsystem.entity.dto.ArticleInteractionAction;
 import com.hailin.blogsystem.ai.agent.AgentRuntimeRouteRegistry;
 import com.hailin.blogsystem.ai.agent.ArticleSessionAnchorService;
 import com.hailin.blogsystem.mapper.AiWorkflowRunMapper;
@@ -19,6 +21,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -39,6 +42,22 @@ public class AgentPlannerSupport {
             "unfavoriteArticle",
             "followAuthor",
             "unfollowAuthor",
+            "commentArticle",
+            "copyArticleLink",
+            "scrollToComments",
+            "scrollToTop"
+    );
+
+    private static final Set<String> SERVER_ARTICLE_ACTION_TYPES = Set.of(
+            "likeArticle",
+            "unlikeArticle",
+            "favoriteArticle",
+            "unfavoriteArticle",
+            "followAuthor",
+            "unfollowAuthor"
+    );
+
+    private static final Set<String> CLIENT_ARTICLE_ACTION_TYPES = Set.of(
             "commentArticle",
             "copyArticleLink",
             "scrollToComments",
@@ -86,6 +105,14 @@ public class AgentPlannerSupport {
             Long userId,
             AiSessions session
     ) {
+        if (hasMixedServerActionAndAnalysisRequest(message)) {
+            return cta(
+                    intent == null ? null : intent.getIntent(),
+                    List.of("mixed_article_action_analysis"),
+                    "文章写动作与分析诉求不能在第一刀中混合执行",
+                    CtaKind.AMBIGUOUS_REQUEST
+            );
+        }
         /*
          * Agent Runtime 路由（LEARNING_AGENT）。
          *
@@ -106,6 +133,17 @@ public class AgentPlannerSupport {
          */
         if (isArticleAgentIntent(intent)) {
             return decideArticleAgent(intent, pageContext, session, userId);
+        }
+
+        /*
+         * 钱包 Agent 路由（2026-09-21，WALLET_AGENT）：查余额 / 充值。
+         *
+         * ⚠️ 位置是必须的——**排在 isLearningDomain 之前**。分类器若把「充值」这类词
+         * 顺手幻觉出一个 suggestedWorkflowType，后面的工作流管道会先把它截走，
+         * 充值就永远走不到钱包域了。
+         */
+        if (isWalletAgentIntent(intent)) {
+            return decideWalletAgent(intent);
         }
 
         /*
@@ -142,7 +180,7 @@ public class AgentPlannerSupport {
         }
 
         if ("ARTICLE_ACTION".equals(intent.getIntent())) {
-            return decideArticleAction(intent, pageContext, userId);
+            return decideArticleAction(message, intent, pageContext, userId);
         }
 
         if ("NAVIGATE".equals(intent.getIntent())) {
@@ -691,6 +729,39 @@ public class AgentPlannerSupport {
                 && agentRuntimeRouteRegistry.articleAgentIntents().contains(intent.getIntent());
     }
 
+    /** 判断是否进入钱包 Agent Runtime（WALLET_AGENT，2026-09-21）。名单单点在 AgentRuntimeRouteRegistry。 */
+    private boolean isWalletAgentIntent(AiIntent intent) {
+        return intent != null
+                && agentRuntimeRouteRegistry.walletAgentIntents().contains(intent.getIntent());
+    }
+
+    /**
+     * 钱包域裁决（照 {@link #decideLearningAgent} 的形态）。
+     *
+     * <p>刻意**不在这里解析金额**——解析器只能有一个调用点（{@code WalletAgentStepDecider}），
+     * 在两个地方各解析一次迟早会漂。这里只判「该不该进这个域」。
+     *
+     * <p>游客不在这里挡：让 {@code AgentAction.AGENT} 流下去，由聊天链路的游客门
+     * （{@code buildGuestDecisionContent}）给出「充值需要登录后使用」的文案。
+     * 在这里降级成 CHAT 的话，游客只会收到一句普通聊天的回复。
+     */
+    private AgentDecision decideWalletAgent(AiIntent intent) {
+        List<String> ruleHits = new ArrayList<>();
+        if (isCtaSuggestion(intent)) {
+            return cta(intent.getIntent(), ruleHits, "分类器建议 CTA，等待用户进一步澄清", CtaKind.AMBIGUOUS_REQUEST);
+        }
+        if (!"AGENT".equals(intent.getSuggestedAction())) {
+            return AgentDecision.builder().action(AgentAction.CHAT).intent(intent.getIntent())
+                    .retrievalMode(RETRIEVAL_NONE).ruleHits(ruleHits)
+                    .reason("分类器意图 WALLET_AGENT 但建议不一致，走普通聊天").build();
+        }
+        ruleHits.add("wallet_agent_intent");
+        ruleHits.add("wallet_agent_suggestion_valid");
+        return AgentDecision.builder().action(AgentAction.AGENT).intent(intent.getIntent())
+                .retrievalMode(RETRIEVAL_NONE).ruleHits(ruleHits)
+                .reason("分类器主判 WALLET_AGENT，进入 Agent Runtime").build();
+    }
+
     /**
      * 是否进入通用 Agent Runtime（GENERAL_CHAT + needsThinking，V3）。
      *
@@ -894,6 +965,7 @@ public class AgentPlannerSupport {
     }
 
     private AgentDecision decideArticleAction(
+            String message,
             AiIntent intent,
             PageContextDTO pageContext,
             Long userId
@@ -936,9 +1008,9 @@ public class AgentPlannerSupport {
             );
         }
 
-        String actionType = trimToNull(intent.getActionType());
-
-        if (!ARTICLE_ACTION_TYPES.contains(actionType)) {
+        List<String> requestedActions = normalizeRequestedActions(intent);
+        if (requestedActions.isEmpty()
+                || requestedActions.stream().anyMatch(action -> !ARTICLE_ACTION_TYPES.contains(action))) {
             return cta(
                     intent.getIntent(),
                     ruleHits,
@@ -960,6 +1032,69 @@ public class AgentPlannerSupport {
                     "缺少有效的文章 ID，不能执行文章动作"
             );
         }
+
+        boolean hasServerAction = requestedActions.stream().anyMatch(SERVER_ARTICLE_ACTION_TYPES::contains);
+        boolean hasClientAction = requestedActions.stream().anyMatch(CLIENT_ARTICLE_ACTION_TYPES::contains);
+        if (hasServerAction && hasClientAction) {
+            return cta(
+                    intent.getIntent(),
+                    ruleHits,
+                    "服务端动作与客户端动作不能在同一批次执行"
+            );
+        }
+
+        if (hasServerAction) {
+            Set<String> explicitActions = detectExplicitServerActions(message);
+            if (!requestedActions.containsAll(explicitActions)) {
+                ruleHits.add("article_action_candidate_incomplete");
+                return cta(
+                        intent.getIntent(),
+                        ruleHits,
+                        "分类器遗漏了用户明确要求的文章动作"
+                );
+            }
+            if (hasOppositeActions(requestedActions)) {
+                ruleHits.add("article_action_conflict");
+                return cta(
+                        intent.getIntent(),
+                        ruleHits,
+                        "同一请求包含相反的文章动作"
+                );
+            }
+            if (userId == null) {
+                return cta(
+                        intent.getIntent(),
+                        ruleHits,
+                        "该文章动作需要登录"
+                );
+            }
+
+            List<ArticleInteractionAction> actions = requestedActions.stream()
+                    .map(ArticleInteractionAction::fromClassifierValue)
+                    .flatMap(java.util.Optional::stream)
+                    .toList();
+            ruleHits.add("article_detail_context_valid");
+            ruleHits.add("article_action_batch_valid");
+            ruleHits.add("article_id_valid");
+            return AgentDecision.builder()
+                    .action(AgentAction.CHAT)
+                    .intent(intent.getIntent())
+                    .articleActionBatch(new ArticleActionBatch(Long.valueOf(articleId), actions))
+                    .retrievalMode(RETRIEVAL_NONE)
+                    .ruleHits(ruleHits)
+                    .reason("文章服务端动作批次校验通过")
+                    .build();
+        }
+
+        if (requestedActions.size() != 1) {
+            return cta(
+                    intent.getIntent(),
+                    ruleHits,
+                    "第一刀不编排多个客户端动作"
+            );
+        }
+
+        String actionType = requestedActions.get(0);
 
         if ("commentArticle".equals(actionType)
                 && trimToNull(intent.getContent()) == null) {
@@ -990,6 +1125,82 @@ public class AgentPlannerSupport {
                 .ruleHits(ruleHits)
                 .reason("页面上下文、文章动作和文章 ID 校验通过")
                 .build();
+    }
+
+    private List<String> normalizeRequestedActions(AiIntent intent) {
+        LinkedHashSet<String> normalized = new LinkedHashSet<>();
+        if (intent.getRequestedActions() != null) {
+            for (String action : intent.getRequestedActions()) {
+                String value = trimToNull(action);
+                if (value != null) {
+                    normalized.add(value);
+                }
+            }
+        }
+        String legacyAction = trimToNull(intent.getActionType());
+        if (normalized.isEmpty() && legacyAction != null) {
+            normalized.add(legacyAction);
+        }
+        return List.copyOf(normalized);
+    }
+
+    private boolean hasOppositeActions(List<String> actions) {
+        return containsBoth(actions, "likeArticle", "unlikeArticle")
+                || containsBoth(actions, "favoriteArticle", "unfavoriteArticle")
+                || containsBoth(actions, "followAuthor", "unfollowAuthor");
+    }
+
+    private boolean containsBoth(List<String> actions, String first, String second) {
+        return actions.contains(first) && actions.contains(second);
+    }
+
+    private Set<String> detectExplicitServerActions(String message) {
+        LinkedHashSet<String> actions = new LinkedHashSet<>();
+        if (message == null) {
+            return actions;
+        }
+        String normalized = message.replaceAll("\\s+", "");
+        boolean unlike = normalized.contains("取消点赞") || normalized.contains("不再点赞");
+        boolean unfavorite = normalized.contains("取消收藏") || normalized.contains("不再收藏");
+        boolean unfollow = normalized.contains("取消关注") || normalized.contains("不再关注");
+        if (unlike) {
+            actions.add("unlikeArticle");
+        } else if (normalized.contains("点赞")) {
+            actions.add("likeArticle");
+        }
+        if (unfavorite) {
+            actions.add("unfavoriteArticle");
+        } else if (normalized.contains("收藏")) {
+            actions.add("favoriteArticle");
+        }
+        if (unfollow) {
+            actions.add("unfollowAuthor");
+        } else if (normalized.contains("关注作者") || normalized.contains("关注这个作者")) {
+            actions.add("followAuthor");
+        }
+        return actions;
+    }
+
+    private boolean hasMixedServerActionAndAnalysisRequest(String message) {
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.replaceAll("\\s+", "");
+        boolean explicitCommand = normalized.contains("帮我点赞")
+                || normalized.contains("给这篇文章点赞")
+                || normalized.contains("点赞这篇文章")
+                || normalized.contains("帮我收藏")
+                || normalized.contains("收藏这篇文章")
+                || normalized.contains("关注这个作者")
+                || normalized.contains("关注作者")
+                || normalized.contains("取消点赞")
+                || normalized.contains("取消收藏")
+                || normalized.contains("取消关注");
+        boolean analysisRequest = normalized.contains("写得怎么样")
+                || normalized.contains("分析这篇文章")
+                || normalized.contains("评价这篇文章")
+                || normalized.contains("看看这篇文章");
+        return explicitCommand && analysisRequest;
     }
 
     private AgentDecision decideNavigate(

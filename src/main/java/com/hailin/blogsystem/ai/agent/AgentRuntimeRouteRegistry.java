@@ -36,20 +36,25 @@ public class AgentRuntimeRouteRegistry {
     private final Map<String, AgentRoute> routesByIntent;
     private final Set<String> learningAgentIntents;
     private final Set<String> articleAgentIntents;
+    private final Set<String> walletAgentIntents;
 
     public AgentRuntimeRouteRegistry(
             LearningAgentRuntime learningAgentRuntime,
             ArticleAgentRuntime articleAgentRuntime,
-            GeneralAgentRuntime generalAgentRuntime
+            GeneralAgentRuntime generalAgentRuntime,
+            WalletAgentRuntime walletAgentRuntime
     ) {
         this.routesByIntent = List.of(
                 new AgentRoute("LEARNING_AGENT", learningAgentRuntime, "暂时无法整理学习建议，请稍后重试。"),
                 new AgentRoute("ARTICLE_AGENT", articleAgentRuntime, "暂时无法分析文章，请稍后重试。"),
-                new AgentRoute("GENERAL_CHAT", generalAgentRuntime, "暂时无法结合你的情况回答，请稍后重试。")
+                new AgentRoute("GENERAL_CHAT", generalAgentRuntime, "暂时无法结合你的情况回答，请稍后重试。"),
+                // 第 4 个域（2026-09-21）：查余额 / 充值。决策器不调 LLM，见 WalletAgentStepDecider
+                new AgentRoute("WALLET_AGENT", walletAgentRuntime, "暂时无法处理充值，请稍后重试。")
         ).stream().collect(Collectors.toUnmodifiableMap(AgentRoute::intent, route -> route));
         // 判定名单按 runtime 身份派生（不重复写 intent 名；通用域名单含判定逻辑，留在 Planner）
         this.learningAgentIntents = intentsFor(LearningAgentRuntime.class);
         this.articleAgentIntents = intentsFor(ArticleAgentRuntime.class);
+        this.walletAgentIntents = intentsFor(WalletAgentRuntime.class);
     }
 
     /** 按 intent 查 runtime；未登记返回 null（调用方显式处理，绝不静默兜底） */
@@ -77,6 +82,11 @@ public class AgentRuntimeRouteRegistry {
     /** 文章域 AGENT intent 名单（Planner isArticleAgentIntent 查它） */
     public Set<String> articleAgentIntents() {
         return articleAgentIntents;
+    }
+
+    /** 钱包域 AGENT intent 名单（Planner isWalletAgentIntent 查它） */
+    public Set<String> walletAgentIntents() {
+        return walletAgentIntents;
     }
 
     private AgentRoute routeOf(String intent) {

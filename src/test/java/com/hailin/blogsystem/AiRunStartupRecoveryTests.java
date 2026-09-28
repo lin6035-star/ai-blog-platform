@@ -2,10 +2,14 @@ package com.hailin.blogsystem;
 
 import com.hailin.blogsystem.component.AiRunStartupRecoveryRunner;
 import com.hailin.blogsystem.entity.AiAgentRun;
+import com.hailin.blogsystem.entity.AiAgentStep;
 import com.hailin.blogsystem.entity.AiWorkflowRun;
+import com.hailin.blogsystem.entity.dto.AgentStepActionType;
 import com.hailin.blogsystem.entity.dto.AiAgentRunStatus;
+import com.hailin.blogsystem.entity.dto.AiAgentStepStatus;
 import com.hailin.blogsystem.entity.dto.AiWorkflowStatus;
 import com.hailin.blogsystem.mapper.AiAgentRunMapper;
+import com.hailin.blogsystem.mapper.AiAgentStepMapper;
 import com.hailin.blogsystem.mapper.AiWorkflowRunMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -43,12 +47,18 @@ class AiRunStartupRecoveryTests {
     @Autowired
     private AiAgentRunMapper aiAgentRunMapper;
 
+    @Autowired
+    private AiAgentStepMapper aiAgentStepMapper;
+
     private final List<Long> insertedWorkflowIds = new ArrayList<>();
     private final List<Long> insertedAgentRunIds = new ArrayList<>();
 
     @AfterEach
     void cleanup() {
         insertedWorkflowIds.forEach(aiWorkflowRunMapper::deleteById);
+        insertedAgentRunIds.forEach(runId -> aiAgentStepMapper.delete(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<AiAgentStep>()
+                        .eq(AiAgentStep::getAgentRunId, runId)));
         insertedAgentRunIds.forEach(aiAgentRunMapper::deleteById);
         insertedWorkflowIds.clear();
         insertedAgentRunIds.clear();
@@ -140,6 +150,45 @@ class AiRunStartupRecoveryTests {
                 .isEqualTo(AiWorkflowStatus.COMPLETED.name());
     }
 
+    @Test
+    void closesOnlyRunningBatchStepsAndPreservesPersistedResults() {
+        Long batchRunId = insertAgentRun(AiAgentRunStatus.RUNNING.name());
+        Long otherRunId = insertAgentRun(AiAgentRunStatus.RUNNING.name());
+        String persistedOutput = "{\"articleId\":7,\"results\":[{\"actionType\":\"LIKE_ARTICLE\"}]}";
+        Long runningBatchStepId = insertAgentStep(
+                batchRunId,
+                AgentStepActionType.ARTICLE_INTERACTION_BATCH.name(),
+                AiAgentStepStatus.RUNNING.name(),
+                persistedOutput);
+        Long terminalBatchStepId = insertAgentStep(
+                batchRunId,
+                AgentStepActionType.ARTICLE_INTERACTION_BATCH.name(),
+                AiAgentStepStatus.SUCCESS.name(),
+                "{\"results\":[]}");
+        Long otherRunningStepId = insertAgentStep(
+                otherRunId,
+                AgentStepActionType.QUERY_ARTICLE.name(),
+                AiAgentStepStatus.RUNNING.name(),
+                "{\"summary\":\"keep\"}");
+
+        runner.run(null);
+
+        AiAgentRun batchRun = aiAgentRunMapper.selectById(batchRunId);
+        AiAgentStep recoveredBatchStep = aiAgentStepMapper.selectById(runningBatchStepId);
+        assertThat(batchRun.getStatus()).isEqualTo(AiAgentRunStatus.FAILED.name());
+        assertThat(batchRun.getCurrentStep()).isEqualTo(1);
+        assertThat(batchRun.getUsedSteps()).isEqualTo(1);
+        assertThat(recoveredBatchStep.getStatus()).isEqualTo(AiAgentStepStatus.FAILED.name());
+        assertThat(recoveredBatchStep.getErrorMessage())
+                .isEqualTo(AiRunStartupRecoveryRunner.INTERRUPTED_MESSAGE);
+        assertThat(recoveredBatchStep.getOutputJson()).isEqualTo(persistedOutput);
+
+        assertThat(aiAgentStepMapper.selectById(terminalBatchStepId).getStatus())
+                .isEqualTo(AiAgentStepStatus.SUCCESS.name());
+        assertThat(aiAgentStepMapper.selectById(otherRunningStepId).getStatus())
+                .isEqualTo(AiAgentStepStatus.RUNNING.name());
+    }
+
     // ---------- 造数据 ----------
 
     private Long insertWorkflowRun(String status) {
@@ -176,5 +225,20 @@ class AiRunStartupRecoveryTests {
         aiAgentRunMapper.insert(run);
         insertedAgentRunIds.add(run.getId());
         return run.getId();
+    }
+
+    private Long insertAgentStep(Long runId, String actionType, String status, String outputJson) {
+        AiAgentStep step = new AiAgentStep();
+        step.setAgentRunId(runId);
+        step.setStepNo(1);
+        step.setActionType(actionType);
+        step.setInputJson("{}");
+        step.setOutputJson(outputJson);
+        step.setStatus(status);
+        step.setInputTokens(0);
+        step.setOutputTokens(0);
+        step.setCreatedAt(LocalDateTime.now());
+        aiAgentStepMapper.insert(step);
+        return step.getId();
     }
 }

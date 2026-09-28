@@ -86,6 +86,18 @@ class AiIntentClassifierPromptTests {
     }
 
     @Test
+    void promptRequiresAllArticleActionsInOrderedCandidateArray() throws Exception {
+        Method method = AiIntentClassifierImpl.class.getDeclaredMethod("buildSystemPrompt", boolean.class);
+        method.setAccessible(true);
+        String prompt = (String) method.invoke(classifier, false);
+
+        assertThat(prompt).contains("requestedActions");
+        assertThat(prompt).contains("点赞并收藏");
+        assertThat(prompt).contains("[\"likeArticle\",\"favoriteArticle\"]");
+        assertThat(prompt).contains("不能只保留一个");
+    }
+
+    @Test
     void promptDefinesNeedsThinkingSemanticRule() throws Exception {
         Method method = AiIntentClassifierImpl.class.getDeclaredMethod("buildSystemPrompt", boolean.class);
         method.setAccessible(true);
@@ -99,5 +111,25 @@ class AiIntentClassifierPromptTests {
         assertThat(prompt).contains("判定标准是语义，不是关键词");
         assertThat(prompt).contains("依赖用户记忆/历史状态");
         assertThat(prompt).contains("不影响路由结果");
+    }
+
+    /**
+     * 钱包域（2026-09-21）：充值意图 + **反例**。
+     *
+     * <p>反例和意图本身一样重要——「我余额够1000吗」这种句子里带数字，
+     * 分类器一旦把它判成充值，后端就会从原话里解出 1000 并弹出一张充值卡。
+     * 卡片会把金额念出来（用户扫一眼就知道不对），但根本不该弹。
+     */
+    @Test
+    void promptDefinesWalletAgentIntentWithQueryCounterExample() throws Exception {
+        Method method = AiIntentClassifierImpl.class.getDeclaredMethod("buildSystemPrompt", boolean.class);
+        method.setAccessible(true);
+        String prompt = (String) method.invoke(classifier, false);
+
+        assertThat(prompt).contains("WALLET_AGENT");
+        assertThat(prompt).contains("反例");
+        assertThat(prompt).contains("问余额");
+        // 金额不归分类器管——它由后端从用户原话确定性解析（WalletAmountParser）
+        assertThat(prompt).contains("金额不用你提取");
     }
 }

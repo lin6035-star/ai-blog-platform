@@ -4,6 +4,7 @@ import com.hailin.blogsystem.ai.agent.AgentRuntimeRouteRegistry;
 import com.hailin.blogsystem.ai.agent.ArticleAgentRuntime;
 import com.hailin.blogsystem.ai.agent.GeneralAgentRuntime;
 import com.hailin.blogsystem.ai.agent.LearningAgentRuntime;
+import com.hailin.blogsystem.ai.agent.WalletAgentRuntime;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -19,6 +20,7 @@ class AgentRuntimeRouteRegistryTests {
     private LearningAgentRuntime learningRuntime;
     private ArticleAgentRuntime articleRuntime;
     private GeneralAgentRuntime generalRuntime;
+    private WalletAgentRuntime walletRuntime;
     private AgentRuntimeRouteRegistry registry;
 
     @BeforeEach
@@ -26,7 +28,9 @@ class AgentRuntimeRouteRegistryTests {
         learningRuntime = mock(LearningAgentRuntime.class);
         articleRuntime = mock(ArticleAgentRuntime.class);
         generalRuntime = mock(GeneralAgentRuntime.class);
-        registry = new AgentRuntimeRouteRegistry(learningRuntime, articleRuntime, generalRuntime);
+        walletRuntime = mock(WalletAgentRuntime.class);
+        registry = new AgentRuntimeRouteRegistry(
+                learningRuntime, articleRuntime, generalRuntime, walletRuntime);
     }
 
     @Test
@@ -34,17 +38,20 @@ class AgentRuntimeRouteRegistryTests {
         assertThat(registry.resolve("LEARNING_AGENT")).isSameAs(learningRuntime);
         assertThat(registry.resolve("ARTICLE_AGENT")).isSameAs(articleRuntime);
         assertThat(registry.resolve("GENERAL_CHAT")).isSameAs(generalRuntime);
+        assertThat(registry.resolve("WALLET_AGENT")).isSameAs(walletRuntime);
     }
 
     @Test
     void fallbackMessageComesFromSameRoute() {
-        // 文案与路由同源：三域各有单份兜底（原文案逐字保留，V3.5 纯重构行为零变化）
+        // 文案与路由同源：每域各有单份兜底（原文案逐字保留，V3.5 纯重构行为零变化）
         assertThat(registry.fallbackMessage("LEARNING_AGENT"))
                 .isEqualTo("暂时无法整理学习建议，请稍后重试。");
         assertThat(registry.fallbackMessage("ARTICLE_AGENT"))
                 .isEqualTo("暂时无法分析文章，请稍后重试。");
         assertThat(registry.fallbackMessage("GENERAL_CHAT"))
                 .isEqualTo("暂时无法结合你的情况回答，请稍后重试。");
+        assertThat(registry.fallbackMessage("WALLET_AGENT"))
+                .isEqualTo("暂时无法处理充值，请稍后重试。");
     }
 
     @Test
@@ -58,9 +65,10 @@ class AgentRuntimeRouteRegistryTests {
     @Test
     void agentIntentListsAreDerivedFromRegisteredRoutes() {
         assertThat(registry.agentIntents())
-                .containsExactlyInAnyOrder("LEARNING_AGENT", "ARTICLE_AGENT", "GENERAL_CHAT");
+                .containsExactlyInAnyOrder("LEARNING_AGENT", "ARTICLE_AGENT", "GENERAL_CHAT", "WALLET_AGENT");
         // 判定名单按 runtime 身份派生（不重复写 intent 名）
         assertThat(registry.learningAgentIntents()).containsExactly("LEARNING_AGENT");
         assertThat(registry.articleAgentIntents()).containsExactly("ARTICLE_AGENT");
+        assertThat(registry.walletAgentIntents()).containsExactly("WALLET_AGENT");
     }
 }

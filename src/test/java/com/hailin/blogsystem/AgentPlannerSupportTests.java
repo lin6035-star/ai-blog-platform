@@ -6,6 +6,7 @@ import com.hailin.blogsystem.ai.agent.ArticleAgentRuntime;
 import com.hailin.blogsystem.ai.agent.GeneralAgentRuntime;
 import com.hailin.blogsystem.ai.agent.ArticleSessionAnchorService;
 import com.hailin.blogsystem.ai.agent.LearningAgentRuntime;
+import com.hailin.blogsystem.ai.agent.WalletAgentRuntime;
 import com.hailin.blogsystem.ai.planner.AgentPlannerSupport;
 import com.hailin.blogsystem.config.BlogAiProperties;
 import com.hailin.blogsystem.entity.AiSessions;
@@ -17,6 +18,7 @@ import com.hailin.blogsystem.entity.dto.AiIntent;
 import com.hailin.blogsystem.entity.dto.AiWorkflowType;
 import com.hailin.blogsystem.entity.dto.CtaKind;
 import com.hailin.blogsystem.entity.dto.PageContextDTO;
+import com.hailin.blogsystem.entity.dto.ArticleInteractionAction;
 import com.hailin.blogsystem.mapper.AiWorkflowRunMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -49,7 +51,8 @@ class AgentPlannerSupportTests {
         AgentRuntimeRouteRegistry routeRegistry = new AgentRuntimeRouteRegistry(
                 mock(LearningAgentRuntime.class),
                 mock(ArticleAgentRuntime.class),
-                mock(GeneralAgentRuntime.class)
+                mock(GeneralAgentRuntime.class),
+                mock(WalletAgentRuntime.class)
         );
         planner = new AgentPlannerSupport(properties, workflowRunMapper, new ObjectMapper(),
                 routeRegistry, anchorService);
@@ -598,6 +601,7 @@ class AgentPlannerSupportTests {
         AiIntent intent = new AiIntent();
         intent.setIntent("ARTICLE_ACTION");
         intent.setActionType("favoriteArticle");
+        intent.setRequestedActions(List.of("favoriteArticle"));
         intent.setArticleId("12");
         intent.setSuggestedAction("CHAT");
         intent.setConfidence(0.95);
@@ -616,8 +620,107 @@ class AgentPlannerSupportTests {
         );
 
         assertThat(decision.getAction()).isEqualTo(AgentAction.CHAT);
-        assertThat(decision.getClientActionType())
-                .isEqualTo("favoriteArticle");
+        assertThat(decision.getClientActionType()).isNull();
+        assertThat(decision.getArticleActionBatch().articleId()).isEqualTo(12L);
+        assertThat(decision.getArticleActionBatch().actions())
+                .containsExactly(ArticleInteractionAction.FAVORITE_ARTICLE);
+    }
+
+    @Test
+    void articleActionBuildsOrderedDeduplicatedServerBatch() {
+        AiIntent intent = articleActionIntent(List.of(
+                "likeArticle", "favoriteArticle", "likeArticle"));
+
+        AgentDecision decision = planner.decide(
+                "点赞并收藏这篇文章",
+                intent,
+                articlePage("12"),
+                1L,
+                session(10L));
+
+        assertThat(decision.getAction()).isEqualTo(AgentAction.CHAT);
+        assertThat(decision.getArticleActionBatch().actions()).containsExactly(
+                ArticleInteractionAction.LIKE_ARTICLE,
+                ArticleInteractionAction.FAVORITE_ARTICLE);
+    }
+
+    @Test
+    void oppositeServerActionsAreRejectedWithoutBatch() {
+        AiIntent intent = articleActionIntent(List.of("likeArticle", "unlikeArticle"));
+
+        AgentDecision decision = planner.decide(
+                "给这篇文章点赞并取消点赞",
+                intent,
+                articlePage("12"),
+                1L,
+                session(10L));
+
+        assertThat(decision.getAction()).isEqualTo(AgentAction.CTA);
+        assertThat(decision.getArticleActionBatch()).isNull();
+    }
+
+    @Test
+    void obviousSecondServerActionMissingFromClassifierIsRejected() {
+        AiIntent intent = articleActionIntent(List.of("likeArticle"));
+
+        AgentDecision decision = planner.decide(
+                "帮我点赞并收藏这篇文章",
+                intent,
+                articlePage("12"),
+                1L,
+                session(10L));
+
+        assertThat(decision.getAction()).isEqualTo(AgentAction.CTA);
+        assertThat(decision.getArticleActionBatch()).isNull();
+    }
+
+    @Test
+    void mixedServerAndClientActionsAreRejected() {
+        AiIntent intent = articleActionIntent(List.of("likeArticle", "copyArticleLink"));
+
+        AgentDecision decision = planner.decide(
+                "点赞并复制链接",
+                intent,
+                articlePage("12"),
+                1L,
+                session(10L));
+
+        assertThat(decision.getAction()).isEqualTo(AgentAction.CTA);
+        assertThat(decision.getArticleActionBatch()).isNull();
+    }
+
+    @Test
+    void mixedServerActionAndAnalysisRequestAreRejected() {
+        AiIntent intent = articleActionIntent(List.of("likeArticle"));
+
+        AgentDecision decision = planner.decide(
+                "帮我点赞，再看看这篇文章写得怎么样",
+                intent,
+                articlePage("12"),
+                1L,
+                session(10L));
+
+        assertThat(decision.getAction()).isEqualTo(AgentAction.CTA);
+        assertThat(decision.getArticleActionBatch()).isNull();
+    }
+
+    @Test
+    void discussionOfLikeMechanismDoesNotTriggerMixedRequestGuard() {
+        AiIntent intent = new AiIntent();
+        intent.setIntent("ARTICLE_DETAIL_QA");
+        intent.setSuggestedAction("CHAT");
+        intent.setConfidence(0.95);
+        intent.setRisk("LOW");
+
+        AgentDecision decision = planner.decide(
+                "分析这篇文章里的点赞机制",
+                intent,
+                articlePage("12"),
+                1L,
+                session(10L));
+
+        assertThat(decision.getAction()).isEqualTo(AgentAction.CHAT);
+        assertThat(decision.getRetrievalMode()).isEqualTo("CURRENT_ARTICLE");
     }
 
     @Test
@@ -1121,6 +1224,25 @@ class AgentPlannerSupportTests {
         intent.setSuggestedAction("WORKFLOW");
         intent.setSuggestedWorkflowType(workflowType.name());
         return intent;
+    }
+
+    private AiIntent articleActionIntent(List<String> requestedActions) {
+        AiIntent intent = new AiIntent();
+        intent.setIntent("ARTICLE_ACTION");
+        intent.setActionType(requestedActions.isEmpty() ? null : requestedActions.get(0));
+        intent.setRequestedActions(requestedActions);
+        intent.setSuggestedAction("CHAT");
+        intent.setConfidence(0.95);
+        intent.setRisk("LOW");
+        return intent;
+    }
+
+    private PageContextDTO articlePage(String articleId) {
+        PageContextDTO pageContext = new PageContextDTO();
+        pageContext.setPageType("article-detail");
+        pageContext.setArticleId(articleId);
+        pageContext.setAuthorId("2");
+        return pageContext;
     }
 
     private AiSessions session(Long id) {

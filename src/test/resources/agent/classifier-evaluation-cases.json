@@ -268,5 +268,33 @@
     "message": "我的学习计划都有哪些",
     "expectedIntent": "LEARNING_PLAN_QUERY",
     "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "充值进入 WALLET_AGENT（2026-09-21）",
+    "category": "boundary",
+    "message": "帮我充10块钱",
+    "expectedIntent": "WALLET_AGENT",
+    "expectedSuggestedAction": "AGENT",
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "中文数字充值也进 WALLET_AGENT",
+    "category": "boundary",
+    "message": "给我充五十块",
+    "expectedIntent": "WALLET_AGENT",
+    "expectedSuggestedAction": "AGENT",
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "反例：问余额带数字，不能漂成充值",
+    "category": "regression",
+    "message": "我余额够1000吗",
+    "expectedIntent": "GENERAL_CHAT"
+  },
+  {
+    "name": "反例：问充值比例不等于要充值",
+    "category": "regression",
+    "message": "充值比例是多少",
+    "expectedIntent": "GENERAL_CHAT"
   }
 ]
