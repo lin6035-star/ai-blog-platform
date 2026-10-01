@@ -59,7 +59,7 @@ class LearningAgentActionExecutorTests {
                 AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD),
                 null,
                 null
-        );
+        ).summary();
 
         assertThat(observation).isEqualTo("当前未登录，无法查询学习信息。");
     }
@@ -72,7 +72,7 @@ class LearningAgentActionExecutorTests {
                 AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD),
                 100L,
                 null
-        );
+        ).summary();
 
         assertThat(observation).isEqualTo("当前没有任何学习计划。");
     }
@@ -87,7 +87,7 @@ class LearningAgentActionExecutorTests {
                 AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD),
                 100L,
                 null
-        );
+        ).summary();
 
         assertThat(observation).contains("共 2 个计划");
         assertThat(observation).contains("Redis 学习计划");
@@ -107,7 +107,7 @@ class LearningAgentActionExecutorTests {
                         .withInput(Map.of("planRef", "Redis")),
                 100L,
                 null
-        );
+        ).summary();
 
         assertThat(observation).contains("目标计划");
         assertThat(observation).contains("Redis 学习计划");
@@ -126,7 +126,7 @@ class LearningAgentActionExecutorTests {
                         .withInput(Map.of("planRef", "Redis")),
                 100L,
                 null
-        );
+        ).summary();
 
         // 并列 = 歧义：只列候选，不猜（Agent 下一步应 ASK_USER）
         assertThat(observation).contains("请确认具体是哪个");
@@ -144,7 +144,7 @@ class LearningAgentActionExecutorTests {
                 AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD),
                 100L,
                 null
-        );
+        ).summary();
 
         // 未点名且唯一 ACTIVE → 直接详情（getDetail 未 mock 返回 null，详情内部容错）
         assertThat(observation).contains("目标计划");
@@ -160,7 +160,7 @@ class LearningAgentActionExecutorTests {
                 AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD),
                 100L,
                 null
-        );
+        ).summary();
 
         // 多个 ACTIVE 只列候选
         assertThat(observation).contains("共 2 个计划");
@@ -182,7 +182,7 @@ class LearningAgentActionExecutorTests {
                         .withInput(Map.of("planRef", "RocketMQ")),
                 100L,
                 null
-        );
+        ).summary();
 
         assertThat(observation).contains("没有找到");
         assertThat(observation).doesNotContain("目标计划");
@@ -201,7 +201,7 @@ class LearningAgentActionExecutorTests {
                         .withInput(Map.of("question", "学习偏好")),
                 100L,
                 null
-        );
+        ).summary();
 
         assertThat(observation).contains("记忆摘要");
     }
@@ -218,7 +218,7 @@ class LearningAgentActionExecutorTests {
                         .withInput(Map.of("question", "学习偏好")),
                 100L,
                 null
-        );
+        ).summary();
 
         // 记忆检索失败不能炸掉 Agent Loop，返回带失败标记的摘要
         assertThat(observation).contains("语义记忆检索失败");
@@ -231,7 +231,7 @@ class LearningAgentActionExecutorTests {
                 AgentStepDecision.of(AgentStepActionType.SEARCH_RAG),
                 100L,
                 null
-        );
+        ).summary();
 
         assertThat(observation).contains("缺少关键词");
     }
@@ -246,7 +246,7 @@ class LearningAgentActionExecutorTests {
                         .withInput(Map.of("keyword", "Redis 缓存击穿")),
                 100L,
                 null
-        );
+        ).summary();
 
         assertThat(observation).contains("没有检索到");
     }

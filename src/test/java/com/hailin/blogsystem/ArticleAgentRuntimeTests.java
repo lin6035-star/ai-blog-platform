@@ -3,12 +3,14 @@ package com.hailin.blogsystem;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentRunResult;
 import com.hailin.blogsystem.ai.agent.AgentStepDecision;
 import com.hailin.blogsystem.ai.agent.AgentStepEmitter;
 import com.hailin.blogsystem.ai.agent.AgentStepLabelSupport;
 import com.hailin.blogsystem.ai.agent.ArticleAgentActionExecutor;
 import com.hailin.blogsystem.ai.agent.ArticleAgentRuntime;
+import com.hailin.blogsystem.ai.agent.ArticleAnalysisStepDecider;
 import com.hailin.blogsystem.ai.agent.ArticleAgentStepDecider;
 import com.hailin.blogsystem.ai.agent.ArticleEvidenceVerifier;
 import com.hailin.blogsystem.ai.agent.ArticleSessionAnchorService;
@@ -48,6 +50,7 @@ import static org.mockito.Mockito.when;
 class ArticleAgentRuntimeTests {
 
     private ArticleAgentStepDecider decider;
+    private ArticleAnalysisStepDecider analysisDecider;
     private ArticleAgentActionExecutor executor;
     private AiAgentRunMapper runMapper;
     private AiAgentStepMapper stepMapper;
@@ -78,6 +81,7 @@ class ArticleAgentRuntimeTests {
     @BeforeEach
     void setUp() {
         decider = mock(ArticleAgentStepDecider.class);
+        analysisDecider = mock(ArticleAnalysisStepDecider.class);
         executor = mock(ArticleAgentActionExecutor.class);
         runMapper = mock(AiAgentRunMapper.class);
         stepMapper = mock(AiAgentStepMapper.class);
@@ -96,7 +100,7 @@ class ArticleAgentRuntimeTests {
 
         // V3.11：mock 验证器默认返回 null = 不走收敛门（锁「默认不验证 = 原路径」回归）
         runtime = new ArticleAgentRuntime(
-                decider, executor, runMapper, stepMapper, new ObjectMapper(),
+                decider, analysisDecider, executor, runMapper, stepMapper, new ObjectMapper(),
                 articlesService, anchorService, mock(ArticleEvidenceVerifier.class)
         );
     }
@@ -109,7 +113,7 @@ class ArticleAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "这篇文章结构可以，建议补充小标题")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Redis 缓存设计》\n- 小标题结构：（无小标题）");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存设计》\n- 小标题结构：（无小标题）"));
 
         AgentRunResult result = runtime.run(100L, 200L, "帮我看看这篇文章还能怎么改",
                 articleContext("12"), com.hailin.blogsystem.ai.agent.AgentStepEmitter.noop());
@@ -131,7 +135,7 @@ class ArticleAgentRuntimeTests {
                                 "workflowType", "OPTIMIZE_ARTICLE",
                                 "reason", "这篇文章缺少小标题，建议进入优化流程")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Redis 缓存设计》");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存设计》"));
 
         AgentRunResult result = runtime.run(100L, 200L, "感觉写得不太好，帮我分析一下",
                 articleContext("12"), com.hailin.blogsystem.ai.agent.AgentStepEmitter.noop());
@@ -171,7 +175,7 @@ class ArticleAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WORKFLOW)
                         .withInput(Map.of("workflowType", "CREATE_ARTICLE", "reason", "想写文章")));
-        when(executor.execute(any(), any(), any())).thenReturn("当前文章分析：\n- 标题：《Redis》");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis》"));
 
         AgentRunResult result = runtime.run(100L, 200L, "帮我看看这篇文章",
                 articleContext("12"), com.hailin.blogsystem.ai.agent.AgentStepEmitter.noop());
@@ -211,7 +215,7 @@ class ArticleAgentRuntimeTests {
                         .withInput(Map.of("actionType", AgentWriteProposal.TYPE_UPDATE_ARTICLE_TITLE,
                                 "newTitle", "Redis 缓存实战")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Redis 缓存原理》");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存原理》"));
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L, "Redis 缓存原理"));
 
         AgentRunResult result = runtime.run(100L, 200L, "把标题改成 Redis 缓存实战",
@@ -241,14 +245,16 @@ class ArticleAgentRuntimeTests {
                         .withInput(Map.of("actionType", AgentWriteProposal.TYPE_UPDATE_TASK_DONE,
                                 "taskTitle", "缓存击穿")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Redis 缓存原理》");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存原理》"));
 
         AgentRunResult result = runtime.run(100L, 200L, "把任务勾掉",
                 articleContext("12"), com.hailin.blogsystem.ai.agent.AgentStepEmitter.noop());
 
         assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
         AiAgentRun saved = captureRun();
-        assertThat(saved.getErrorMessage()).contains("不支持的 actionType");
+        assertThat(saved.getErrorMessage()).contains("不支持的写动作类型");
+        // C0.2：模型给的内部协议值只进日志，不进用户可见文案（原先这里断言的是"含 actionType 原文"）
+        assertThat(saved.getErrorMessage()).doesNotContain(AgentWriteProposal.TYPE_UPDATE_TASK_DONE);
         // 未产生任何写提案（run 直接终局 FAILED，contextJson 无 pendingWriteAction）
         assertThat(saved.getStatus()).isEqualTo("FAILED");
         assertThat(saved.getContextJson()).doesNotContain("pendingWriteAction");
@@ -261,7 +267,7 @@ class ArticleAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
                         .withInput(Map.of("actionType", AgentWriteProposal.TYPE_UPDATE_ARTICLE_TITLE)));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Redis 缓存原理》");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存原理》"));
 
         AgentRunResult result = runtime.run(100L, 200L, "帮我把标题改一下",
                 articleContext("12"), com.hailin.blogsystem.ai.agent.AgentStepEmitter.noop());
@@ -282,7 +288,7 @@ class ArticleAgentRuntimeTests {
                                 "newTitle", "Redis 缓存实战",
                                 "articleId", "999")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Redis 缓存原理》");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存原理》"));
 
         AgentRunResult result = runtime.run(100L, 200L, "把标题改成 Redis 缓存实战",
                 null, com.hailin.blogsystem.ai.agent.AgentStepEmitter.noop());
@@ -305,7 +311,7 @@ class ArticleAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
                         .withInput(Map.of("actionType", AgentWriteProposal.TYPE_HIDE_ARTICLE)));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Java 后端面试突围》");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Java 后端面试突围》"));
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L, "Java 后端面试突围", 1));
 
         AgentRunResult result = runtime.run(100L, 200L, "帮我把刚刚那篇文章隐藏了",
@@ -332,7 +338,7 @@ class ArticleAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
                         .withInput(Map.of("actionType", AgentWriteProposal.TYPE_HIDE_ARTICLE)));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Java 后端面试突围》");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Java 后端面试突围》"));
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L, "Java 后端面试突围", 1));
 
         AgentRunResult result = runtime.run(100L, 200L, "帮我把刚刚那篇隐藏了",
@@ -351,7 +357,7 @@ class ArticleAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
                         .withInput(Map.of("actionType", AgentWriteProposal.TYPE_HIDE_ARTICLE)));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Redis 缓存原理》");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存原理》"));
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L, "Redis 缓存原理", 1));
 
         AgentRunResult result = runtime.run(100L, 200L, "把这篇隐藏了",
@@ -371,7 +377,7 @@ class ArticleAgentRuntimeTests {
                         .withInput(Map.of("actionType", AgentWriteProposal.TYPE_UPDATE_ARTICLE_TITLE,
                                 "newTitle", "Redis 缓存实战")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《别人的文章》");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《别人的文章》"));
         when(articlesService.getById(12L)).thenReturn(article(12L, 101L, "别人的文章"));
 
         AgentRunResult result = runtime.run(100L, 200L, "把标题改了",
@@ -396,7 +402,7 @@ class ArticleAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "标题没变化，不需要修改")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Redis 缓存原理》");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存原理》"));
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L, "Redis 缓存原理"));
 
         AgentRunResult result = runtime.run(100L, 200L, "把标题改一下",
@@ -416,7 +422,7 @@ class ArticleAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "建议补充小标题")));
-        when(executor.execute(any(), any(), any())).thenReturn("当前文章分析：\n- 标题：《Redis》");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis》"));
 
         List<String[]> events = new java.util.ArrayList<>();
         runtime.run(100L, 200L, "帮我看看这篇文章",
@@ -437,7 +443,7 @@ class ArticleAgentRuntimeTests {
     void maxStepsReachedProducesArticleSummary() {
         when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE));
-        when(executor.execute(any(), any(), any())).thenReturn("第 X 条观察数据");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("第 X 条观察数据"));
 
         AgentRunResult result = runtime.run(100L, 200L, "帮我看看这篇文章",
                 articleContext("12"), com.hailin.blogsystem.ai.agent.AgentStepEmitter.noop());
@@ -516,7 +522,7 @@ class ArticleAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
                         .withInput(Map.of("actionType", "HIDE_ARTICLE")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Redis 缓存原理》\n- 状态：已发布");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存原理》\n- 状态：已发布"));
         when(articlesService.getById(12L))
                 .thenReturn(article(12L, 100L, "Redis 缓存原理", 1));
 
@@ -539,7 +545,7 @@ class ArticleAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
                         .withInput(Map.of("actionType", "PUBLISH_ARTICLE")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Redis 缓存原理》\n- 状态：已隐藏");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存原理》\n- 状态：已隐藏"));
         when(articlesService.getById(12L))
                 .thenReturn(article(12L, 100L, "Redis 缓存原理", 2));
 
@@ -558,7 +564,7 @@ class ArticleAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
                         .withInput(Map.of("actionType", "HIDE_ARTICLE")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《未发布的草稿》");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《未发布的草稿》"));
         when(articlesService.getById(12L))
                 .thenReturn(article(12L, 100L, "未发布的草稿", 0));
 
@@ -580,7 +586,7 @@ class ArticleAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "这篇文章已经是隐藏状态了")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Redis 缓存原理》\n- 状态：已隐藏");
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存原理》\n- 状态：已隐藏"));
         when(articlesService.getById(12L))
                 .thenReturn(article(12L, 100L, "Redis 缓存原理", 2));
 
@@ -604,7 +610,7 @@ class ArticleAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "建议补充缓存击穿原理")));
-        when(executor.execute(any(), any(), any())).thenReturn("当前文章分析：\n- 标题：《Redis 缓存》");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》"));
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L, "Redis 缓存", 1));
 
         runtime.run(100L, 200L, "分析这篇文章", articleContext("12"),
@@ -624,7 +630,7 @@ class ArticleAgentRuntimeTests {
                         .withInput(Map.of("keyword", "缓存")))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "这篇写得不错")));
-        when(executor.execute(any(), any(), any())).thenReturn("站内文章知识检索结果：...");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("站内文章知识检索结果：..."));
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L, "Redis 缓存", 1));
 
         runtime.run(100L, 200L, "分析这篇文章", articleContext("12"),
@@ -640,7 +646,7 @@ class ArticleAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "建议补充示例")));
-        when(executor.execute(any(), any(), any())).thenReturn("当前文章分析：...");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("当前文章分析：..."));
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L, "Redis 缓存", 1));
         org.mockito.Mockito.doThrow(new RuntimeException("DB down"))
                 .when(anchorService).markConclusion(any(), any(), any(), any(), any());
@@ -664,7 +670,7 @@ class ArticleAgentRuntimeTests {
                         List.of("先看整体结构", "再检查缓存击穿那一节")))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "整体结构不错")));
-        when(executor.execute(any(), any(), any())).thenReturn("当前文章分析：\n- 标题：《Redis 缓存设计》");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存设计》"));
 
         List<List<String>> emitted = new ArrayList<>();
         runtime.run(100L, 200L, "先看整体结构，再检查缓存击穿那一节",
@@ -692,7 +698,7 @@ class ArticleAgentRuntimeTests {
                         List.of("先看整体结构", "再检查缓存击穿那一节")))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "整体结构不错")));
-        when(executor.execute(any(), any(), any())).thenReturn("当前文章分析：\n- 标题：《Redis 缓存设计》");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存设计》"));
 
         runtime.run(100L, 200L, "先看整体结构，再检查缓存击穿那一节",
                 articleContext("12"), planCapturingEmitter(new ArrayList<>()));
@@ -713,7 +719,7 @@ class ArticleAgentRuntimeTests {
                         List.of("先看整体结构")))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "整体结构不错")));
-        when(executor.execute(any(), any(), any())).thenReturn("当前文章分析");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("当前文章分析"));
 
         List<List<String>> emitted = new ArrayList<>();
         AgentRunResult result = runtime.run(100L, 200L, "看看这篇文章",
@@ -751,7 +757,7 @@ class ArticleAgentRuntimeTests {
                         Map.of("answer", "好"),
                         null,
                         List.of("第二步才给的计划", "第二项")));
-        when(executor.execute(any(), any(), any())).thenReturn("当前文章分析");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("当前文章分析"));
 
         List<List<String>> emitted = new ArrayList<>();
         runtime.run(100L, 200L, "看看", articleContext("12"), planCapturingEmitter(emitted));
@@ -770,7 +776,7 @@ class ArticleAgentRuntimeTests {
                         List.of("先看整体结构", "再给建议")))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "结论")));
-        when(executor.execute(any(), any(), any())).thenReturn("当前文章分析");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("当前文章分析"));
         when(runMapper.update(any(), any())).thenReturn(0);
 
         List<List<String>> emitted = new ArrayList<>();
@@ -793,7 +799,7 @@ class ArticleAgentRuntimeTests {
                         .withInput(Map.of("question", "写作偏好")))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "结论")));
-        when(executor.execute(any(), any(), any())).thenReturn("记忆摘要：用户喜欢简洁 UI");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("记忆摘要：用户喜欢简洁 UI"));
 
         // 首次决策时库里还没有该查询（放行），第二次时第 1 步已成功执行过同参查询（拦截）
         AiAgentStep executed = new AiAgentStep();
@@ -832,7 +838,7 @@ class ArticleAgentRuntimeTests {
                         .withInput(Map.of("articleId", "12")))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "结论")));
-        when(executor.execute(any(), any(), any())).thenReturn("当前文章分析");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("当前文章分析"));
         when(stepMapper.selectOne(any())).thenReturn(null);
 
         AgentRunResult result = runtime.run(100L, 200L, "看看这篇文章", articleContext("12"),
@@ -851,7 +857,7 @@ class ArticleAgentRuntimeTests {
                         .withInput(Map.of("articleId", "2085208555163787287", "focus", "缓存击穿")))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "结论")));
-        when(executor.execute(any(), any(), any())).thenReturn("【聚焦片段】…");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("【聚焦片段】…"));
         when(stepMapper.selectOne(any())).thenReturn(null);
 
         runtime.run(100L, 200L, "检查缓存击穿那一节",
@@ -902,7 +908,7 @@ class ArticleAgentRuntimeTests {
                     return AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                             .withInput(Map.of("answer", "看完了"));
                 });
-        when(executor.execute(any(), any(), any())).thenReturn("当前文章分析：\n- 标题：《Redis》");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis》"));
 
         AgentRunResult result = runtime.run(100L, 200L, "帮我看看这篇文章",
                 articleContext("12"), AgentStepEmitter.noop());

@@ -27,4 +27,14 @@ public class AgentStepRawVO {
     private String outputJson;
     private String thoughtSummary;
     private LocalDateTime createdAt;
+
+    /*
+     * ── 2026-09-30 Token 工程 P0-b：step 级 Token（**只走开发者通道**）──
+     *
+     * 语义 = 「决定要走这一步」的决策成本（decide / repair）。只读动作执行本身不调 LLM。
+     * **没有 totalTokens**：ai_agent_steps 只有 input_tokens / output_tokens 两列
+     * （db/init.sql:499-501），总量由展示层相加，不加冗余列。
+     */
+    private Integer inputTokens;
+    private Integer outputTokens;
 }

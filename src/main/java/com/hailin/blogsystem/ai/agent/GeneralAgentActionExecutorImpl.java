@@ -39,7 +39,12 @@ public class GeneralAgentActionExecutorImpl implements GeneralAgentActionExecuto
     private final BlogAiProperties blogAiProperties;
 
     @Override
-    public String execute(AgentStepDecision decision, Long userId, PageContextDTO pageContext) {
+    public AgentActionResult execute(AgentStepDecision decision, Long userId, PageContextDTO pageContext) {
+        // P2.2：通用域尚未提供结构化事实（payload 为空），原样包装——对本域零行为变更
+        return AgentActionResult.of(executeRaw(decision, userId, pageContext));
+    }
+
+    private String executeRaw(AgentStepDecision decision, Long userId, PageContextDTO pageContext) {
         if (userId == null) {
             return "当前未登录，无法查询你的记忆和上下文。";
         }
@@ -48,7 +53,8 @@ public class GeneralAgentActionExecutorImpl implements GeneralAgentActionExecuto
             case SEARCH_RAG -> searchRag(decision);
             case QUERY_LEARNING_DASHBOARD, QUERY_ARTICLE ->
                     throw new UnsupportedOperationException("领域动作不经过通用域执行器");
-            case ASK_USER, FINAL_ANSWER, SUGGEST_WORKFLOW, SUGGEST_WRITE, ARTICLE_INTERACTION_BATCH ->
+            case ASK_USER, FINAL_ANSWER, SUGGEST_WORKFLOW, SUGGEST_WRITE,
+                 ARTICLE_INTERACTION_BATCH, TASK_STEP ->
                     throw new UnsupportedOperationException("终态动作不经过执行器");
         };
     }

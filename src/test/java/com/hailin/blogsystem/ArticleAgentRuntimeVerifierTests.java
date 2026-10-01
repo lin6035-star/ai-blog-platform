@@ -1,13 +1,27 @@
 package com.hailin.blogsystem;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
+import com.hailin.blogsystem.ai.agent.AgentCompletionKind;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentRunResult;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentStepDecision;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
+import com.hailin.blogsystem.ai.agent.AgentStepEmitter;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.ArticleAgentActionExecutor;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.ArticleAgentRuntime;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
+import com.hailin.blogsystem.ai.agent.ArticleAnalysisStepDecider;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.ArticleAgentStepDecider;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.ArticleEvidenceVerifier;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.ArticleSessionAnchorService;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.Verdict;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.AiAgentStep;
@@ -44,6 +58,7 @@ import static org.mockito.Mockito.when;
 class ArticleAgentRuntimeVerifierTests {
 
     private ArticleAgentStepDecider decider;
+    private ArticleAnalysisStepDecider analysisDecider;
     private ArticleAgentActionExecutor executor;
     private AiAgentRunMapper runMapper;
     private AiAgentStepMapper stepMapper;
@@ -62,6 +77,7 @@ class ArticleAgentRuntimeVerifierTests {
     @BeforeEach
     void setUp() {
         decider = mock(ArticleAgentStepDecider.class);
+        analysisDecider = mock(ArticleAnalysisStepDecider.class);
         executor = mock(ArticleAgentActionExecutor.class);
         runMapper = mock(AiAgentRunMapper.class);
         stepMapper = mock(AiAgentStepMapper.class);
@@ -76,7 +92,7 @@ class ArticleAgentRuntimeVerifierTests {
         });
 
         runtime = new ArticleAgentRuntime(
-                decider, executor, runMapper, stepMapper, new ObjectMapper(),
+                decider, analysisDecider, executor, runMapper, stepMapper, new ObjectMapper(),
                 articlesService, anchorService, verifier
         );
     }
@@ -94,8 +110,8 @@ class ArticleAgentRuntimeVerifierTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
                 .thenReturn(finalAnswer("缓存击穿那段用互斥锁兜底，逻辑清晰，建议补充重试策略"));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Redis 缓存》\n- 小标题结构：缓存穿透/缓存击穿");
-        when(verifier.verify(any(), any(), any(), any()))
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》\n- 小标题结构：缓存穿透/缓存击穿"));
+        when(verifier.verify(any(), any(), any(), any(), any()))
                 .thenReturn(Verdict.needMore(Verdict.MissingEvidence.ARTICLE_CONTENT,
                         "草案提到缓存击穿段，但证据里没有该段内容"))
                 .thenReturn(Verdict.sufficient());
@@ -104,6 +120,7 @@ class ArticleAgentRuntimeVerifierTests {
                 articleContext("12"), com.hailin.blogsystem.ai.agent.AgentStepEmitter.noop());
 
         assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.completionKind()).isEqualTo(AgentCompletionKind.ANSWER);
         assertThat(result.finalAnswer()).contains("互斥锁兜底");
         assertThat(result.usedSteps()).isEqualTo(3);
 
@@ -122,20 +139,64 @@ class ArticleAgentRuntimeVerifierTests {
         assertThat(saved.getContextJson()).contains("缓存击穿");
     }
 
+    /**
+     * analysis-only 第二层（白名单）：决策器若仍输出 ASK_USER，骨架直接终局失败。
+     * 这条锁的是「专用 prompt 是必需项」——没有它，这条路径试一次就废一轮。
+     */
+    @Test
+    void analysisOnlyRejectsAskUserFromDecider() {
+        when(analysisDecider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.ASK_USER)
+                        .withInput(Map.of("question", "你想分析哪个方面？")));
+
+        AgentRunResult result = runtime.runAnalysisOnly(
+                1L, 10L, "分析一下这篇文章", articleContext("12"), AgentStepEmitter.noop());
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
+    }
+
+    /**
+     * analysis-only 第三层（Verifier 转问分流）：判 ASK_USER 时不转问，改保守收尾。
+     * 转问会产生 WAITING_USER，把复合请求变成跨请求——那正是本刀要守住的边界（§4.7）。
+     */
+    @Test
+    void analysisOnlyTurnsVerifierAskUserIntoConservativeShutdown() {
+        when(analysisDecider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
+                .thenReturn(finalAnswer("这篇节奏偏快"));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》"));
+        when(verifier.verify(any(), any(), any(), any(), any()))
+                .thenReturn(Verdict.askUser("你想分析哪个方面？", "指代不清"));
+
+        AgentRunResult result = runtime.runAnalysisOnly(
+                1L, 10L, "分析一下这篇文章", articleContext("12"), AgentStepEmitter.noop());
+
+        // 核心断言：不进入等待态，本轮就结束
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.completionKind())
+                .as("证据不足必须能被外层识别——否则任务编排会把它回填成「已完成」")
+                .isEqualTo(AgentCompletionKind.CONSERVATIVE_SHUTDOWN);
+        assertThat(result.finalAnswer()).contains("不足");
+    }
+
     @Test
     void askUserVerdictConvertsToWaitingUserWithSingleAskStep() {
         when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
                 .thenReturn(finalAnswer("这篇的优点是节奏快"));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Redis 缓存》");
-        when(verifier.verify(any(), any(), any(), any()))
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》"));
+        when(verifier.verify(any(), any(), any(), any(), any()))
                 .thenReturn(Verdict.askUser("你想让我分析这篇文章的哪个方面？", "用户没说清维度"));
 
         AgentRunResult result = runtime.run(100L, 200L, "分析一下这篇",
                 articleContext("12"), com.hailin.blogsystem.ai.agent.AgentStepEmitter.noop());
 
         assertThat(result.status()).isEqualTo(AiAgentRunStatus.WAITING_USER);
+        assertThat(result.completionKind())
+                .as("非 COMPLETED 由 status 表达，完成类型保持 null（不建第二套状态机）")
+                .isNull();
         assertThat(result.finalAnswer()).isEqualTo("你想让我分析这篇文章的哪个方面？");
 
         // 只落 QUERY + ASK_USER 两条 step，无伪造 FINAL_ANSWER step
@@ -150,7 +211,7 @@ class ArticleAgentRuntimeVerifierTests {
         // 决策器固执地反复 FINAL_ANSWER，验证器恒 NEED_MORE → 5 步全拦 → 到顶保守收尾
         when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
                 .thenReturn(finalAnswer("这篇不错"));
-        when(verifier.verify(any(), any(), any(), any()))
+        when(verifier.verify(any(), any(), any(), any(), any()))
                 .thenReturn(Verdict.needMore(Verdict.MissingEvidence.RAG,
                         "还缺站内知识对照"));
 
@@ -170,7 +231,7 @@ class ArticleAgentRuntimeVerifierTests {
         when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.SEARCH_RAG));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("站内文章知识检索结果：\n1. 《缓存穿透》...");
+                .thenReturn(AgentActionResult.of("站内文章知识检索结果：\n1. 《缓存穿透》..."));
 
         AgentRunResult result = runtime.run(100L, 200L, "分析这篇文章",
                 articleContext("12"), com.hailin.blogsystem.ai.agent.AgentStepEmitter.noop());
@@ -192,8 +253,8 @@ class ArticleAgentRuntimeVerifierTests {
                 .thenReturn(finalAnswer("草案三"))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("当前文章分析：\n- 标题：《Redis 缓存》");
-        when(verifier.verify(any(), any(), any(), any()))
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》"));
+        when(verifier.verify(any(), any(), any(), any(), any()))
                 .thenReturn(Verdict.needMore(Verdict.MissingEvidence.ARTICLE_CONTENT, "缺细节"));
 
         AgentRunResult result = runtime.run(100L, 200L, "这篇写得怎么样",
@@ -201,6 +262,9 @@ class ArticleAgentRuntimeVerifierTests {
 
         // 最后一次拦截(5) 之后有成功补查(6) → unresolved=false → 不保守 → summarize 收尾
         assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.completionKind())
+                .as("到顶 summarize 有阶段性内容，但没经过最终答案同等级的证据放行")
+                .isEqualTo(AgentCompletionKind.MAX_STEPS_SUMMARY);
         assertThat(result.usedSteps()).isEqualTo(6);
         assertThat(result.finalAnswer()).doesNotContain("不足以让我给出可靠结论");
         verify(decider, org.mockito.Mockito.atLeastOnce()).summarize(any(), any(), any());
@@ -211,13 +275,60 @@ class ArticleAgentRuntimeVerifierTests {
         // 验证器返回 null（默认/未接线）→ 收敛门放行，行为与 V3.10 一致
         when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
                 .thenReturn(finalAnswer("直接回答"));
-        when(verifier.verify(any(), any(), any(), any())).thenReturn(null);
+        when(verifier.verify(any(), any(), any(), any(), any())).thenReturn(null);
 
         AgentRunResult result = runtime.run(100L, 200L, "这篇文章怎么样",
                 articleContext("12"), com.hailin.blogsystem.ai.agent.AgentStepEmitter.noop());
 
         assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
         assertThat(result.finalAnswer()).isEqualTo("直接回答");
+    }
+
+    // ==================== 第四步·阶段 2：父子 run 拓扑 ====================
+
+    @Test
+    void childRunDoesNotCancelPendingConfirmations() {
+        // 子 run（编排内部的分析执行）**不能**清理同 session 的待确认卡——
+        // 否则一次内部分析会把用户已有的 Workflow / 写动作确认卡取消掉，
+        // 用户再去点确认只会看到"状态不允许"。
+        //
+        // 判据精确落在 cancelStalePendingSuggestions 的那次两参 update(entity, wrapper)：
+        // token 兜底 / 计划落库走的是 update(null, UpdateWrapper)，第一个参数是 null，
+        // 不会被 any(AiAgentRun.class) 匹配，所以这条 never() 只针对「取消卡片」。
+        when(analysisDecider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(finalAnswer("分析完成"));
+
+        runtime.runAnalysisOnly(100L, 200L, "分析一下这篇文章",
+                articleContext("12"), AgentStepEmitter.noop(), 999L);
+
+        verify(runMapper, never()).update(any(AiAgentRun.class), any());
+    }
+
+    @Test
+    void rootRunStillCancelsPendingConfirmations() {
+        // 对照：根 run（用户发起的新一轮判断）仍要让旧的待确认建议 / 提案过期
+        when(analysisDecider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(finalAnswer("分析完成"));
+
+        runtime.runAnalysisOnly(100L, 200L, "分析一下这篇文章",
+                articleContext("12"), AgentStepEmitter.noop(), null);
+
+        verify(runMapper, atLeastOnce()).update(any(AiAgentRun.class), any());
+    }
+
+    @Test
+    void childRunPersistsParentRunId() {
+        // 父子归属必须真的落库——否则 Token 子树聚合、列表过滤、启动恢复全都失去依据
+        when(analysisDecider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(finalAnswer("分析完成"));
+
+        runtime.runAnalysisOnly(100L, 200L, "分析一下这篇文章",
+                articleContext("12"), AgentStepEmitter.noop(), 999L);
+
+        ArgumentCaptor<AiAgentRun> captor = ArgumentCaptor.forClass(AiAgentRun.class);
+        verify(runMapper).insert(captor.capture());
+        assertThat(captor.getValue().getParentRunId()).isEqualTo(999L);
+        assertThat(captor.getValue().getUserId()).isEqualTo(100L);
     }
 
     private AiAgentRun captureRun() {

@@ -261,7 +261,7 @@ blog:
     project-key: global
     # 判断链模型（分类器 / Agent 决策器 / 证据验证器）：这些环节判错会让整条路走偏，
     # 建议绑一个稳的模型；留空则跟随 spring.ai.openai.chat.options.model（生成链模型）。
-    judge-model: ${AI_JUDGE_MODEL:qwen-plus-2025-07-14}
+    judge-model: ${AI_JUDGE_MODEL:qwen3-max-2026-01-23}
     # AI 计费（预扣 / 结算 / 退款）：docs/redis/钱包与秒杀计划.md §5
     billing:
       enabled: true

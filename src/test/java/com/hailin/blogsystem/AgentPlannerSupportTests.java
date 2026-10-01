@@ -704,6 +704,162 @@ class AgentPlannerSupportTests {
         assertThat(decision.getArticleActionBatch()).isNull();
     }
 
+    /**
+     * 复合目标（第二刀）：证据可信 + 批次校验通过 → 改判 AGENT 并带上 followUpGoal，
+     * 批次交给编排层的 worker 在准入成功后执行（不再在分发处就地执行）。
+     */
+    @Test
+    void recognizedActionAndAnalysisRoutesToAgentWithFollowUpGoal() {
+        AiIntent intent = articleActionIntent(List.of("likeArticle"));
+        intent.setAnalysisGoalEvidence("分析一下它写得怎么样");
+
+        AgentDecision decision = planner.decide(
+                "点赞这篇文章，再分析一下它写得怎么样",
+                intent,
+                articlePage("12"),
+                1L,
+                session(10L));
+
+        assertThat(decision.getAction()).isEqualTo(AgentAction.AGENT);
+        assertThat(decision.getIntent()).isEqualTo("ARTICLE_AGENT");
+        assertThat(decision.getArticleActionBatch()).isNotNull();
+        assertThat(decision.getFollowUpGoal()).isEqualTo("分析一下它写得怎么样");
+    }
+
+    /** 分类器改写/补充了原文 → 证据不成立，退回原拒绝语义，不得放宽。 */
+    @Test
+    void rewrittenAnalysisEvidenceIsRejected() {
+        AiIntent intent = articleActionIntent(List.of("likeArticle"));
+        intent.setAnalysisGoalEvidence("详细评价文笔和结构");
+
+        AgentDecision decision = planner.decide(
+                "点赞这篇文章，再分析一下它写得怎么样",
+                intent,
+                articlePage("12"),
+                1L,
+                session(10L));
+
+        assertThat(decision.getAction()).isEqualTo(AgentAction.CTA);
+        assertThat(decision.getArticleActionBatch()).isNull();
+        assertThat(decision.getRuleHits()).contains("mixed_article_action_analysis");
+        assertThat(decision.getRuleHits()).doesNotContain("article_action_and_analysis_recognized");
+    }
+
+    /**
+     * 证据被错误填成动作本身时要拒绝——它是原文子串，能通过包含校验，
+     * 但采纳它会让分析段去"分析"一句动作描述。
+     *
+     * <p>拒绝的只是「分析」那一半：用户的点赞诉求是真的，动作照常执行。
+     * 「不执行批次后静默丢掉第二目标」由旧守卫兜底——真正的混合句含分析词，会走上面的 CTA。
+     */
+    @Test
+    void fakeActionEvidenceIsRejectedButRealActionStillRuns() {
+        AiIntent intent = articleActionIntent(List.of("likeArticle"));
+        intent.setAnalysisGoalEvidence("点赞这篇文章");
+
+        AgentDecision decision = planner.decide(
+                "点赞这篇文章",
+                intent,
+                articlePage("12"),
+                1L,
+                session(10L));
+
+        assertThat(decision.getArticleActionBatch()).isNotNull();
+        assertThat(decision.getFollowUpGoal()).isNull();
+    }
+
+    /**
+     * 反序（"先分析再点赞"）必须拒绝：本刀不改执行顺序。
+     *
+     * <p>注意这条**只能由 Planner 保证**——实测分类器对反序句照样会填 evidence
+     * （prompt 里写了"动作在后不适用"，但模型不遵守），所以位置判断必须放在 Planner。
+     */
+    @Test
+    void reversedOrderIsRejectedByPositionCheck() {
+        AiIntent intent = articleActionIntent(List.of("likeArticle"));
+        intent.setAnalysisGoalEvidence("分析一下这篇文章");
+
+        AgentDecision decision = planner.decide(
+                "先分析一下这篇文章，再点赞",
+                intent,
+                articlePage("12"),
+                1L,
+                session(10L));
+
+        assertThat(decision.getAction()).isEqualTo(AgentAction.CTA);
+        assertThat(decision.getArticleActionBatch()).isNull();
+    }
+
+    /** 带条件（"写得好就点赞"）同样拒绝：条件是否成立，在分析完成之前无法预判。 */
+    @Test
+    void conditionalOrderIsRejectedByPositionCheck() {
+        AiIntent intent = articleActionIntent(List.of("likeArticle"));
+        intent.setAnalysisGoalEvidence("分析一下这篇文章");
+
+        AgentDecision decision = planner.decide(
+                "分析一下这篇文章，写得好就点赞",
+                intent,
+                articlePage("12"),
+                1L,
+                session(10L));
+
+        assertThat(decision.getAction()).isEqualTo(AgentAction.CTA);
+        assertThat(decision.getArticleActionBatch()).isNull();
+    }
+
+    /** 旧关键词守卫不认识的口语表达——正是复合路径要支持的场景，开闸后应路由到 AGENT。 */
+    @Test
+    void recognizedEvidenceOutsideLegacyKeywordGuardRoutesToAgent() {
+        AiIntent intent = articleActionIntent(List.of("favoriteArticle"));
+        intent.setAnalysisGoalEvidence("顺便评价一下写得如何");
+
+        AgentDecision decision = planner.decide(
+                "收藏一下这篇，顺便评价一下写得如何",
+                intent,
+                articlePage("12"),
+                1L,
+                session(10L));
+
+        assertThat(decision.getAction()).isEqualTo(AgentAction.AGENT);
+        assertThat(decision.getArticleActionBatch()).isNotNull();
+        assertThat(decision.getFollowUpGoal()).isEqualTo("顺便评价一下写得如何");
+    }
+
+    /** 弱模型只提取到动作、漏掉分析证据时，也不能执行半截任务。 */
+    @Test
+    void missingAnalysisEvidenceOutsideLegacyKeywordGuardStillFailsClosed() {
+        AiIntent intent = articleActionIntent(List.of("favoriteArticle"));
+
+        AgentDecision decision = planner.decide(
+                "收藏一下这篇，顺便评价一下写得如何",
+                intent,
+                articlePage("12"),
+                1L,
+                session(10L));
+
+        assertThat(decision.getAction()).isEqualTo(AgentAction.CTA);
+        assertThat(decision.getArticleActionBatch()).isNull();
+        assertThat(decision.getRuleHits()).contains("mixed_article_action_analysis");
+    }
+
+    /** 去掉原文中间标点后拼出的文本不是连续原文证据，必须拒绝。 */
+    @Test
+    void analysisEvidenceMustBeContiguousOriginalText() {
+        AiIntent intent = articleActionIntent(List.of("likeArticle"));
+        intent.setAnalysisGoalEvidence("分析一下它写得怎么样");
+
+        AgentDecision decision = planner.decide(
+                "点赞这篇文章，再分析一下它，写得怎么样",
+                intent,
+                articlePage("12"),
+                1L,
+                session(10L));
+
+        assertThat(decision.getAction()).isEqualTo(AgentAction.CTA);
+        assertThat(decision.getArticleActionBatch()).isNull();
+        assertThat(decision.getRuleHits()).doesNotContain("article_action_and_analysis_recognized");
+    }
+
     @Test
     void discussionOfLikeMechanismDoesNotTriggerMixedRequestGuard() {
         AiIntent intent = new AiIntent();

@@ -105,7 +105,25 @@ public class AgentPlannerSupport {
             Long userId,
             AiSessions session
     ) {
-        if (hasMixedServerActionAndAnalysisRequest(message)) {
+        // 复合目标（动作 + 分析，第二刀）：证据可信就走「批次 + analysis-only 分析」。
+        // 动作侧的校验（白名单 / 冲突 / 去重 / 完整性兜底）原样沿用 decideArticleAction，
+        // **只有它校验通过、真的产出批次时**才改判 AGENT；不通过就保持它原本的裁决
+        // （通常是 CTA），绝不放行一个没有动作的「复合请求」。
+        String analysisGoalEvidence = validateAnalysisGoalEvidence(message, intent);
+        if (!analysisGoalEvidence.isBlank()) {
+            AgentDecision composite = decideArticleAction(message, intent, pageContext, userId);
+            if (composite.getArticleActionBatch() != null) {
+                // 改判 AGENT：批次不在分发处执行，而是交给 streamAgentReply 的 worker
+                // 在权威准入成功之后执行（见 AiMessageServiceImpl 的分发判断）。
+                composite.setAction(AgentAction.AGENT);
+                // 运行域必须切到文章 Agent。原始分类器 intent 仍是 ARTICLE_ACTION，
+                // 若保留它，路由注册表找不到 Runtime，未登记 intent 会落入学习域兜底。
+                composite.setIntent("ARTICLE_AGENT");
+                composite.setFollowUpGoal(analysisGoalEvidence);
+            }
+            return composite;
+        }
+        if (hasMixedServerActionAndAnalysisRequest(message, intent)) {
             return cta(
                     intent == null ? null : intent.getIntent(),
                     List.of("mixed_article_action_analysis"),
@@ -1181,12 +1199,89 @@ public class AgentPlannerSupport {
         return actions;
     }
 
-    private boolean hasMixedServerActionAndAnalysisRequest(String message) {
+    private boolean hasMixedServerActionAndAnalysisRequest(String message, AiIntent intent) {
         if (message == null) {
             return false;
         }
         String normalized = message.replaceAll("\\s+", "");
-        boolean explicitCommand = normalized.contains("帮我点赞")
+        boolean explicitCommand = containsExplicitServerActionCommand(normalized);
+        if (!explicitCommand && intent != null && "ARTICLE_ACTION".equals(intent.getIntent())) {
+            List<String> requestedActions = intent.getRequestedActions();
+            explicitCommand = (requestedActions != null
+                    && requestedActions.stream().anyMatch(SERVER_ARTICLE_ACTION_TYPES::contains))
+                    || SERVER_ARTICLE_ACTION_TYPES.contains(intent.getActionType());
+        }
+        boolean analysisRequest = normalized.contains("写得怎么样")
+                || normalized.contains("写得如何")
+                || normalized.contains("写得咋样")
+                || normalized.contains("分析这篇文章")
+                || normalized.contains("分析一下")
+                || normalized.contains("分析分析")
+                || normalized.contains("评价这篇文章")
+                || normalized.contains("评价一下")
+                || normalized.contains("评价评价")
+                || normalized.contains("评估")
+                || normalized.contains("点评")
+                || normalized.contains("看看这篇文章")
+                || normalized.contains("说说这篇")
+                || normalized.contains("优缺点")
+                || normalized.contains("内容质量")
+                || normalized.contains("值不值得读");
+        return explicitCommand && analysisRequest;
+    }
+
+    /**
+     * 验证分类器给出的分析诉求片段确实来自用户原话——复合目标半刀的 fail-closed 闸门。
+     *
+     * LLM 只负责摘录，后端负责验证。这里使用原文连续子串，而不是去标点后比较：
+     * 后者会让模型跨标点拼接或改写的文本通过，违背“逐字摘录”的契约。
+     *
+     * @return 验证通过的片段（已去尾标点）；不通过返回空串
+     */
+    private String validateAnalysisGoalEvidence(String message, AiIntent intent) {
+        if (message == null || message.isBlank() || intent == null) {
+            return "";
+        }
+        String raw = intent.getAnalysisGoalEvidence();
+        if (raw == null || raw.isBlank()) {
+            return "";
+        }
+
+        String evidence = raw.trim().replaceAll("[。！？!?，,；;：:、]+$", "").trim();
+        if (evidence.isBlank()) {
+            return "";
+        }
+
+        if (!message.contains(evidence)) {
+            return "";
+        }
+
+        // 证据不能是一句动作指令：分类器可能把动作原话当成"分析诉求"塞进来，
+        // 而它确实是原文的连续片段、能通过上面的包含校验。不拦的话，
+        // 「点赞这篇文章」会被当成第二目标，分析段跑去分析一句动作描述。
+        if (containsExplicitServerActionCommand(evidence.replaceAll("\\s+", ""))) {
+            return "";
+        }
+
+        // 本刀只支持「动作在前、分析在后」。证据之后再出现动作词，说明用户是反序或带条件
+        // 表达（"先分析再点赞" / "写得好就点赞"）——拒绝：不擅自改执行顺序，也不预判条件
+        // （条件是否成立，在分析完成之前根本无法知道）。
+        //
+        // 这里刻意用裸词而不是上面的完整短语表：实测模型对反序句照样会填证据，
+        // 而"，再点赞"这种尾巴不匹配任何完整短语。
+        String afterEvidence = message.substring(message.indexOf(evidence) + evidence.length())
+                .replaceAll("\\s+", "");
+        if (afterEvidence.contains("点赞") || afterEvidence.contains("收藏")
+                || afterEvidence.contains("关注")) {
+            return "";
+        }
+
+        return evidence;
+    }
+
+    /** 用户原话（或其片段）是否含明确的服务端动作指令；混合检测与证据校验共用。 */
+    private boolean containsExplicitServerActionCommand(String normalized) {
+        return normalized.contains("帮我点赞")
                 || normalized.contains("给这篇文章点赞")
                 || normalized.contains("点赞这篇文章")
                 || normalized.contains("帮我收藏")
@@ -1196,11 +1291,6 @@ public class AgentPlannerSupport {
                 || normalized.contains("取消点赞")
                 || normalized.contains("取消收藏")
                 || normalized.contains("取消关注");
-        boolean analysisRequest = normalized.contains("写得怎么样")
-                || normalized.contains("分析这篇文章")
-                || normalized.contains("评价这篇文章")
-                || normalized.contains("看看这篇文章");
-        return explicitCommand && analysisRequest;
     }
 
     private AgentDecision decideNavigate(

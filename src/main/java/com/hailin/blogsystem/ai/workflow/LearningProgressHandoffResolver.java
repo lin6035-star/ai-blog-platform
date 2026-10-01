@@ -78,6 +78,9 @@ public class LearningProgressHandoffResolver {
         return run != null
                 && userId.equals(run.getUserId())
                 && sessionId.equals(run.getSessionId())
+                // 第四步：子 run 是编排内部的分析执行，不是"上一轮用户拿到的那份结果"。
+                // 正常路径下 AiMessages.agentRunId 只绑根 run，这里是防御。
+                && run.getParentRunId() == null
                 && AiAgentRunStatus.COMPLETED.name().equals(run.getStatus())
                 && run.getFinalAnswer() != null
                 && !run.getFinalAnswer().isBlank();

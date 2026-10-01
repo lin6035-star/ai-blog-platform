@@ -220,6 +220,13 @@ public class AgentWriteActionService {
                     "不存在或无权访问"
             );
         }
+        if (run.getParentRunId() != null) {
+            // 第四步：子 run 是外层任务内部的执行记录，不是用户可确认的普通 run（防御）。
+            throw new BusinessException(
+                    BlogConstants.ErrorCode.CONFLICT,
+                    "这个运行不是可确认的任务"
+            );
+        }
         return run;
     }
 

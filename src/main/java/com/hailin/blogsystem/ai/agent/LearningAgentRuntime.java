@@ -1,6 +1,7 @@
 package com.hailin.blogsystem.ai.agent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.LogValues;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.LearningPlans;
 import com.hailin.blogsystem.entity.dto.AiAgentRunStatus;
@@ -223,7 +224,10 @@ public class LearningAgentRuntime extends AbstractAgentRuntime implements AgentR
             writeType = "RENAME";
         } else {
             emitter.emit(run.getUsedSteps() + 1, "SUGGEST_WRITE", "FAILED", "不支持的写动作类型", null);
-            return markFailed(run, "Agent 写动作提案无效（不支持的 actionType：" + actionType + "）");
+            // C0.2：actionType 是模型给的内部协议值，只进日志（用户可见文案保持稳定）
+            log.warn("[AGENT] 写动作提案被拒（actionType 不在白名单）: runId={}, actionType={}",
+                    run.getId(), LogValues.safe(actionType));
+            return markFailed(run, "Agent 写动作提案无效（不支持的写动作类型）");
         }
 
         // RENAME 专属必填：显式改名但缺新名 → FAILED 绝不回落 UPDATE（回落 + done 缺省 true = 误勾选）

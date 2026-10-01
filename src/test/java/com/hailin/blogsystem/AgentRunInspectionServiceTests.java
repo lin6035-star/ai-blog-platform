@@ -7,7 +7,9 @@ import com.hailin.blogsystem.ai.agent.AgentStepLabelSupport;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.AiAgentStep;
 import com.hailin.blogsystem.entity.vo.AgentRunDetailVO;
+import com.hailin.blogsystem.entity.vo.AgentRunDevDetailVO;
 import com.hailin.blogsystem.entity.vo.AgentRunSummaryVO;
+import com.hailin.blogsystem.entity.vo.AgentStepRawVO;
 import com.hailin.blogsystem.entity.vo.AgentStepVO;
 import com.hailin.blogsystem.entity.vo.PageVO;
 import com.hailin.blogsystem.exception.BusinessException;
@@ -143,6 +145,76 @@ class AgentRunInspectionServiceTests {
         assertThat(page.getList().get(0).getId()).isEqualTo(1L);
         assertThat(page.getTotal()).isEqualTo(1);
         assertThat(page.getList().get(0).getStatus()).isEqualTo("COMPLETED");
+    }
+
+    // ==================== 第四步：任务步骤透出子 run id ====================
+
+    @Test
+    void taskStepExposesChildRunIdForHistoryHydration() {
+        // 子 run 的内部明细不在外层 run 的 steps 里，前端刷新后靠这个 id 二次补拉
+        when(runMapper.selectById(1L)).thenReturn(run(1L, 100L, "COMPLETED", null));
+        when(stepMapper.selectList(any())).thenReturn(List.of(
+                step(1, "TASK_STEP",
+                        "{\"state\":\"SUCCEEDED\",\"summary\":\"分析完成\",\"data\":{\"agentRunId\":\"777\"}}")));
+
+        List<AgentStepVO> steps = service.listSteps(1L);
+
+        assertThat(steps.get(0).getKind()).isEqualTo("TASK");
+        assertThat(steps.get(0).getChildRunId()).isEqualTo("777");
+    }
+
+    @Test
+    void agentStepHasNoChildRunId() {
+        // 普通思考步骤不该被误认为有子 run
+        when(runMapper.selectById(1L)).thenReturn(run(1L, 100L, "COMPLETED", null));
+        when(stepMapper.selectList(any())).thenReturn(List.of(
+                step(1, "QUERY_ARTICLE", "{\"summary\":\"读到了正文\"}")));
+
+        List<AgentStepVO> steps = service.listSteps(1L);
+
+        assertThat(steps.get(0).getKind()).isEqualTo("AGENT");
+        assertThat(steps.get(0).getChildRunId()).isNull();
+    }
+
+    // ==================== P0-b：Token 只走开发者通道 ====================
+
+    @Test
+    void devChannelExposesRunAndStepTokens() {
+        AiAgentRun devRun = run(1L, 100L, "COMPLETED", null);
+        devRun.setInputTokens(1200);
+        devRun.setOutputTokens(300);
+        devRun.setTotalTokens(1500);
+        when(runMapper.selectById(1L)).thenReturn(devRun);
+
+        AiAgentStep tokenStep = step(1, "QUERY_ARTICLE", "{\"summary\":\"读到了正文\"}");
+        tokenStep.setInputTokens(900);
+        tokenStep.setOutputTokens(120);
+        when(stepMapper.selectList(any())).thenReturn(List.of(tokenStep));
+
+        AgentRunDevDetailVO detail = service.getDevDetail(1L);
+        assertThat(detail.getInputTokens()).isEqualTo(1200);
+        assertThat(detail.getOutputTokens()).isEqualTo(300);
+        assertThat(detail.getTotalTokens()).isEqualTo(1500);
+
+        List<AgentStepRawVO> rawSteps = service.listRawSteps(1L);
+        assertThat(rawSteps).hasSize(1);
+        assertThat(rawSteps.get(0).getInputTokens()).isEqualTo(900);
+        assertThat(rawSteps.get(0).getOutputTokens()).isEqualTo(120);
+    }
+
+    @Test
+    void devChannelNormalizesNullTokensToZero() {
+        // 历史行 token 列可能是 null（ALTER 补列前的数据）——展示层统一按 0，避免前端各写一遍判空
+        when(runMapper.selectById(1L)).thenReturn(run(1L, 100L, "COMPLETED", null));
+        when(stepMapper.selectList(any())).thenReturn(List.of(
+                step(1, "QUERY_MEMORY", "{\"summary\":\"无\"}")));
+
+        AgentRunDevDetailVO detail = service.getDevDetail(1L);
+
+        assertThat(detail.getInputTokens()).isZero();
+        assertThat(detail.getOutputTokens()).isZero();
+        assertThat(detail.getTotalTokens()).isZero();
+        assertThat(service.listRawSteps(1L).get(0).getInputTokens()).isZero();
     }
 
     @Test

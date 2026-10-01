@@ -68,7 +68,7 @@ class GeneralAgentActionExecutorTests {
                         .withInput(Map.of("question", "用户最近情况")),
                 100L,
                 null
-        );
+        ).summary();
 
         assertThat(observation).contains("记忆摘要");
         assertThat(observation).contains("语义记忆(USER_PREFERENCE)");
@@ -87,7 +87,7 @@ class GeneralAgentActionExecutorTests {
                 AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY),
                 100L,
                 null
-        );
+        ).summary();
 
         // 无检索词时默认「用户情况」召回，不炸 Loop
         assertThat(observation).contains("记忆摘要");
@@ -106,7 +106,7 @@ class GeneralAgentActionExecutorTests {
                         .withInput(Map.of("question", "用户最近情况")),
                 100L,
                 null
-        );
+        ).summary();
 
         assertThat(observation).contains("语义记忆检索失败");
         assertThat(observation).contains("情景记忆检索失败");
@@ -126,7 +126,7 @@ class GeneralAgentActionExecutorTests {
                         .withInput(Map.of("keyword", "缓存穿透")),
                 100L,
                 null
-        );
+        ).summary();
 
         assertThat(observation).contains("站内文章知识检索结果");
         assertThat(observation).contains("《Redis缓存设计》");
@@ -139,7 +139,7 @@ class GeneralAgentActionExecutorTests {
                 AgentStepDecision.of(AgentStepActionType.SEARCH_RAG),
                 100L,
                 null
-        );
+        ).summary();
 
         assertThat(observation).contains("缺少关键词");
     }
@@ -154,7 +154,7 @@ class GeneralAgentActionExecutorTests {
                         .withInput(Map.of("keyword", "Redis 缓存击穿")),
                 100L,
                 null
-        );
+        ).summary();
 
         assertThat(observation).contains("没有检索到");
     }
@@ -165,7 +165,7 @@ class GeneralAgentActionExecutorTests {
                 AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY),
                 null,
                 null
-        );
+        ).summary();
 
         assertThat(observation).contains("未登录");
     }

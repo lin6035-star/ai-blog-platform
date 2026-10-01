@@ -296,5 +296,76 @@
     "category": "regression",
     "message": "充值比例是多少",
     "expectedIntent": "GENERAL_CHAT"
+  },
+  {
+    "name": "复合目标：动作在前 + 分析在后（核心支持句；第四步起两项都要进 taskGoals）",
+    "category": "boundary",
+    "message": "点赞这篇文章，再分析一下它写得怎么样",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "ARTICLE_ACTION",
+    "expectedRequestedActionsContains": ["likeArticle"],
+    "expectedAnalysisGoalEvidenceContains": "分析",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 2,
+    "expectedTaskGoalTypesContains": ["ARTICLE_WRITE", "ARTICLE_ANALYSIS"]
+  },
+  {
+    "name": "第三刀：写动作 + 客户端导航（第一刀验收句 1；intent 两轮实测稳定但非本样例关注点，故不写死）",
+    "category": "boundary",
+    "message": "点赞这篇文章，再跳转到该作者的个人主页",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 2,
+    "expectedTaskGoalTypesContains": ["ARTICLE_WRITE", "NAVIGATE"]
+  },
+  {
+    "name": "第三刀：写动作 + 站内检索（第一刀验收句 2；实测 intent 在 ACTION/AGENT 间漂移，故不写死）",
+    "category": "boundary",
+    "message": "点赞这篇文章，再帮我找找还有没有关于Redis的文章",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 2,
+    "expectedTaskGoalTypesContains": ["ARTICLE_WRITE", "ARTICLE_SEARCH"]
+  },
+  {
+    "name": "复合目标：扩展表达（顺便）",
+    "category": "boundary",
+    "message": "收藏一下这篇，顺便评价一下写得如何",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "ARTICLE_ACTION",
+    "expectedRequestedActionsContains": ["favoriteArticle"],
+    "expectedAnalysisGoalEvidenceContains": "评价"
+  },
+  {
+    "name": "反例：讨论点赞机制不得误判为复合目标",
+    "category": "regression",
+    "message": "分析这篇文章里的点赞机制",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedAnalysisGoalEvidenceBlank": true
+  },
+  {
+    "name": "反例：单动作不得带分析证据",
+    "category": "regression",
+    "message": "点赞这篇文章",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "ARTICLE_ACTION",
+    "expectedRequestedActionsContains": ["likeArticle"],
+    "expectedAnalysisGoalEvidenceBlank": true,
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalTypesContains": ["ARTICLE_WRITE"]
+  },
+  {
+    "name": "反例：纯分析请求不得判成文章动作",
+    "category": "regression",
+    "message": "帮我分析一下这篇文章的结构",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedAnalysisGoalEvidenceBlank": true
   }
 ]

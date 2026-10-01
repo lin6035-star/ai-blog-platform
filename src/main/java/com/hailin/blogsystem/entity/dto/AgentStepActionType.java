@@ -34,5 +34,14 @@ public enum AgentStepActionType {
     FINAL_ANSWER,
     SUGGEST_WORKFLOW,
     SUGGEST_WRITE,
-    ARTICLE_INTERACTION_BATCH
+    ARTICLE_INTERACTION_BATCH,
+
+    /**
+     * 分层任务编排的一个步骤（第三刀）。
+     *
+     * <p>**只加这一个值，不为每种 StepType 各加一个**：本枚举的语义是「Agent Loop 内部的动作」，
+     * 而 `StepType`（ARTICLE_WRITE / NAVIGATE / …）是另一层的概念。六个都加会让这个枚举
+     * 变成两种概念的混合——真实类型记在该 step 的 `inputJson.type` 里。
+     */
+    TASK_STEP
 }

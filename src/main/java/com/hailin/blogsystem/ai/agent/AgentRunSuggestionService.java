@@ -432,6 +432,14 @@ public class AgentRunSuggestionService {
                     "不存在或无权访问"
             );
         }
+        if (run.getParentRunId() != null) {
+            // 第四步：子 run 是外层任务内部的执行记录，不是用户可确认的普通 run。
+            // 它不该出现在用户列表里，正常路径拿不到它的 id——这里是防御。
+            throw new BusinessException(
+                    BlogConstants.ErrorCode.CONFLICT,
+                    "这个运行不是可确认的任务"
+            );
+        }
         return run;
     }
 

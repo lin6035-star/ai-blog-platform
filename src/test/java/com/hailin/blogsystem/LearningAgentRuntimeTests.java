@@ -1,11 +1,17 @@
 package com.hailin.blogsystem;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentStepDecision;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentStepDecider;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentRunResult;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.LearningAgentActionExecutor;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.LearningAgentRuntime;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.LearningPlanAnchorService;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.AiAgentStep;
@@ -117,7 +123,7 @@ class LearningAgentRuntimeTests {
                         AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                                 .withInput(Map.of("answer", "建议继续学 Redis 缓存击穿"))
                 );
-        when(executor.execute(any(), any(), any())).thenReturn("找到 1 个活跃计划：Redis 学习计划（进度 40%）");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("找到 1 个活跃计划：Redis 学习计划（进度 40%）"));
 
         AgentRunResult result = runtime.run(100L, 200L, "帮我安排今天学什么");
 
@@ -165,7 +171,7 @@ class LearningAgentRuntimeTests {
         // 永远不终态，只查询，跑满 maxSteps(5)
         when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD));
-        when(executor.execute(any(), any(), any())).thenReturn("第 X 条观察数据");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("第 X 条观察数据"));
 
         AgentRunResult result = runtime.run(100L, 200L, "帮我安排今天学什么");
 
@@ -210,7 +216,7 @@ class LearningAgentRuntimeTests {
                                 "reason", "当前计划阶段与学习反馈不匹配",
                                 "initialMessage", "我最近学 Redis 有点乱")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("学习计划总览：共 1 个计划，1 个进行中。\n目标计划《Redis 学习计划》");
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划，1 个进行中。\n目标计划《Redis 学习计划》"));
 
         AgentRunResult result = runtime.run(100L, 200L, "我最近学 Redis 有点乱");
 
@@ -239,7 +245,7 @@ class LearningAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WORKFLOW)
                         .withInput(Map.of("workflowType", "CREATE_ARTICLE", "reason", "想写文章")));
-        when(executor.execute(any(), any(), any())).thenReturn("学习计划总览：共 1 个计划");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划"));
 
         AgentRunResult result = runtime.run(100L, 200L, "帮我写文章");
 
@@ -258,7 +264,7 @@ class LearningAgentRuntimeTests {
                         Map.of(), "先看看你今天的学习计划"))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "建议继续学 Redis")));
-        when(executor.execute(any(), any(), any())).thenReturn("找到 1 个活跃计划");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("找到 1 个活跃计划"));
 
         List<String[]> events = new java.util.ArrayList<>();
         runtime.run(100L, 200L, "帮我安排今天学什么",
@@ -301,7 +307,7 @@ class LearningAgentRuntimeTests {
                                 "stageTitle", "阶段一",
                                 "done", "true")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("学习计划总览：共 1 个计划。\n目标计划《Redis 学习计划》\n- 阶段《阶段一》：缓存击穿；");
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划。\n目标计划《Redis 学习计划》\n- 阶段《阶段一》：缓存击穿；"));
 
         AgentRunResult result = runtime.run(100L, 200L, "帮我把缓存击穿勾掉");
 
@@ -328,7 +334,7 @@ class LearningAgentRuntimeTests {
                                 "stageTitle", "第二阶段",
                                 "taskTitle", "缓存雪崩防护")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("学习计划总览：共 1 个计划。\n目标计划《Redis 学习计划》\n- 阶段《第二阶段》：缓存穿透；");
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划。\n目标计划《Redis 学习计划》\n- 阶段《第二阶段》：缓存穿透；"));
 
         AgentRunResult result = runtime.run(100L, 200L, "给 Redis 计划第二阶段加一个缓存雪崩防护任务");
 
@@ -356,7 +362,7 @@ class LearningAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "这个任务已经在你的阶段二里了，不用重复添加。")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("学习计划总览：共 1 个计划。\n- 阶段《阶段二》：缓存穿透；缓存雪崩防护；");
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划。\n- 阶段《阶段二》：缓存穿透；缓存雪崩防护；"));
         when(learningPlansService.listByUser(100L)).thenReturn(List.of(activePlan(1L, "Redis 学习计划")));
         when(learningPlansService.matchPlansByMessage(100L, "Redis 学习计划"))
                 .thenReturn(List.of(activePlan(1L, "Redis 学习计划")));
@@ -389,7 +395,7 @@ class LearningAgentRuntimeTests {
                                 "taskTitle", "缓存击穿",
                                 "newTitle", "缓存击穿防护")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("学习计划总览：共 1 个计划。\n- 阶段《第二阶段》：缓存击穿；");
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划。\n- 阶段《第二阶段》：缓存击穿；"));
 
         AgentRunResult result = runtime.run(100L, 200L, "把缓存击穿任务改名为缓存击穿防护");
 
@@ -420,7 +426,7 @@ class LearningAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "阶段二里已经有缓存雪崩防护这个任务了，换个名字吧。")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("学习计划总览：共 1 个计划。\n- 阶段《阶段二》：缓存击穿；缓存雪崩防护；");
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划。\n- 阶段《阶段二》：缓存击穿；缓存雪崩防护；"));
         when(learningPlansService.listByUser(100L)).thenReturn(List.of(activePlan(1L, "Redis 学习计划")));
         when(learningPlansService.matchPlansByMessage(100L, "Redis 学习计划"))
                 .thenReturn(List.of(activePlan(1L, "Redis 学习计划")));
@@ -453,7 +459,7 @@ class LearningAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "新名字和原来一样，不用改。")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("学习计划总览：共 1 个计划。\n- 阶段《阶段一》：缓存击穿；");
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划。\n- 阶段《阶段一》：缓存击穿；"));
 
         AgentRunResult result = runtime.run(100L, 200L, "把缓存击穿改名为缓存击穿");
 
@@ -476,13 +482,15 @@ class LearningAgentRuntimeTests {
                         .withInput(Map.of(
                                 "actionType", "DELETE_LEARNING_TASK",
                                 "taskTitle", "缓存击穿")));
-        when(executor.execute(any(), any(), any())).thenReturn("学习计划总览：共 1 个计划");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划"));
 
         AgentRunResult result = runtime.run(100L, 200L, "把缓存击穿任务删掉");
 
         assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
         AiAgentRun saved = captureRun();
-        assertThat(saved.getErrorMessage()).contains("不支持的 actionType");
+        assertThat(saved.getErrorMessage()).contains("不支持的写动作类型");
+        // C0.2：模型给的内部协议值只进日志，不进用户可见文案（原先这里断言的是"含 actionType 原文"）
+        assertThat(saved.getErrorMessage()).doesNotContain("DELETE_LEARNING_TASK");
         assertThat(result.pendingWriteAction()).isNull();
         // markFailed 终局：run 落 FAILED，不再产出 WAITING_WRITE_CONFIRM 提案（无 pendingWriteAction 落库）
         assertThat(saved.getContextJson()).doesNotContain("pendingWriteAction");
@@ -521,7 +529,7 @@ class LearningAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
                         .withInput(Map.of("stageTitle", "阶段一")));
-        when(executor.execute(any(), any(), any())).thenReturn("学习计划总览：共 1 个计划");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划"));
 
         AgentRunResult result = runtime.run(100L, 200L, "帮我把任务勾掉");
 

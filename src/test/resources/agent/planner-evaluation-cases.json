@@ -280,8 +280,8 @@
     "expectedAction": "CHAT",
     "expectedWorkflowType": null,
     "expectedToolName": null,
-    "expectedClientActionType": "favoriteArticle",
-    "expectedRuleHit": "article_action_type_valid",
+    "expectedClientActionType": null,
+    "expectedRuleHit": "article_action_batch_valid",
     "expectedReasonContains": "校验通过",
     "autoStartedCount": 0
   },

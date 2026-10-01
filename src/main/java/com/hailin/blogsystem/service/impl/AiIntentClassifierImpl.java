@@ -251,6 +251,15 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
                                 当 pageType 是 article-detail，且用户要求点赞、取消点赞、收藏、取消收藏、关注作者、取消关注作者、分享、复制链接、跳到评论区时，输出 ARTICLE_ACTION。
                                 ARTICLE_ACTION 必须填写 requestedActions 数组，按用户表达顺序列出全部动作；actionType 仅兼容单动作，取数组第一项。
                                 例如“点赞并收藏”必须输出 requestedActions=["likeArticle","favoriteArticle"]，不能只保留一个。
+                                【复合目标例外】当句子 =「上述服务端动作在**前**」+「对当前文章的分析诉求在**后**」
+                                （例如“点赞这篇文章，再分析一下它写得怎么样”）时，**仍然输出 ARTICLE_ACTION**，
+                                不要因为“一句话里有两个子目标”就升级成 ARTICLE_AGENT；
+                                动作在后（“先分析再点赞”）或带条件（“写得好就点赞”）的**不适用**本条，按原规则判：
+                                - requestedActions 填动作部分，按用户表达顺序；
+                                - analysisGoalEvidence 填分析诉求在用户原话中的**连续片段**，
+                                  必须逐字摘录，不能改写、总结、翻译或补充；后端会验证它是否真实出现在原始消息中。
+                                例：intent=ARTICLE_ACTION, requestedActions=["likeArticle"],
+                                    analysisGoalEvidence="分析一下它写得怎么样"
                                 当 pageType 是 article-detail，且用户询问“这篇文章讲了什么”“总结这篇文章”“这篇文章重点是什么”“这篇文章里的某个内容是什么意思”“分析当前文章”时，输出 ARTICLE_DETAIL_QA。
                                 当 pageType 是 article-detail，且用户要求回到顶部、回到文章开头、滚动到顶部时，输出 ARTICLE_ACTION，actionType=scrollToTop。
                                 注意区分：“看看开头”“先看开头再看结尾”是**阅读文章内容**，不是滚动动作；
@@ -286,6 +295,8 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
                                   -> ARTICLE_AGENT。
                                   这条**优先于**上面的“分析 / 总结 / 评价当前文章 -> ARTICLE_DETAIL_QA”：
                                   只要句子里有多个并列的子目标，即使每个子目标单独看都像 QA，也判 ARTICLE_AGENT
+                                  （**例外**：若其中一个子目标是上文列出的服务端文章动作、另一个是对当前文章的
+                                  分析诉求，则按 ARTICLE_ACTION 处理并填 analysisGoalEvidence，不判 ARTICLE_AGENT）
                                 - 明确要求结合长期记忆 / 写作偏好 -> ARTICLE_AGENT
                                  
                                 actionType / requestedActions 元素可选：likeArticle, unlikeArticle, favoriteArticle, unfavoriteArticle, followAuthor, unfollowAuthor, copyArticleLink, scrollToComments, saveDraft, publish, fillArticle, scrollToTop。
@@ -649,8 +660,36 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
                                 文章查询：
                                 {"intent":"ARTICLE_SEARCH","confidence":0.96,"learningPlanRef":null,"learningStageRef":null,"actionType":null,"articleId":null,"userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"suggestedAction":"CHAT","suggestedWorkflowType":null,"risk":"LOW","reason":"用户明确查询站内文章","needsThinking":false,"needsThinkingReason":null}
 
+                                文章动作 + 分析（复合目标）：
+                                {"intent":"ARTICLE_ACTION","confidence":0.95,"learningPlanRef":null,"learningStageRef":null,"actionType":"likeArticle","articleId":"12","userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"requestedActions":["likeArticle"],"analysisGoalEvidence":"分析一下它写得怎么样","suggestedAction":"CHAT","suggestedWorkflowType":null,"risk":"LOW","reason":"用户要求点赞并分析当前文章","needsThinking":false,"needsThinkingReason":null}
+
                                 topicEvidence 字段必须输出。
                                 没有明确主题时必须输出 null。
+                                analysisGoalEvidence 字段必须输出：只在「服务端文章动作 + 分析诉求」的
+                                复合目标里填分析诉求的原文片段，其余情况一律 null。
+                                requestKind / taskGoals 字段必须输出：
+                                【taskGoals】把用户这句话拆成"用户想完成哪几件事"，按原话顺序列出每一项：
+                                  {"type":"...","params":{...},"goalEvidence":"原话连续片段","after":[],"requires":[],"onFailure":"CONTINUE"}
+                                  type 取值：ARTICLE_WRITE（点赞/取消点赞/收藏/取消收藏/关注/取消关注，动作放 params.action）
+                                             ARTICLE_SEARCH（站内找文章，关键词放 params.query）
+                                             NAVIGATE（跳转，目标放 params.target，如 userProfile）
+                                             ARTICLE_ANALYSIS（对当前文章做分析 / 评价，params 留空即可）。
+                                  goalEvidence 必须逐字摘录用户原话中的连续片段，不能改写、总结或补充；后端会验证它真在原文里。
+                                  **单目标也要输出**（数组长度为 1），例如"点赞这篇文章" -> 一项 ARTICLE_WRITE。
+                                  常见组合：
+                                    "点赞这篇文章，再跳转到该作者的个人主页"
+                                      -> [ARTICLE_WRITE(action=likeArticle), NAVIGATE(target=userProfile)]
+                                    "点赞这篇文章，再帮我找找还有没有关于Redis的文章"
+                                      -> [ARTICLE_WRITE(action=likeArticle), ARTICLE_SEARCH(query=Redis)]
+                                    "点赞这篇文章，再分析一下它写得怎么样"
+                                      -> [ARTICLE_WRITE(action=likeArticle), ARTICLE_ANALYSIS()]
+                                  ARTICLE_ANALYSIS 的两个边界：
+                                    - 只用于「服务端文章动作**之后**」的分析诉求（如上一例），此时 analysisGoalEvidence 同样要填；
+                                    - 单纯评价当前文章（"这篇写得怎么样""这一节如何"）**不是任务**，
+                                      照常判 ARTICLE_DETAIL_QA，不要产出 taskGoals。
+                                  **反例**：讨论机制（"分析这篇文章里的点赞机制"）不是在要求执行动作，
+                                  不要产出 taskGoals；问余额、问比例这类同理。
+                                【requestKind】是任务时为 TASK；普通问答 / 闲聊 / 纯粹讨论时为 CHAT 且 taskGoals=null。
                                 所有字段都必须输出。
                                 没有值的字段必须输出 null。
                                 suggestedAction、suggestedWorkflowType、risk、reason 不能省略。

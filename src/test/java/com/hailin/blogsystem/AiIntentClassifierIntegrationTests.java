@@ -22,11 +22,14 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 
 import java.io.InputStream;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 @Tag("integration")
 @Tag("eval")
@@ -69,7 +72,30 @@ class AiIntentClassifierIntegrationTests {
             Double expectedConfidenceMin,
             Boolean expectedNeedsThinking,
             Boolean expectedNeedsThinkingReasonNonBlank,
-            String expectedSuggestedAction
+            String expectedSuggestedAction,
+            // 复合目标（动作 + 分析）：这两个字段是本次改动最核心的提取质量指标。
+            // record 必须先扩——否则 Jackson 会把 JSON 里的新字段当未知属性直接炸。
+            List<String> expectedRequestedActionsContains,
+            String expectedAnalysisGoalEvidenceContains,
+            // 反例专用：断言 analysisGoalEvidence 必须为空 = 没有被误判成复合目标。
+            // 反例的 expectedIntent 不写死（同一句在 QA / AGENT 之间本就有合理漂移），
+            // 真正要锁的是"不能把它当成动作 + 分析"。
+            Boolean expectedAnalysisGoalEvidenceBlank,
+            // 第三刀补（2026-09-30）：taskGoals / requestKind 的回归维度。
+            // 之前这两个字段**完全没有断言**——于是"模型只拆出一个目标"这种多目标静默丢失
+            // 在离线门与在线门之间穿了过去（实测见 TaskGoalsProbeTests）。
+            String expectedRequestKind,
+            List<String> expectedTaskGoalTypesContains,
+            Integer expectedTaskGoalCountAtLeast
+    ) {
+    }
+
+    record ActionAnalysisRecallCase(
+            String name,
+            String message,
+            String pageType,
+            String pageArticleId,
+            List<String> expectedRequestedActionsContains
     ) {
     }
 
@@ -121,6 +147,7 @@ class AiIntentClassifierIntegrationTests {
 
     @Test
     void picksPlanFromInjectedListByAlias() {
+        assumeNoSingleCaseFilter();
         // 旧行为：learningPlanRef="c++学习计划" 被分词切成 "c"，与「C语言系统学习计划」同分并列 → 弹卡让用户重选
         insertActivePlan("C语言系统学习计划");
         LearningPlans cppPlan = insertActivePlan("C++ 系统学习与工程化实践计划");
@@ -135,6 +162,7 @@ class AiIntentClassifierIntegrationTests {
 
     @Test
     void doesNotGuessWhenNoPlanMentioned() {
+        assumeNoSingleCaseFilter();
         insertActivePlan("C语言系统学习计划");
         insertActivePlan("C++ 系统学习与工程化实践计划");
 
@@ -177,6 +205,8 @@ class AiIntentClassifierIntegrationTests {
         // 注入真实计划列表后的「别名选中」能力由 picksPlanFromInjectedListByAlias 单独验证
         AiIntent intent = aiIntentClassifier.classify(c.message(), pageContext, null, null);
 
+        assertClassifierCallSucceeded(caseName, intent);
+
         if (c.expectedIntent() != null) {
             assertThat(intent.getIntent())
                     .as("用例 %s：intent", caseName)
@@ -217,5 +247,114 @@ class AiIntentClassifierIntegrationTests {
                     .as("用例 %s：suggestedAction", caseName)
                     .isEqualTo(c.expectedSuggestedAction());
         }
+        if (c.expectedRequestedActionsContains() != null) {
+            assertThat(intent.getRequestedActions())
+                    .as("用例 %s：requestedActions 应包含", caseName)
+                    .containsAll(c.expectedRequestedActionsContains());
+        }
+        if (c.expectedAnalysisGoalEvidenceContains() != null) {
+            assertThat(intent.getAnalysisGoalEvidence())
+                    .as("用例 %s：analysisGoalEvidence 应包含", caseName)
+                    .contains(c.expectedAnalysisGoalEvidenceContains());
+        }
+        if (Boolean.TRUE.equals(c.expectedAnalysisGoalEvidenceBlank())) {
+            assertThat(intent.getAnalysisGoalEvidence())
+                    .as("用例 %s：analysisGoalEvidence 必须为空（不得误判为复合目标）", caseName)
+                    .isBlank();
+        }
+        if (c.expectedRequestKind() != null) {
+            assertThat(intent.getRequestKind())
+                    .as("用例 %s：requestKind（TASK 才进任务编排）", caseName)
+                    .isEqualTo(c.expectedRequestKind());
+        }
+        if (c.expectedTaskGoalCountAtLeast() != null) {
+            List<Map<String, Object>> goals = intent.getTaskGoals();
+            assertThat(goals == null ? List.<Map<String, Object>>of() : goals)
+                    .as("用例 %s：taskGoals 目标数——少拆一个目标就是一次静默丢目标", caseName)
+                    .hasSizeGreaterThanOrEqualTo(c.expectedTaskGoalCountAtLeast());
+        }
+        if (c.expectedTaskGoalTypesContains() != null) {
+            List<String> actualTypes = intent.getTaskGoals() == null
+                    ? List.of()
+                    : intent.getTaskGoals().stream()
+                    .map(g -> g == null ? "" : String.valueOf(g.get("type")))
+                    .toList();
+            assertThat(actualTypes)
+                    .as("用例 %s：taskGoals 类型集合", caseName)
+                    .containsAll(c.expectedTaskGoalTypesContains());
+        }
+    }
+
+    /**
+     * 弱模型允许少量口语化表达漏判，但不能把安全边界一起放松：
+     * 核心句和反例仍在固定样例里逐条断言；这里只统计扩展正例的召回率。
+     */
+    @Test
+    void actionAnalysisExtendedExpressionsReachEightyPercentRecall() throws Exception {
+        assumeNoSingleCaseFilter();
+
+        List<ActionAnalysisRecallCase> cases = loadActionAnalysisRecallCases();
+        int requiredSuccesses = (int) Math.ceil(cases.size() * 0.8);
+        int successes = 0;
+        List<String> misses = new ArrayList<>();
+
+        for (ActionAnalysisRecallCase c : cases) {
+            PageContextDTO pageContext = new PageContextDTO();
+            pageContext.setPageType(c.pageType());
+            pageContext.setArticleId(c.pageArticleId());
+
+            AiIntent intent = aiIntentClassifier.classify(c.message(), pageContext, null, null);
+            assertClassifierCallSucceeded(c.name(), intent);
+
+            boolean matched = "ARTICLE_ACTION".equals(intent.getIntent())
+                    && intent.getRequestedActions() != null
+                    && intent.getRequestedActions().containsAll(c.expectedRequestedActionsContains())
+                    && intent.getAnalysisGoalEvidence() != null
+                    && !intent.getAnalysisGoalEvidence().isBlank()
+                    && c.message().contains(intent.getAnalysisGoalEvidence());
+            if (matched) {
+                successes++;
+            } else {
+                misses.add(c.name() + " -> intent=" + intent.getIntent()
+                        + ", actions=" + intent.getRequestedActions()
+                        + ", evidence=" + intent.getAnalysisGoalEvidence());
+            }
+        }
+
+        assertThat(successes)
+                .as("动作 + 分析扩展表达召回率应 >= 80%%（至少 %s/%s），漏判=%s",
+                        requiredSuccesses, cases.size(), misses)
+                .isGreaterThanOrEqualTo(requiredSuccesses);
+    }
+
+    private List<ActionAnalysisRecallCase> loadActionAnalysisRecallCases() throws Exception {
+        InputStream inputStream = AiIntentClassifierIntegrationTests.class
+                .getResourceAsStream("/agent/action-analysis-recall-cases.json");
+        assertThat(inputStream)
+                .as("动作 + 分析召回评测集文件必须存在")
+                .isNotNull();
+
+        List<ActionAnalysisRecallCase> cases = new ObjectMapper().readValue(
+                Objects.requireNonNull(inputStream),
+                new TypeReference<>() {
+                }
+        );
+        assertThat(cases)
+                .as("动作 + 分析召回评测集不能为空")
+                .isNotEmpty();
+        return cases;
+    }
+
+    private void assertClassifierCallSucceeded(String caseName, AiIntent intent) {
+        assertThat(intent.getReason())
+                .as("用例 %s：分类器调用失败，当前结果是降级值，不属于模型意图误判；请先排查 429/超时/供应商异常",
+                        caseName)
+                .isNotEqualTo("分类器调用失败，降级为普通聊天");
+    }
+
+    private void assumeNoSingleCaseFilter() {
+        String evalCaseFilter = System.getProperty("evalCase");
+        assumeTrue(evalCaseFilter == null || evalCaseFilter.isBlank(),
+                "-DevalCase 只运行固定样例，跳过其他在线模型用例");
     }
 }

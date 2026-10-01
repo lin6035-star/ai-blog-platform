@@ -30,6 +30,21 @@ public class AiConfig {
     private static final List<String> THINKING_MODEL_PREFIXES = List.of("qwen3", "deepseek");
 
     /**
+     * 只跑思考模式、**不接受** {@code enable_thinking=false} 的模型前缀。
+     *
+     * <p>阿里把模型分两类：Hybrid（思考可按请求开关）与 Thinking-only（思考即其运行方式，
+     * 关掉这个模型就不成立了）。对后者发 {@code false} 会直接 400：
+     * {@code InternalError.Algo.InvalidParameter: The value of the enable_thinking parameter is restricted to True}
+     * （2026-09-29 实测于 qwen3.7-max-2026-05-17；社区记录的 qwen3.8-max 同样如此）。
+     *
+     * <p>处理办法是**不发这个参数**——省略即用模型默认（思考开启），而不是发 true：
+     * 这样将来某代 max 若支持混合模式，删掉对应前缀就能回归"关闭思考省成本"的行为。
+     * 前缀匹配的理由同 {@link #THINKING_MODEL_PREFIXES}，要覆盖带日期后缀的版本号。
+     */
+    private static final List<String> THINKING_ONLY_MODEL_PREFIXES =
+            List.of("qwen3.7-max", "qwen3.8-max");
+
+    /**
      * 供 Spring AI {@code OpenAiAutoConfiguration} 注入使用的 {@link RestClient.Builder}。
      * 通过请求拦截器直接修改请求体 JSON，写入 {@code "enable_thinking": false}，
      * 只对 chat completions 端点 + 白名单前缀模型生效；embedding 等端点不支持该参数，不注入。
@@ -55,7 +70,12 @@ public class AiConfig {
                         boolean supportsThinking = THINKING_MODEL_PREFIXES.stream()
                                 .anyMatch(model::startsWith);
 
-                        if (supportsThinking) {
+                        // thinking-only 模型不能收到 false（会 400），但也不能改成 true——
+                        // 省略参数即为其默认行为，且保留了将来支持混合模式后回归关闭的余地。
+                        boolean thinkingOnly = THINKING_ONLY_MODEL_PREFIXES.stream()
+                                .anyMatch(model::startsWith);
+
+                        if (supportsThinking && !thinkingOnly) {
                             ((ObjectNode) root).put("enable_thinking", false);
                             body = mapper.writeValueAsBytes(root);
                         }

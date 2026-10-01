@@ -71,6 +71,18 @@ public class AgentDecision {
     private ArticleActionBatch articleActionBatch;
 
     /**
+     * 复合目标（动作 + 分析）里「分析」那一侧的诉求（2026-09-28，第二刀）。
+     *
+     * <p><b>只能由已验证的原文构造</b>：来源是 {@code AiIntent.analysisGoalEvidence}
+     * 经 Planner 验证确实出现在用户原话中的片段，不接受 LLM 改写或补充
+     * （见 {@code AgentPlannerSupport.validateAnalysisGoalEvidence}）。
+     *
+     * <p>非 null 表示这是一次「先执行动作批次、再做 analysis-only 分析」的复合请求；
+     * 编排层据此走 {@code ArticleAgentRuntime.runAnalysisOnly}。
+     */
+    private String followUpGoal;
+
+    /**
      * 后端命中的确定性规则。
      * 用于解释为什么允许或拒绝某个动作。
      */

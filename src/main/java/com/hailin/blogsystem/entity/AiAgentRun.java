@@ -107,4 +107,15 @@ public class AiAgentRun {
     private LocalDateTime createdAt;
 
     private LocalDateTime updatedAt;
+
+    /**
+     * 父 run ID（第四步，2026-09-30）——**非 null 表示这是一次外层任务内部的子 run**。
+     *
+     * <p>用途：Token 子树按它查询聚合（父 run 不复制子 run 的 token）；用户侧 / 开发者侧列表按它过滤，
+     * 只列根 run；启动恢复与确认接口据此识别「这不是用户可操作的普通 run」。
+     *
+     * <p>NULL = 根 run——用户发起的那次任务，也是 {@code AiMessages.agentRunId} 绑定的那一个。
+     * 子 run 只由任务编排层在 `ARTICLE_ANALYSIS` 步骤内部创建，不经过用户入口。
+     */
+    private Long parentRunId;
 }

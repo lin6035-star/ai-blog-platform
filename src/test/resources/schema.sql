@@ -331,12 +331,14 @@ CREATE TABLE IF NOT EXISTS ai_agent_runs (
     output_tokens INT NOT NULL DEFAULT 0,
     total_tokens INT NOT NULL DEFAULT 0,
     error_message VARCHAR(1000),
+    parent_run_id BIGINT,
     created_at TIMESTAMP NOT NULL,
     updated_at TIMESTAMP NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_run_user ON ai_agent_runs (user_id);
 CREATE INDEX IF NOT EXISTS idx_agent_run_session ON ai_agent_runs (session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_run_parent ON ai_agent_runs (parent_run_id);
 
 CREATE TABLE IF NOT EXISTS ai_agent_steps (
     id BIGINT PRIMARY KEY,

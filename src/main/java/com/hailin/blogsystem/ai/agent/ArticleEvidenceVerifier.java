@@ -56,6 +56,20 @@ public class ArticleEvidenceVerifier {
             List<String> observations,
             List<AgentStepActionType> successfulActions
     ) {
+        return verify(run, decision, observations, successfulActions, null);
+    }
+
+    /**
+     * @param structuredNewEvidence P2.3：结构化状态给出的「本步是否产出了新证据」；
+     *                              {@code null} = 无结构化状态（走文本比对）
+     */
+    public Verdict verify(
+            AiAgentRun run,
+            AgentStepDecision decision,
+            List<String> observations,
+            List<AgentStepActionType> successfulActions,
+            Boolean structuredNewEvidence
+    ) {
         // ===== 规则闸（零 LLM 调用）=====
         // R1：目标文章已决议（页面/会话锚决议）但从没成功读过 → 结构上缺关键证据。
         // QUERY_ARTICLE 成功 = 查库 + 归属校验通过 + 结构摘要产出（V3.11 P0 后读的必是决议目标）。
@@ -74,7 +88,11 @@ public class ArticleEvidenceVerifier {
         // 观察文本逐字相同 → 语义闸判 NEED_MORE → 补查 → 又是同一段 → 6 步耗尽。
         // 拦的价值是「促使补查拿到新证据」；补查已证明拿不到新东西时，再拦只会空转，
         // 不如放行让 LLM 用手上已有的证据尽力作答（证据不足的代价 < 无回答的代价）。
-        if (noNewEvidence(observations)) {
+        //
+        // P2.3 修订：结构化路径只喂**一份**槽位证据，而 noNewEvidence 要求「≥2 条才比较」，
+        // 判据必然失效——规则会静默消失（本该放行的继续被拦，叠加"反馈不可见"就是空转到顶）。
+        // 结构化状态本来就有去重键，直接采信它给出的信号更准。
+        if (noNewEvidence(observations) || Boolean.FALSE.equals(structuredNewEvidence)) {
             log.info("Verifier R3 放行：本轮观察与前序重复（无新增量），再拦不会改善证据。runId={}",
                     run.getId());
             return Verdict.sufficient();
@@ -268,20 +286,15 @@ public class ArticleEvidenceVerifier {
         return observation == null ? "" : observation.replaceAll("\\s+", " ").trim();
     }
 
+    /**
+     * 证据上下文裁剪（2026-09-30，Token 工程 P0-a）。
+     *
+     * <p>与骨架共用 {@link AgentContextClipper}：原先两处是**逐字相同**的复制粘贴，
+     * 都从最早累加、满载丢最新证据；而本域证据预算后续要收窄到 2500~3200
+     * （Token 设计稿 §9.2），继续各自维护必然再次分叉。
+     */
     private String clipContext(List<String> observations) {
-        StringBuilder sb = new StringBuilder();
-        for (String observation : observations) {
-            if (sb.length() >= MAX_CONTEXT_CHARS) {
-                break;
-            }
-            if (observation != null) {
-                sb.append(observation).append('\n');
-            }
-        }
-        if (sb.length() <= MAX_CONTEXT_CHARS) {
-            return sb.toString();
-        }
-        return sb.substring(0, MAX_CONTEXT_CHARS);
+        return AgentContextClipper.latestWindow(observations, MAX_CONTEXT_CHARS);
     }
 
     private String truncate(String text, int max) {

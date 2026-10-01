@@ -49,9 +49,9 @@ public class ArticleAgentActionExecutorImpl implements ArticleAgentActionExecuto
     private final ArticleSessionAnchorService anchorService;
 
     @Override
-    public String execute(AgentStepDecision decision, Long userId, PageContextDTO pageContext) {
+    public AgentActionResult execute(AgentStepDecision decision, Long userId, PageContextDTO pageContext) {
         if (userId == null) {
-            return "当前未登录，无法分析文章。";
+            return AgentActionResult.of("当前未登录，无法分析文章。");
         }
         return switch (decision.actionType()) {
             case QUERY_ARTICLE -> queryArticle(decision, userId, pageContext);
@@ -59,7 +59,8 @@ public class ArticleAgentActionExecutorImpl implements ArticleAgentActionExecuto
             case SEARCH_RAG -> searchRag(decision);
             case QUERY_LEARNING_DASHBOARD ->
                     throw new UnsupportedOperationException("学习域动作不经过文章域执行器");
-            case ASK_USER, FINAL_ANSWER, SUGGEST_WORKFLOW, SUGGEST_WRITE, ARTICLE_INTERACTION_BATCH ->
+            case ASK_USER, FINAL_ANSWER, SUGGEST_WORKFLOW, SUGGEST_WRITE,
+                 ARTICLE_INTERACTION_BATCH, TASK_STEP ->
                     throw new UnsupportedOperationException("终态动作不经过执行器");
         };
     }
@@ -80,7 +81,7 @@ public class ArticleAgentActionExecutorImpl implements ArticleAgentActionExecuto
      * 修复前用归属当读门槛，用户在别人文章页问「这篇写得怎么样」会被回
      * 「这篇文章不是你的」——只是想问问，并不想改。
      */
-    private String queryArticle(AgentStepDecision decision, Long userId, PageContextDTO pageContext) {
+    private AgentActionResult queryArticle(AgentStepDecision decision, Long userId, PageContextDTO pageContext) {
         String clue = text(decision.input(), "articleId");
         if (clue == null || clue.isBlank()) {
             clue = pageContext != null ? pageContext.getArticleId() : null;
@@ -103,16 +104,39 @@ public class ArticleAgentActionExecutorImpl implements ArticleAgentActionExecuto
         String focus = text(decision.input(), "focus");
         if (focus != null && !focus.isBlank()) {
             if (isStructureOverviewFocus(focus)) {
-                return buildStructureSummary(article) + ownershipNote(owned);
+                return located(AgentActionResult.of(buildStructureSummary(article) + ownershipNote(owned)),
+                        article, owned, focus, true);
             }
             String snippet = extractFocusSnippet(article, focus);
             if (snippet != null) {
-                return appendOwnershipNote(snippet, owned);
+                return located(AgentActionResult.of(appendOwnershipNote(snippet, owned)),
+                        article, owned, focus, true);
             }
-            return "未能从这篇文章中找到与「" + limit(focus, 40)
-                    + "」相关的内容，请换个说法，或确认文章是否真的包含这部分。";
+            // focusHit=false：让 Reducer 知道「查了但没查到」，与「根本没查」区分开
+            return located(AgentActionResult.of("未能从这篇文章中找到与「" + limit(focus, 40)
+                            + "」相关的内容，请换个说法，或确认文章是否真的包含这部分。"),
+                    article, owned, focus, false);
         }
-        return buildStructureSummary(article) + ownershipNote(owned);
+        return located(AgentActionResult.of(buildStructureSummary(article) + ownershipNote(owned)),
+                article, owned, null, null);
+    }
+
+    /**
+     * P2.2：把「定位到哪一篇、读了哪一节、是不是自己的」这组事实挂到结果上——四个返回分支共用。
+     *
+     * <p>Reducer 只消费这些字段，**不解析中文 observation**：命中与未命中都会返回一段文本，
+     * 只有结构化字段能区分，这正是路 A（解析文案）被否掉的原因。
+     *
+     * @param focusHit true=聚焦命中；false=聚焦未命中；null=本次没带 focus（结构摘要）
+     */
+    private AgentActionResult located(AgentActionResult result, Articles article, boolean owned,
+                                      String focus, Boolean focusHit) {
+        return result
+                .with("articleId", String.valueOf(article.getId()))
+                .with("articleTitle", article.getTitle())
+                .with("owned", owned)
+                .with("focus", focus)
+                .with("focusHit", focusHit);
     }
 
     /**
@@ -437,7 +461,7 @@ public class ArticleAgentActionExecutorImpl implements ArticleAgentActionExecuto
     /**
      * 用户记忆检索：语义记忆 + 情景记忆，按检索词召回。
      */
-    private String queryMemory(AgentStepDecision decision, Long userId) {
+    private AgentActionResult queryMemory(AgentStepDecision decision, Long userId) {
         String question = text(decision.input(), "question");
         String keyword = text(decision.input(), "keyword");
         String query = question != null ? question : keyword;
@@ -446,15 +470,24 @@ public class ArticleAgentActionExecutorImpl implements ArticleAgentActionExecuto
         }
 
         StringBuilder sb = new StringBuilder("记忆摘要：\n");
+        // P2.2/P2.3：命中条数 + **检索状态**进 payload。
+        // 只用 hitCount 有个坑：「检索服务挂了」与「确实没有命中」都是 0，
+        // 而状态机会据此告诉模型"记忆里没有命中，不必再查"——把故障说成了事实结论。
+        // 语义记忆与情景记忆是两个来源，所以要能表达"只挂了一个"。
+        int hitCount = 0;
+        boolean semanticOk = true;
+        boolean episodicOk = true;
 
         try {
             List<MemoryRagContext> memories = aiMemoryRetrieveService.retrieve(userId, query);
             for (MemoryRagContext memory : memories) {
                 sb.append("- 语义记忆(").append(memory.memoryType()).append(")：")
                         .append(limit(memory.content(), TEXT_MAX)).append('\n');
+                hitCount++;
             }
         } catch (Exception e) {
             log.warn("Agent 语义记忆检索失败，userId={}", userId, e);
+            semanticOk = false;
             sb.append("- 语义记忆检索失败\n");
         }
 
@@ -465,22 +498,33 @@ public class ArticleAgentActionExecutorImpl implements ArticleAgentActionExecuto
             for (EpisodicMemoryRagContext memory : memories) {
                 sb.append("- 情景记忆(").append(memory.memoryType()).append(")：")
                         .append(limit(memory.content(), TEXT_MAX)).append('\n');
+                hitCount++;
             }
         } catch (Exception e) {
             log.warn("Agent 情景记忆检索失败，userId={}", userId, e);
+            episodicOk = false;
             sb.append("- 情景记忆检索失败\n");
         }
 
-        return sb.toString();
+        String status = (semanticOk && episodicOk)
+                ? "SUCCESS"
+                : ((semanticOk || episodicOk) ? "PARTIAL_FAILURE" : "FAILED");
+
+        return AgentActionResult.of(sb.toString())
+                .with("query", query)
+                .with("hitCount", hitCount)
+                .with("status", status);
     }
 
     /**
      * 站内文章知识检索（复用现有混合检索 + rerank 链路）。
      */
-    private String searchRag(AgentStepDecision decision) {
+    private AgentActionResult searchRag(AgentStepDecision decision) {
         String keyword = text(decision.input(), "keyword");
         if (keyword == null || keyword.isBlank()) {
-            return "站内检索缺少关键词，无法检索。";
+            return AgentActionResult.of("站内检索缺少关键词，无法检索。")
+                    .with("keyword", null)
+                    .with("hitCount", 0);
         }
 
         AiIntent intent = new AiIntent();
@@ -489,7 +533,9 @@ public class ArticleAgentActionExecutorImpl implements ArticleAgentActionExecuto
 
         ArticleRagSearchResult result = articleRagSearchService.search(keyword, intent);
         if (result.contexts() == null || result.contexts().isEmpty()) {
-            return "站内没有检索到与「" + keyword + "」相关的文章知识。";
+            return AgentActionResult.of("站内没有检索到与「" + keyword + "」相关的文章知识。")
+                    .with("keyword", keyword)
+                    .with("hitCount", 0);
         }
 
         StringBuilder sb = new StringBuilder("站内文章知识检索结果（")
@@ -500,7 +546,10 @@ public class ArticleAgentActionExecutorImpl implements ArticleAgentActionExecuto
                     .append("》(").append(context.articleId()).append(")：")
                     .append(limit(context.content(), TEXT_MAX)).append('\n');
         }
-        return sb.toString();
+        return AgentActionResult.of(sb.toString())
+                .with("keyword", keyword)
+                .with("hitCount", result.contexts().size())
+                .with("strategy", result.strategy());
     }
 
     private String text(Map<String, Object> input, String key) {

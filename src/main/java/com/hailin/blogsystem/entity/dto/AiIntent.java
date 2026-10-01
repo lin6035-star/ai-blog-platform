@@ -3,6 +3,7 @@ package com.hailin.blogsystem.entity.dto;
 import lombok.Data;
 
 import java.util.List;
+import java.util.Map;
 
 @Data
 public class AiIntent {
@@ -10,6 +11,25 @@ public class AiIntent {
     private Double confidence;  //LLM 对当前意图判断的置信度；分类失败时由后端置为 0
     private String actionType;  //细分动作，比如 likeArticle / followAuthor
     private List<String> requestedActions; // 文章复合动作候选；后端仍需白名单、冲突和完整性校验
+    // 复合目标（动作 + 分析）里"分析"那一侧的诉求，必须是用户原话中连续出现的片段。
+    // 语义同 topicEvidence：分类器只负责摘录，Planner 会验证它真实出现在原始 message 中，
+    // 验证不通过一律不放行——不让 LLM 改写的摘要成为第二目标的权威文本。
+    private String analysisGoalEvidence;
+
+    /**
+     * 候选任务目标（第三刀）：模型拆出的"用户想完成哪几件事"。
+     *
+     * <p>**它是候选不是权威**——每项含 type / params / goalEvidence / after / requires / onFailure，
+     * 由 {@code TaskPlanner} 逐项校验（类型白名单 / 证据是否真在原文 / 冲突）后才变成正式 TaskPlan。
+     * 因此这里的 type 允许是后端不认识的值，那属于正常输入，会被记为"未覆盖目标"而不是解析失败。
+     *
+     * <p>放 `AiIntent` 是因为它**属于分类器的建议**（与 `requestedActions` 同性质）；
+     * 正式 `TaskPlan` 是后端产物，不放这里。
+     */
+    private List<Map<String, Object>> taskGoals;
+
+    /** 复合请求里"这不是任务"（纯聊天）时为 CHAT——让"不是任务"成为显式结论而不是靠空数组隐式表达 */
+    private String requestKind;
     private String articleId;  //文章ID
     private String authorId;
     private String userId;

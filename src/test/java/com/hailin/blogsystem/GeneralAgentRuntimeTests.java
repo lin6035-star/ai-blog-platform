@@ -1,11 +1,17 @@
 package com.hailin.blogsystem;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentRunResult;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentStepDecision;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentStepEmitter;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.GeneralAgentActionExecutor;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.GeneralAgentRuntime;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.GeneralAgentStepDecider;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.AiAgentStep;
@@ -68,7 +74,7 @@ class GeneralAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "结合你的记忆，建议继续深入缓存部分")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("记忆摘要：\n- 语义记忆(USER_PREFERENCE)：正在学 Redis 缓存");
+                .thenReturn(AgentActionResult.of("记忆摘要：\n- 语义记忆(USER_PREFERENCE)：正在学 Redis 缓存"));
 
         AgentRunResult result = runtime.run(100L, 200L, "你觉得我现在这套方案还有什么问题",
                 null, AgentStepEmitter.noop());
@@ -107,8 +113,8 @@ class GeneralAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "结合记忆和站内文章，结论如下")));
         when(executor.execute(any(), any(), any()))
-                .thenReturn("记忆摘要：\n- 语义记忆(USER_PREFERENCE)：正在学 Redis")
-                .thenReturn("站内文章知识检索结果（hybrid）：\n1. 《Redis缓存设计》(1)：缓存击穿防护");
+                .thenReturn(AgentActionResult.of("记忆摘要：\n- 语义记忆(USER_PREFERENCE)：正在学 Redis"))
+                .thenReturn(AgentActionResult.of("站内文章知识检索结果（hybrid）：\n1. 《Redis缓存设计》(1)：缓存击穿防护"));
 
         AgentRunResult result = runtime.run(100L, 200L, "结合我现在的情况，给个建议",
                 null, AgentStepEmitter.noop());
@@ -145,6 +151,7 @@ class GeneralAgentRuntimeTests {
         assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
         AiAgentRun saved = captureRun();
         assertThat(saved.getErrorMessage()).contains("非法动作");
+        assertThat(saved.getErrorMessage()).doesNotContain("SUGGEST_WORKFLOW");
     }
 
     @Test
@@ -159,6 +166,7 @@ class GeneralAgentRuntimeTests {
         assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
         AiAgentRun saved = captureRun();
         assertThat(saved.getErrorMessage()).contains("非法动作");
+        assertThat(saved.getErrorMessage()).doesNotContain("SUGGEST_WRITE");
     }
 
     @Test
@@ -167,7 +175,7 @@ class GeneralAgentRuntimeTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
                         .withInput(Map.of("answer", "已结合你的情况回答")));
-        when(executor.execute(any(), any(), any())).thenReturn("记忆摘要：\n- 语义记忆(USER_PREFERENCE)：正在学 Redis");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("记忆摘要：\n- 语义记忆(USER_PREFERENCE)：正在学 Redis"));
 
         List<String[]> events = new java.util.ArrayList<>();
         runtime.run(100L, 200L, "结合我的情况给个建议",
@@ -189,7 +197,7 @@ class GeneralAgentRuntimeTests {
         // 通用域 maxSteps=3（比学习/文章域 5 收紧）：到顶汇总，不再多轮决策
         when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY));
-        when(executor.execute(any(), any(), any())).thenReturn("第 X 条观察数据");
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("第 X 条观察数据"));
 
         AgentRunResult result = runtime.run(100L, 200L, "结合我的情况给个建议",
                 null, AgentStepEmitter.noop());

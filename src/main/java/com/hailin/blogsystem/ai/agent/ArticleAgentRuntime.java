@@ -1,6 +1,7 @@
 package com.hailin.blogsystem.ai.agent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.LogValues;
 import com.hailin.blogsystem.constants.BlogConstants;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.Articles;
@@ -11,6 +12,7 @@ import com.hailin.blogsystem.mapper.AiAgentRunMapper;
 import com.hailin.blogsystem.mapper.AiAgentStepMapper;
 import com.hailin.blogsystem.service.ArticlesService;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -54,16 +56,30 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
             "OPTIMIZE_ARTICLE"
     );
 
+    /**
+     * analysis-only 白名单（2026-09-28，第二刀）：复合请求的分析段只读不写，
+     * 且不允许任何会产生等待态的终态——本模式的验收边界是单请求闭环（设计稿 §4.7）。
+     */
+    private static final Set<AgentStepActionType> ANALYSIS_ONLY_ACTIONS = Set.of(
+            AgentStepActionType.QUERY_ARTICLE,
+            AgentStepActionType.QUERY_MEMORY,
+            AgentStepActionType.SEARCH_RAG,
+            AgentStepActionType.FINAL_ANSWER
+    );
+
     /** V3.11 手测修正：验证-补查链多一步预算（典型链 读+拦+补查+答=4 步，留 1 步绕圈余量）。 */
     private static final int ARTICLE_MAX_STEPS = 6;
 
     private final AgentStepDecider decider;
+    private final ArticleAnalysisStepDecider analysisDecider;
     private final ArticlesService articlesService;
     private final ArticleSessionAnchorService anchorService;
     private final ArticleEvidenceVerifier evidenceVerifier;
 
     public ArticleAgentRuntime(
-            ArticleAgentStepDecider decider,
+            // 两个 decider 是父子关系，按类型注入会撞上两个候选，必须显式指定 bean 名
+            @Qualifier("articleAgentStepDecider") ArticleAgentStepDecider decider,
+            @Qualifier("articleAnalysisStepDecider") ArticleAnalysisStepDecider analysisDecider,
             ArticleAgentActionExecutor executor,
             AiAgentRunMapper runMapper,
             AiAgentStepMapper stepMapper,
@@ -74,9 +90,78 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
     ) {
         super(executor, runMapper, stepMapper, objectMapper);
         this.decider = decider;
+        this.analysisDecider = analysisDecider;
         this.articlesService = articlesService;
         this.anchorService = anchorService;
         this.evidenceVerifier = evidenceVerifier;
+    }
+
+    /**
+     * 复合请求的分析段入口（第二刀「动作 + 分析」）。
+     *
+     * <p>与 {@code run(...)} 共用同一套执行体与全部领域钩子，只换策略：
+     * 窄 decider（prompt 不声明 ASK_USER / SUGGEST_*）+ 只读白名单 + 禁止等待态。
+     * 编排层在动作批次跑完之后调它，并把动作结果注入 goal。
+     */
+    @Override
+    public AgentRunResult runAnalysisOnly(
+            Long userId,
+            Long sessionId,
+            String goal,
+            PageContextDTO pageContext,
+            AgentStepEmitter emitter
+    ) {
+        return runWithPolicy(userId, sessionId, goal, pageContext, emitter, analysisOnlyPolicy());
+    }
+
+    /**
+     * P2.2：文章域启用结构化运行状态——决策上下文改由槽位组装（§7.6），
+     * 不再每步重放整条 observation 流。学习 / 通用 / 钱包域不覆写，行为不变。
+     *
+     * <p>每次 run 新建，不能缓存成字段（并发请求会串号）。
+     */
+    @Override
+    protected AgentRunState newRunState(String goal, int maxSteps) {
+        return new ArticleAgentState(goal, maxSteps);
+    }
+
+    @Override
+    protected AgentRunState.FeedbackClearKey extraTerminalFeedbackClearKey(
+            AgentStepDecision decision,
+            int observationsBefore
+    ) {
+        return decision != null
+                && decision.actionType() == AgentStepActionType.SUGGEST_WRITE
+                && observationsBefore == 0
+                ? AgentRunState.FeedbackClearKey.QUERY_REQUIRED
+                : null;
+    }
+
+    /**
+     * 编排层入口（第四步）：带 parentRunId 的 analysis-only。
+     *
+     * <p>与 5 参版本共用同一套策略（窄 decider + 只读白名单 + 禁止等待态），
+     * 差别只在 run 归属——它会被记成外层 Task run 的子 run。
+     */
+    @Override
+    public AgentRunResult runAnalysisOnly(
+            Long userId,
+            Long sessionId,
+            String goal,
+            PageContextDTO pageContext,
+            AgentStepEmitter emitter,
+            Long parentRunId
+    ) {
+        return runWithPolicy(userId, sessionId, goal, pageContext, emitter,
+                analysisOnlyPolicy(), parentRunId);
+    }
+
+    /**
+     * analysis-only 策略。{@code allowWaitingUser = false}：Verifier 判 ASK_USER 时
+     * 骨架会保守收尾而不是进 WAITING_USER——这是三层约束里的第三层。
+     */
+    private AgentRunPolicy analysisOnlyPolicy() {
+        return new AgentRunPolicy(analysisDecider, ANALYSIS_ONLY_ACTIONS, false);
     }
 
     // ==================== 领域钩子 ====================
@@ -170,9 +255,19 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
             AiAgentRun run,
             AgentStepDecision decision,
             List<String> observations,
-            List<AgentStepActionType> successfulActions
+            List<AgentStepActionType> successfulActions,
+            AgentRunState runState
     ) {
-        return evidenceVerifier.verify(run, decision, observations, successfulActions);
+        // P2.3（§9.2）：Verifier 不再吃完整 observation 流水——有结构化状态时只喂槽位证据
+        // （合计预算约 3200 字符）。空状态仍传**空列表**，保住「零 observation 的非证据型回答」
+        // 这条零 LLM 规则闸的语义（传 List.of("") 会让它失效）。
+        List<String> evidence = observations;
+        if (runState != null) {
+            String text = runState.verificationEvidence();
+            evidence = (text == null || text.isBlank()) ? List.of() : List.of(text);
+        }
+        return evidenceVerifier.verify(run, decision, evidence, successfulActions,
+                runState == null ? null : runState.lastStepHadNewEvidence());
     }
 
     /**
@@ -455,7 +550,10 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
         boolean publish = AgentWriteProposal.TYPE_PUBLISH_ARTICLE.equals(actionType);
         if (!rename && !hide && !publish) {
             emitter.emit(run.getUsedSteps() + 1, "SUGGEST_WRITE", "FAILED", "不支持的写动作类型", null);
-            return markFailed(run, "Agent 写动作提案无效（不支持的 actionType：" + actionType + "）");
+            // C0.2：actionType 是模型给的内部协议值，只进日志（用户可见文案保持稳定）
+            log.warn("[AGENT] 写动作提案被拒（actionType 不在白名单）: runId={}, actionType={}",
+                    run.getId(), LogValues.safe(actionType));
+            return markFailed(run, "Agent 写动作提案无效（不支持的写动作类型）");
         }
         // 改名专属必填：新标题必须来自用户原话
         String newTitle = text(input, "newTitle");

@@ -298,6 +298,18 @@ class AgentWriteActionServiceTests {
     }
 
     @Test
+    void confirmWriteRejectsChildRun() {
+        // 第四步·阶段 2：子 run 是外层任务内部的执行记录，不是用户可确认的普通 run（防御）
+        AiAgentRun childRun = run(1L, "WAITING_WRITE_CONFIRM", PROPOSAL_CONTEXT);
+        childRun.setParentRunId(999L);
+        when(runMapper.selectById(1L)).thenReturn(childRun);
+
+        assertThatThrownBy(() -> service.confirmWrite(1L))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("不是可确认");
+    }
+
+    @Test
     void confirmWriteFailsWhenCasConsumed() {
         when(runMapper.selectById(1L)).thenReturn(
                 run(1L, "WAITING_WRITE_CONFIRM", PROPOSAL_CONTEXT));

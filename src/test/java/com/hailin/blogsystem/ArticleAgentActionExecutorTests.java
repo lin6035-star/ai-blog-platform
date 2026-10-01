@@ -60,12 +60,20 @@ class ArticleAgentActionExecutorTests {
         return pageContext;
     }
 
+    /**
+     * P2.2：执行器改为返回 {@link com.hailin.blogsystem.ai.agent.AgentActionResult}；
+     * 本类测的是展示文本，统一在这里取 {@code summary()}。
+     */
+    private String execute(AgentStepDecision decision, Long userId, PageContextDTO pageContext) {
+        return executor.execute(decision, userId, pageContext).summary();
+    }
+
     @Test
     void queryArticleOwnedArticleReturnsStructureSummary() {
         Articles article = article(12L, 100L);
         when(articlesService.getById(12L)).thenReturn(article);
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE),
                 100L,
                 articleContext("12")
@@ -85,7 +93,7 @@ class ArticleAgentActionExecutorTests {
         Articles article = article(12L, 100L);
         when(articlesService.getById(12L)).thenReturn(article);
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
                         .withInput(Map.of("articleId", "12")),
                 100L,
@@ -102,7 +110,7 @@ class ArticleAgentActionExecutorTests {
         Articles article = article(12L, 100L);
         when(articlesService.getById(12L)).thenReturn(article);
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE),
                 100L,
                 articleContext("12")
@@ -161,7 +169,7 @@ class ArticleAgentActionExecutorTests {
 
     @Test
     void notLoggedInReturnsFriendlyText() {
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE),
                 null,
                 articleContext("12")
@@ -172,7 +180,7 @@ class ArticleAgentActionExecutorTests {
 
     @Test
     void ragWithoutKeywordReturnsHint() {
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.SEARCH_RAG),
                 100L,
                 null
@@ -187,7 +195,7 @@ class ArticleAgentActionExecutorTests {
     void focusHitsHeadingSectionReturnsSectionText() {
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L));
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
                         .withInput(Map.of("articleId", "12", "focus", "缓存击穿")),
                 100L,
@@ -207,7 +215,7 @@ class ArticleAgentActionExecutorTests {
         // 「缓存击穿那一段写得怎么样」→ 净化剔除指示/疑问词 → token「缓存击穿」命中
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L));
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
                         .withInput(Map.of("articleId", "12", "focus", "缓存击穿那一段写得怎么样")),
                 100L,
@@ -223,7 +231,7 @@ class ArticleAgentActionExecutorTests {
         // 2026-09-10 手测回归：「XX 这一小节写得怎么样」→ 剔除「这一小节/写得/怎么样」→ 命中小节
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L));
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
                         .withInput(Map.of("articleId", "12", "focus", "缓存击穿这一小节写得怎么样")),
                 100L,
@@ -241,7 +249,7 @@ class ArticleAgentActionExecutorTests {
         article.setContent("# 笔记\n\n## Vibe Coding 实践\n\n用自然语言驱动 AI 写代码");
         when(articlesService.getById(12L)).thenReturn(article);
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
                         .withInput(Map.of("articleId", "12", "focus", "VibeCoding这一小节写得怎么样")),
                 100L,
@@ -260,7 +268,7 @@ class ArticleAgentActionExecutorTests {
         article.setStatus(1);                     // 已发布 → 公开可读
         when(articlesService.getById(12L)).thenReturn(article);
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE),
                 100L,                                    // 当前用户 100 ≠ 作者 999
                 articleContext("12")
@@ -292,7 +300,7 @@ class ArticleAgentActionExecutorTests {
         Articles article = article(12L, 100L);
         when(articlesService.getById(12L)).thenReturn(article);
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE),
                 100L,
                 articleContext("12")
@@ -316,7 +324,7 @@ class ArticleAgentActionExecutorTests {
                 + "## 现在就开始吧\n\n今晚就打开编辑器。");
         when(articlesService.getById(12L)).thenReturn(article);
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
                         .withInput(Map.of("articleId", "12", "focus", "Vibe Coding 这一小节")),
                 100L,
@@ -337,7 +345,7 @@ class ArticleAgentActionExecutorTests {
                 + "## Vibe Coding 的坑\n\n上下文给太多反而更差");
         when(articlesService.getById(12L)).thenReturn(article);
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
                         .withInput(Map.of("articleId", "12", "focus", "Vibe Coding")),
                 100L,
@@ -361,7 +369,7 @@ class ArticleAgentActionExecutorTests {
                 + "## 总结\n\n保持手感。");
         when(articlesService.getById(12L)).thenReturn(article);
 
-        String observation = executor.execute(
+        String observation = execute(
             AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
                         .withInput(Map.of("articleId", "12", "focus", "Vibe Coding")),
                 100L,
@@ -376,7 +384,7 @@ class ArticleAgentActionExecutorTests {
     void focusMissReturnsExplicitMessage() {
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L));
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
                         .withInput(Map.of("articleId", "12", "focus", "缓存雪崩")),
                 100L,
@@ -393,7 +401,7 @@ class ArticleAgentActionExecutorTests {
         // 这些不是正文小节名，应该返回结构摘要，否则 verifier 会因缺少文章证据正确拦截。
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L));
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
                         .withInput(Map.of("articleId", "12", "focus", "文章结构、小标题和摘要部分")),
                 100L,
@@ -410,7 +418,7 @@ class ArticleAgentActionExecutorTests {
     void summaryFocusReturnsStructureSummaryInsteadOfMiss() {
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L));
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
                         .withInput(Map.of("articleId", "12", "focus", "摘要部分")),
                 100L,
@@ -427,7 +435,7 @@ class ArticleAgentActionExecutorTests {
         // 无 focus → 原结构摘要（已有 queryArticleOwnedArticleReturnsStructureSummary 同语义，这里锁回归）
         when(articlesService.getById(12L)).thenReturn(article(12L, 100L));
 
-        String observation = executor.execute(
+        String observation = execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
                         .withInput(Map.of("articleId", "12")),
                 100L,

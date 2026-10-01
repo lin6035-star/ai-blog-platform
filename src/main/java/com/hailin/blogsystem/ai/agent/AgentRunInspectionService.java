@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.constants.BlogConstants;
 import com.hailin.blogsystem.entity.AiAgentRun;
+import com.hailin.blogsystem.entity.dto.AgentStepActionType;
 import com.hailin.blogsystem.entity.AiAgentStep;
 import com.hailin.blogsystem.entity.dto.AiAgentRunStatus;
 import com.hailin.blogsystem.entity.vo.AgentRunDetailVO;
@@ -72,6 +73,9 @@ public class AgentRunInspectionService {
                 new LambdaQueryWrapper<AiAgentRun>()
                         .eq(AiAgentRun::getUserId, userId)
                         .eq(sessionId != null, AiAgentRun::getSessionId, sessionId)
+                        // 第四步：只列根 run——子 run 是编排内部的执行记录，
+                        // 不该出现在用户 / 开发者列表里（详情仍可看，便于排查）
+                        .isNull(AiAgentRun::getParentRunId)
                         .orderByDesc(AiAgentRun::getCreatedAt)
         );
 
@@ -111,7 +115,16 @@ public class AgentRunInspectionService {
         AgentRunDevDetailVO vo = new AgentRunDevDetailVO();
         vo.setRun(toDetail(run));
         vo.setContextJson(run.getContextJson());
+        // P0-b：run 级 Token 放外层——`run` 是与用户侧同源的安全摘要，不承载内部成本
+        vo.setInputTokens(zeroIfNull(run.getInputTokens()));
+        vo.setOutputTokens(zeroIfNull(run.getOutputTokens()));
+        vo.setTotalTokens(zeroIfNull(run.getTotalTokens()));
         return vo;
+    }
+
+    /** P0-b：Token 列允许 null（历史数据），展示层统一按 0 处理，避免前端各写一遍判空 */
+    private Integer zeroIfNull(Integer value) {
+        return value == null ? 0 : value;
     }
 
     private AgentRunDetailVO toDetail(AiAgentRun run) {
@@ -161,6 +174,21 @@ public class AgentRunInspectionService {
         vo.setDurationMs(step.getDurationMs());
         // V3.10：思考摘要（与实时 AGENT_STEP 事件一致，刷新前后行文本不串味；可空）
         vo.setThoughtSummary(step.getThoughtSummary());
+
+        // 第三刀：任务步骤不是"思考步骤"——它的展示文案来自执行结果（summary），
+        // 而不是 AgentStepLabelSupport 那套按 actionType 生成的思考文案
+        //（那套不认识 TASK_STEP，会返回默认占位，刷新后看起来像"变成了别的东西"）。
+        if (AgentStepActionType.TASK_STEP.name().equals(step.getActionType())) {
+            vo.setKind("TASK");
+            vo.setSummary(parseSummary(step.getOutputJson()));
+            // 第四步：任务步骤若由子 run 承接（ARTICLE_ANALYSIS），透出子 run id——
+            // 前端刷新后据此补拉内部明细（子 run 的步骤不在外层 run 的 steps 里）
+            vo.setChildRunId(parseChildRunId(step.getOutputJson()));
+            vo.setCreatedAt(step.getCreatedAt());
+            return vo;
+        }
+        vo.setKind("AGENT");
+
         // 展示文案与实时 AGENT_STEP 事件一致（刷新前后思考面板不串味）
         vo.setMessage(switch (displayStatus) {
             case "SUCCESS" -> AgentStepLabelSupport.completedMessage(
@@ -172,6 +200,24 @@ public class AgentRunInspectionService {
         vo.setSummary(parseSummary(step.getOutputJson()));
         vo.setCreatedAt(step.getCreatedAt());
         return vo;
+    }
+
+    /**
+     * 第四步：从任务步骤的 outputJson 里取子 run id（{@code data.agentRunId}）。
+     *
+     * <p>解析失败一律返回 null——它是展示增强，不能影响步骤恢复。
+     */
+    private String parseChildRunId(String outputJson) {
+        if (outputJson == null || outputJson.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode node = objectMapper.readTree(outputJson).path("data").path("agentRunId");
+            return node.isMissingNode() || node.isNull() ? null : node.asText();
+        } catch (Exception e) {
+            log.warn("任务步骤 outputJson 解析子 run id 失败（按无处理）: {}", outputJson);
+            return null;
+        }
     }
 
     /**
@@ -197,6 +243,9 @@ public class AgentRunInspectionService {
         vo.setInputJson(step.getInputJson());
         vo.setOutputJson(step.getOutputJson());
         vo.setThoughtSummary(step.getThoughtSummary());
+        // P0-b：本步决策（decide/repair）的 Token；执行只读动作本身不调 LLM
+        vo.setInputTokens(zeroIfNull(step.getInputTokens()));
+        vo.setOutputTokens(zeroIfNull(step.getOutputTokens()));
         vo.setCreatedAt(step.getCreatedAt());
         return vo;
     }

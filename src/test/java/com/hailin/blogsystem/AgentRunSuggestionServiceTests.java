@@ -251,6 +251,19 @@ class AgentRunSuggestionServiceTests {
     }
 
     @Test
+    void confirmRejectsChildRun() {
+        // 第四步·阶段 2：子 run 是外层任务内部的执行记录，不是用户可确认的普通 run——
+        // 它不出现在用户列表里、正常路径也拿不到它的 id，这里是防御。
+        AiAgentRun childRun = run(1L, 100L, "WAITING_WORKFLOW_CONFIRM", SUGGESTION_CONTEXT);
+        childRun.setParentRunId(999L);
+        when(runMapper.selectById(1L)).thenReturn(childRun);
+
+        assertThatThrownBy(() -> service.confirm(1L, null))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("不是可确认");
+    }
+
+    @Test
     void confirmFailsWhenCasConsumedConcurrently() {
         // 两个不同 key 并发：第一个 CAS 成功，第二个 CAS 影响行数为 0（已被消费）
         when(runMapper.selectById(1L)).thenReturn(

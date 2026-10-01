@@ -3,6 +3,7 @@ package com.hailin.blogsystem.ai.agent;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.LogValues;
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.AiAgentStep;
@@ -133,6 +134,82 @@ public abstract class AbstractAgentRuntime {
     }
 
     /**
+     * P2.2：领域结构化运行状态工厂（per-run）。
+     *
+     * <p>默认返回 {@code null} —— 学习 / 通用 / 钱包域继续用 observation 重放，行为与改造前一致。
+     * 文章域覆写它返回 {@code ArticleAgentState}：决策上下文改由结构化槽位组装（§7.6），
+     * 已完成动作 / 证据 / 缺失证据从 {@link AgentActionResult#payload()} 归约，不再重放整条文本流。
+     *
+     * <p><b>必须每次 new</b>：返回的对象会被整个 run 复用，放在单例字段上会串号。
+     */
+    protected AgentRunState newRunState(String goal, int maxSteps) {
+        return null;
+    }
+
+    /**
+     * P2.3 修订：把运行期反馈同时写进结构化状态——**观察是给审计看的，状态是给模型看的**。
+     *
+     * <p>只写 observations 的老做法在结构化路径下会让模型瞎掉：它只看 {@code decisionContext()}，
+     * 于是"刚才为什么被拒、下一步该补什么"全部丢失，容易重复同样的动作直到步数耗尽。
+     */
+    private void noteFeedback(AgentRunState runState, String message) {
+        noteFeedback(runState, message, null);
+    }
+
+    private void noteFeedback(
+            AgentRunState runState,
+            String message,
+            AgentRunState.FeedbackClearKey clearKey
+    ) {
+        if (runState != null && message != null && !message.isBlank()) {
+            runState.noteFeedback(message, clearKey);
+        }
+    }
+
+    /** 领域扩展终态新增反馈的生命周期；默认反馈保留到本 run 结束。 */
+    protected AgentRunState.FeedbackClearKey extraTerminalFeedbackClearKey(
+            AgentStepDecision decision,
+            int observationsBefore
+    ) {
+        return null;
+    }
+
+    /**
+     * P2.3 修订：领域钩子在 observations 尾部追加的拒绝提示，同样要进结构化状态。
+     *
+     * <p>「零观察就提案写动作被拒」「同名改标题被拒」「文章已隐藏」这些反馈原先**只写 observations**，
+     * 而模型只看 {@code decisionContext()} —— 它会反复提同一个注定被拒的提案，直到步数耗尽。
+     *
+     * <p>用**索引差**同步而不是给 {@code handleExtraTerminalAction} 加参数：三个域都覆写了它，
+     * 改签名要动三处、还漏一个就再犯一次；而它们追加反馈的方式本来就统一是 {@code observations.add}。
+     * 这些内容都是"系统提示：……被拒绝"型反馈（终态动作不产生真正的事实观察），按反馈处理是安全的。
+     */
+    private void syncFeedback(
+            AgentRunState runState,
+            AgentStepDecision decision,
+            List<String> observations,
+            int fromIndex
+    ) {
+        if (runState == null || fromIndex >= observations.size()) {
+            return;
+        }
+        AgentRunState.FeedbackClearKey clearKey =
+                extraTerminalFeedbackClearKey(decision, fromIndex);
+        for (int i = fromIndex; i < observations.size(); i++) {
+            noteFeedback(runState, observations.get(i), clearKey);
+        }
+    }
+
+    /**
+     * P2.2：决策上下文——有结构化状态时用它，否则沿用 observation 重放。
+     *
+     * <p>两种情况都保持"每步只带必要信息"的既有约束（默认路径的裁剪口径未变）。
+     */
+    private String decisionContext(AgentRunState runState, List<String> observations) {
+        return runState != null ? runState.decisionContext() : clipContext(observations);
+    }
+
+    /**
      * 动作执行失败是否属于「终局失败」（V2.5）。
      *
      * 终局失败 = 继续循环也无法改变结果（如文章归属校验失败），
@@ -157,7 +234,8 @@ public abstract class AbstractAgentRuntime {
             AiAgentRun run,
             AgentStepDecision decision,
             List<String> observations,
-            List<AgentStepActionType> successfulActions
+            List<AgentStepActionType> successfulActions,
+            AgentRunState runState
     ) {
         return null;
     }
@@ -287,14 +365,65 @@ public abstract class AbstractAgentRuntime {
             PageContextDTO pageContext,
             AgentStepEmitter emitter
     ) {
+        return runWithPolicy(userId, sessionId, goal, pageContext, emitter, defaultPolicy());
+    }
+
+    /**
+     * 默认运行策略：等价于本域既有的 decider / 白名单 / 允许等待语义。
+     * 走它的四个既有域（学习 / 文章 / 通用 / 钱包）行为零变化。
+     */
+    protected AgentRunPolicy defaultPolicy() {
+        return new AgentRunPolicy(decider(), allowedActions(), true);
+    }
+
+    /**
+     * 带策略的执行体。窄模式（analysis-only）由域入口传策略进来。
+     *
+     * 骨架里所有与「用哪个 decider / 允许哪些动作 / 能否进等待态」有关的判断都读 policy，
+     * 而不是读域实现的抽象方法——否则同一次 Run 里会出现「白名单窄了、prompt 没窄」这类半吊子状态。
+     */
+    protected final AgentRunResult runWithPolicy(
+            Long userId,
+            Long sessionId,
+            String goal,
+            PageContextDTO pageContext,
+            AgentStepEmitter emitter,
+            AgentRunPolicy policy
+    ) {
+        return runWithPolicy(userId, sessionId, goal, pageContext, emitter, policy, null);
+    }
+
+    /**
+     * 带父 run 的执行体（第四步）。
+     *
+     * @param parentRunId 外层 Task run 的 ID；非 null 表示本次是**子 run**——
+     *                    不清同 session 的待确认卡（见 {@link #createRun}），
+     *                    并在日志里额外带 taskRunId，排查时能同时定位外层任务与内部执行
+     */
+    protected final AgentRunResult runWithPolicy(
+            Long userId,
+            Long sessionId,
+            String goal,
+            PageContextDTO pageContext,
+            AgentStepEmitter emitter,
+            AgentRunPolicy policy,
+            Long parentRunId
+    ) {
         String effectiveGoal = effectiveGoal(goal, userId, sessionId, pageContext);
-        AiAgentRun run = createRun(userId, sessionId, effectiveGoal);
-        log.info("Agent Run 创建: runId={}, userId={}, goal={}", run.getId(), userId, truncate(effectiveGoal, 100));
+        AiAgentRun run = createRun(userId, sessionId, effectiveGoal, parentRunId);
+        log.info("Agent Run 创建: runId={}, taskRunId={}, userId={}, goal={}",
+                run.getId(), parentRunId, userId, truncate(effectiveGoal, 100));
 
         // V4⑥ 可观测性：run 期间的所有日志带上 agentRunId，与 traceId 配合做「日志 ↔ DB」互查
         MDC.put("agentRunId", String.valueOf(run.getId()));
+        if (parentRunId != null) {
+            // 子 run 额外带外层任务 id：只看子 run 的日志无法定位"这是哪次用户请求的执行"
+            MDC.put("taskRunId", String.valueOf(parentRunId));
+        }
 
         List<String> observations = new ArrayList<>();
+        // P2.2：领域结构化状态（per-run）。为 null = 走 observation 重放——学习 / 通用 / 钱包域如此
+        AgentRunState runState = newRunState(effectiveGoal, run.getMaxSteps());
         List<AgentStepActionType> successfulActions = new ArrayList<>();   // V3.11：结构化事实（只读动作成功列表）
         List<Integer> successfulActionSteps = new ArrayList<>();           // V3.11：成功动作步号（到顶判据用）
         // V3.11：最后一次验证拒绝的步号（run 局部）。到顶保守收尾判据 =
@@ -308,9 +437,9 @@ public abstract class AbstractAgentRuntime {
 
                 // 本步决策的用量单独收集：既累到 run 级，也落到 step 行（谁花的算谁的）
                 TokenUsageAccumulator stepUsage = new TokenUsageAccumulator();
-                AgentStepDecision decision = decider().decide(
+                AgentStepDecision decision = policy.decider().decide(
                         effectiveGoal,
-                        clipContext(observations),
+                        decisionContext(runState, observations),
                         nextStepNo,
                         run.getMaxSteps(),
                         stepUsage
@@ -319,10 +448,12 @@ public abstract class AbstractAgentRuntime {
 
                 // 白名单校验：null / 非法动作直接 FAILED
                 if (decision == null || decision.actionType() == null
-                        || !allowedActions().contains(decision.actionType())) {
-                    String detail = decision == null || decision.actionType() == null
-                            ? "空决策"
-                            : "非法动作: " + decision.actionType();
+                        || !policy.allowedActions().contains(decision.actionType())) {
+                    boolean emptyDecision = decision == null || decision.actionType() == null;
+                    String rawAction = emptyDecision ? "" : decision.actionType().name();
+                    String detail = emptyDecision ? "空决策" : "非法动作";
+                    log.warn("[AGENT] 决策不在当前运行策略白名单: runId={}, actionType={}",
+                            run.getId(), LogValues.safe(rawAction));
                     emitter.emit(nextStepNo, "DECISION", "FAILED", "决策无效：" + detail, null);
                     return markFailed(run, "Agent 决策无效（" + detail + "）");
                 }
@@ -334,8 +465,10 @@ public abstract class AbstractAgentRuntime {
                 resolveStepTarget(run, decision, pageContext);
 
                 // 领域扩展终态（学习域 SUGGEST_WRITE 在此处理）
+                int observedBefore = observations.size();
                 AgentRunResult extra = handleExtraTerminalAction(
                         run, decision, effectiveGoal, observations, emitter, pageContext);
+                syncFeedback(runState, decision, observations, observedBefore);
                 if (extra != null) {
                     return extra;
                 }
@@ -350,7 +483,7 @@ public abstract class AbstractAgentRuntime {
                     // V3.11 证据收敛门：领域钩子判定「证据是否足以支撑该回答草案」。
                     // NEED_MORE 拦截回循环补查；ASK_USER 转问；SUFFICIENT/null（无验证器）放行。
                     Verdict verdict = verifyBeforeFinalization(
-                            run, decision, observations, successfulActions);
+                            run, decision, observations, successfulActions, runState);
                     if (verdict != null && verdict.type() == Verdict.VerdictType.NEED_MORE) {
                         lastVerifierRejectionStep = nextStepNo;
                         String rejectReason = "回答证据不足（缺 " + verdict.missingEvidenceLabel()
@@ -359,7 +492,12 @@ public abstract class AbstractAgentRuntime {
                         emitter.emit(nextStepNo, "FINAL_ANSWER", "FAILED",
                                 "回答被拦截：证据不足", null);
                         recordRejectedStep(run, decision, nextStepNo, rejectReason, stepUsage);
-                        observations.add(verifierRejectHint(verdict));
+                        String verifierHint = verifierRejectHint(verdict);
+                        observations.add(verifierHint);
+                        // 带上缺失类型：补到该类证据时要能把它清掉，否则旧反馈会自我强化
+                        noteFeedback(runState, verifierHint,
+                                AgentRunState.FeedbackClearKey.from(
+                                        Verdict.MissingEvidence.from(verdict.missingEvidence())));
                         run.setCurrentStep(nextStepNo);
                         run.setUsedSteps(nextStepNo);
                         run.setContextJson(toJson(clipContext(observations)));
@@ -368,6 +506,13 @@ public abstract class AbstractAgentRuntime {
                         continue;
                     }
                     if (verdict != null && verdict.type() == Verdict.VerdictType.ASK_USER) {
+                        if (!policy.allowWaitingUser()) {
+                            // analysis-only：本模式不允许转问——复合请求必须保持单请求闭环（§4.7）。
+                            // 信息不足就保守收尾：如实说明缺什么，不伪装成功。
+                            emitter.emit(nextStepNo, "FINAL_ANSWER", "SUCCESS",
+                                    "分析信息不足，保守收尾", decision.thoughtSummary());
+                            return completeWithConservativeShutdown(run, observations);
+                        }
                         // 转问：构造新 ASK_USER decision（question 来自验证器，verifier 侧已保证非空），
                         // 只落一条 ASK_USER 终态 step，不保留伪造的 FINAL_ANSWER step
                         AgentStepDecision askDecision = new AgentStepDecision(
@@ -399,7 +544,9 @@ public abstract class AbstractAgentRuntime {
                         emitter.emit(nextStepNo, "SUGGEST_WORKFLOW", "FAILED",
                                 "建议被拒绝：需先完成一次查询", null);
                         recordRejectedStep(run, decision, nextStepNo, rejectReason, stepUsage);
-                        observations.add(suggestWorkflowRejectHint());
+                        String suggestHint = suggestWorkflowRejectHint();
+                        observations.add(suggestHint);
+                        noteFeedback(runState, suggestHint, AgentRunState.FeedbackClearKey.QUERY_REQUIRED);
                         run.setCurrentStep(nextStepNo);
                         run.setUsedSteps(nextStepNo);
                         run.setContextJson(toJson(clipContext(observations)));
@@ -415,7 +562,8 @@ public abstract class AbstractAgentRuntime {
                 AgentStepDecision prepared = prepareStepDecision(run, decision);
 
                 // V4 规则级重复拦截：同动作 + 同参数的查询再来一次不会有新结果
-                if (rejectDuplicatedQuery(run, prepared, nextStepNo, observations, emitter, stepUsage)) {
+                if (rejectDuplicatedQuery(run, prepared, nextStepNo, observations, emitter, stepUsage,
+                        runState)) {
                     run.setCurrentStep(nextStepNo);
                     run.setUsedSteps(nextStepNo);
                     run.setContextJson(toJson(clipContext(observations)));
@@ -429,11 +577,16 @@ public abstract class AbstractAgentRuntime {
                 // FAILED 不携带——失败时优先展示失败文案，不让动机句覆盖失败原因
                 emitter.emit(nextStepNo, decision.actionType().name(), "RUNNING",
                         "正在" + actionLabel(decision.actionType()) + "...", decision.thoughtSummary());
-                String observation = executeActionAndRecordStep(
+                AgentActionResult actionResult = executeActionAndRecordStep(
                         run, prepared, userId, nextStepNo, emitter, pageContext,
                         successfulActions, successfulActionSteps, stepUsage
                 );
+                String observation = actionResult.summary();
                 observations.add(observation);
+                if (runState != null) {
+                    // 结构化事实独立于展示文本：观察加了来源标注、被裁剪，payload 不受影响
+                    runState.reduce(prepared, actionResult);
+                }
 
                 run.setCurrentStep(nextStepNo);
                 run.setUsedSteps(nextStepNo);
@@ -455,7 +608,7 @@ public abstract class AbstractAgentRuntime {
                 return completeWithConservativeShutdown(run, observations);
             }
             // maxSteps 到顶：从已有 observations 汇总回答
-            return completeWithSummary(run, effectiveGoal, observations);
+            return completeWithSummary(run, effectiveGoal, observations, policy, runState);
         } catch (AgentRunTerminalException e) {
             // 终局失败：失败 step 已落库，这里直接收尾（COMPLETED + 友好文案），不再走 LLM
             log.info("Agent Run 终局失败收尾: runId={}, reason={}", run.getId(), e.getMessage());
@@ -470,6 +623,7 @@ public abstract class AbstractAgentRuntime {
             persistTokens(run);
             // 只移除本键——不能用 MDC.clear()，它会连 Spring 放的 traceId 一起清掉
             MDC.remove("agentRunId");
+            MDC.remove("taskRunId");
         }
     }
 
@@ -520,7 +674,8 @@ public abstract class AbstractAgentRuntime {
                 AiAgentRunStatus.COMPLETED,
                 finalAnswer,
                 run.getUsedSteps(),
-                run.getTotalTokens()
+                run.getTotalTokens(),
+                AgentCompletionKind.TERMINAL_FAILURE
         );
     }
 
@@ -593,8 +748,25 @@ public abstract class AbstractAgentRuntime {
     }
 
     private AiAgentRun createRun(Long userId, Long sessionId, String goal) {
-        // 新一轮 Agent 判断开始，同 session 旧的待确认建议/提案自然过期
-        cancelStalePendingSuggestions(sessionId);
+        return createRun(userId, sessionId, goal, null);
+    }
+
+    /**
+     * 创建 run（第四步加父子参数）。
+     *
+     * <p><b>子 run 不清理同 session 的待确认卡</b>：{@code cancelStalePendingSuggestions} 的语义是
+     * 「用户又发起了一轮新判断，旧的建议 / 提案自然过期」。而 {@code parentRunId != null} 表示这是
+     * **外层任务内部的执行步骤**，不是新一轮用户交互——照走会让一次内部分析把用户已有的
+     * Workflow / 写动作确认卡取消掉（确认接口随后只能报「状态不允许」）。
+     *
+     * @param parentRunId 外层 Task run 的 ID；null = 根 run（用户发起的那次任务）
+     */
+    private AiAgentRun createRun(Long userId, Long sessionId, String goal, Long parentRunId) {
+        if (parentRunId == null) {
+            // 新一轮 Agent 判断开始，同 session 旧的待确认建议/提案自然过期。
+            // 子 run 不是"新一轮"——见方法注释。
+            cancelStalePendingSuggestions(sessionId);
+        }
 
         AiAgentRun run = new AiAgentRun();
         run.setUserId(userId);
@@ -604,6 +776,7 @@ public abstract class AbstractAgentRuntime {
         run.setCurrentStep(0);
         run.setMaxSteps(maxSteps());
         run.setUsedSteps(0);
+        run.setParentRunId(parentRunId);
         LocalDateTime now = LocalDateTime.now();
         run.setCreatedAt(now);
         run.setUpdatedAt(now);
@@ -618,7 +791,7 @@ public abstract class AbstractAgentRuntime {
      * 供证据收敛门判「某类动作是否成功执行过」，不依赖观察文本格式）。
      * 失败：step FAILED + 失败 observation（限长），循环继续，由下一轮决策收尾。
      */
-    private String executeActionAndRecordStep(
+    private AgentActionResult executeActionAndRecordStep(
             AiAgentRun run,
             AgentStepDecision decision,
             Long userId,
@@ -642,7 +815,8 @@ public abstract class AbstractAgentRuntime {
         stepMapper.insert(step);
 
         try {
-            String observation = executor.execute(decision, userId, pageContext);
+            AgentActionResult actionResult = executor.execute(decision, userId, pageContext);
+            String observation = actionResult.summary();
             step.setOutputJson(toJson(Map.of("summary", observation)));
             step.setStatus(AiAgentStepStatus.SUCCESS.name());
             step.setDurationMs(System.currentTimeMillis() - start);
@@ -655,7 +829,8 @@ public abstract class AbstractAgentRuntime {
             // V3.11：成功动作进结构化列表（供证据收敛门判定；步号供到顶保守收尾判据）
             successfulActions.add(decision.actionType());
             successfulActionSteps.add(stepNo);
-            return tagObservation(decision, clipObservation(observation));
+            // payload 必须原样带出去：它是 Reducer 的输入，不能是加过来源标注的展示文本
+            return actionResult.withSummary(tagObservation(decision, clipObservation(observation)));
         } catch (Exception e) {
             log.warn("Agent Step 执行失败: runId={}, stepNo={}, action={}",
                     run.getId(), stepNo, decision.actionType(), e);
@@ -669,7 +844,8 @@ public abstract class AbstractAgentRuntime {
             if (isTerminalFailure(e)) {
                 throw new AgentRunTerminalException(stepNo, e.getMessage());
             }
-            return tagObservation(decision, "动作执行失败：" + truncate(e.getMessage(), 200));
+            return AgentActionResult.of(tagObservation(decision, "动作执行失败：" + truncate(e.getMessage(), 200)))
+                    .with("failed", true);
         }
     }
 
@@ -726,7 +902,9 @@ public abstract class AbstractAgentRuntime {
         // V3.12：兜底文案不是「结论」——不写锚（用 realAnswer 判断，避免比较字符串是否等于 fallback 的脆弱写法）
         String finalAnswer = realAnswer ? extracted : emptyAnswerFallback();
         recordTerminalStep(run, decision, run.getUsedSteps() + 1, stepUsage);
-        AgentRunResult result = finish(run, AiAgentRunStatus.COMPLETED, finalAnswer, observations);
+        AgentRunResult result = finish(run, AiAgentRunStatus.COMPLETED, finalAnswer, observations,
+                // 兜底文案不是「结论」：空答案兜底与正常回答在外层必须能区分（第四步）
+                realAnswer ? AgentCompletionKind.ANSWER : AgentCompletionKind.EMPTY_ANSWER_FALLBACK);
         // V3.12：结论钩子在 **run 成功落库之后** 调用——先写锚后落库会在落库失败时留孤儿锚。
         // 失败不影响回答（钩子实现自行 fail-open），用户照常看到正文。
         if (realAnswer) {
@@ -769,7 +947,8 @@ public abstract class AbstractAgentRuntime {
         if (finalAnswer == null || finalAnswer.isBlank()) {
             finalAnswer = emptySummaryFallback();
         }
-        return finish(run, AiAgentRunStatus.COMPLETED, finalAnswer, observations);
+        return finish(run, AiAgentRunStatus.COMPLETED, finalAnswer, observations,
+                AgentCompletionKind.CONSERVATIVE_SHUTDOWN);
     }
 
     private AgentRunResult markWaitingUser(
@@ -791,7 +970,7 @@ public abstract class AbstractAgentRuntime {
                 : String.valueOf(question);
 
         recordTerminalStep(run, decision, run.getUsedSteps() + 1, stepUsage);
-        return finish(run, AiAgentRunStatus.WAITING_USER, questionText, observations);
+        return finish(run, AiAgentRunStatus.WAITING_USER, questionText, observations, null);
     }
 
     /**
@@ -903,7 +1082,8 @@ public abstract class AbstractAgentRuntime {
             int stepNo,
             List<String> observations,
             AgentStepEmitter emitter,
-            TokenUsageAccumulator stepUsage
+            TokenUsageAccumulator stepUsage,
+            AgentRunState runState
     ) {
         AiAgentStep previous = stepMapper.selectOne(new LambdaQueryWrapper<AiAgentStep>()
                 .eq(AiAgentStep::getAgentRunId, run.getId())
@@ -922,7 +1102,9 @@ public abstract class AbstractAgentRuntime {
                 AgentStepLabelSupport.DUPLICATE_QUERY_SKIP_PREFIX
                         + "：同一动作 + 同一参数在第 " + previous.getStepNo() + " 步已成功执行过",
                 stepUsage);
-        observations.add(duplicateQueryHint(previous.getStepNo()));
+        String duplicateHint = duplicateQueryHint(previous.getStepNo());
+        observations.add(duplicateHint);
+        noteFeedback(runState, duplicateHint);
         return true;
     }
 
@@ -1029,14 +1211,18 @@ public abstract class AbstractAgentRuntime {
     private AgentRunResult completeWithSummary(
             AiAgentRun run,
             String goal,
-            List<String> observations
+            List<String> observations,
+            AgentRunPolicy policy,
+            AgentRunState runState
     ) {
-        String clipped = clipContext(observations);
+        // P2.3（§9.3）：到顶总结同样切到结构化证据（槽位预算 ~3200），
+        // 不再重放整条 observation 流（6000 上限）
+        String clipped = runState != null ? runState.summaryContext() : clipContext(observations);
         String summarized = null;
         // 收尾总结的用量也归 run：它不是某一步的成本（到顶后才发生的一次调用）
         TokenUsageAccumulator summaryUsage = new TokenUsageAccumulator();
         try {
-            summarized = decider().summarize(goal, clipped, summaryUsage);
+            summarized = policy.decider().summarize(goal, clipped, summaryUsage);
         } catch (Exception e) {
             log.warn("Agent 收尾总结失败，降级拼接。runId={}", run.getId(), e);
         } finally {
@@ -1046,7 +1232,9 @@ public abstract class AbstractAgentRuntime {
         String finalAnswer = (summarized == null || summarized.isBlank())
                 ? summarizeFinalAnswer(goal, observations)
                 : summarized;
-        return finish(run, AiAgentRunStatus.COMPLETED, finalAnswer, observations);
+        // 步数到顶的总结：有阶段性内容，但没经过最终答案同等级的证据放行（第四步）
+        return finish(run, AiAgentRunStatus.COMPLETED, finalAnswer, observations,
+                AgentCompletionKind.MAX_STEPS_SUMMARY);
     }
 
     protected String summarizeFinalAnswer(String goal, List<String> observations) {
@@ -1060,25 +1248,34 @@ public abstract class AbstractAgentRuntime {
         return clipObservation(sb.toString());
     }
 
+    /**
+     * 统一收尾出口。
+     *
+     * @param completionKind 第四步·阶段 1：**status = COMPLETED 的调用方必须显式填**，
+     *                       否则外层任务编排收到 null 只能防御性判失败；
+     *                       非 COMPLETED（WAITING_USER 等）传 null——那种情况由 status 表达。
+     */
     private AgentRunResult finish(
             AiAgentRun run,
             AiAgentRunStatus status,
             String finalAnswer,
-            List<String> observations
+            List<String> observations,
+            AgentCompletionKind completionKind
     ) {
         run.setStatus(status.name());
         run.setFinalAnswer(finalAnswer);
         run.setContextJson(toJson(clipContext(observations)));
         run.setUpdatedAt(LocalDateTime.now());
         runMapper.updateById(run);
-        log.info("Agent Run 结束: runId={}, status={}, usedSteps={}",
-                run.getId(), status, run.getUsedSteps());
+        log.info("Agent Run 结束: runId={}, status={}, completionKind={}, usedSteps={}",
+                run.getId(), status, completionKind, run.getUsedSteps());
         return AgentRunResult.of(
                 run.getId(),
                 status,
                 finalAnswer,
                 run.getUsedSteps(),
-                run.getTotalTokens()
+                run.getTotalTokens(),
+                completionKind
         );
     }
 
@@ -1098,23 +1295,17 @@ public abstract class AbstractAgentRuntime {
     }
 
     /**
-     * 上下文裁剪：累计不超过 MAX_CONTEXT_CHARS。
+     * 上下文裁剪：累计不超过 {@link #MAX_CONTEXT_CHARS}。
      *
-     * observations 里的每条已经是单条裁剪（MAX_OBSERVATION_CHARS）后的，
-     * 这里只按累计上限截断，不再套单条裁剪（否则 6000 上限失效）。
+     * <p>observations 里的每条已经是单条裁剪（{@link #MAX_OBSERVATION_CHARS}）后的，
+     * 这里只按累计上限选取窗口，不再套单条裁剪（否则 6000 上限失效）。
+     *
+     * <p><b>2026-09-30 修正（Token 工程 P0-a）</b>：原实现从**最早**一条开始累加、满了就停，
+     * 满载时丢掉的是**最新**证据——与证据收敛门「判 NEED_MORE → 补查 → 用新证据回答」的机制
+     * 直接对冲。现改为「最新优先选连续窗口 + 按原时间顺序输出」，实现见 {@link AgentContextClipper}。
      */
     protected String clipContext(List<String> observations) {
-        StringBuilder sb = new StringBuilder();
-        for (String observation : observations) {
-            if (sb.length() >= MAX_CONTEXT_CHARS) {
-                break;
-            }
-            sb.append(observation).append('\n');
-        }
-        if (sb.length() <= MAX_CONTEXT_CHARS) {
-            return sb.toString();
-        }
-        return sb.substring(0, MAX_CONTEXT_CHARS);
+        return AgentContextClipper.latestWindow(observations, MAX_CONTEXT_CHARS);
     }
 
     protected String clipObservation(String text) {

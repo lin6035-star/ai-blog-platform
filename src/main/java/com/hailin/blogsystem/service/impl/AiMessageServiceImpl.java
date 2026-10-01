@@ -24,6 +24,11 @@ import com.hailin.blogsystem.ai.planner.AgentPlannerSupport;
 import com.hailin.blogsystem.ai.qa.ArticleQaTargetResolver;
 import com.hailin.blogsystem.ai.qa.ArticleQaTargetResolver.QaTarget;
 import com.hailin.blogsystem.ai.task.AiOrchestrationTaskAdmission;
+import com.hailin.blogsystem.ai.task.OrchestrationOutcome;
+import com.hailin.blogsystem.ai.task.TaskPlan;
+import com.hailin.blogsystem.ai.task.TaskStepEventSink;
+import com.hailin.blogsystem.ai.task.TaskStepListener;
+import com.hailin.blogsystem.ai.task.plan.TaskRoute;
 import com.hailin.blogsystem.ai.task.AiTaskRequest;
 import com.hailin.blogsystem.ai.task.AiTaskType;
 import com.hailin.blogsystem.ai.trace.AgentDecisionTrace;
@@ -56,6 +61,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.FluxSink;
 import reactor.core.publisher.FluxSink;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.SignalType;
@@ -102,6 +108,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
     private final AgentRuntimeRouteRegistry agentRuntimeRouteRegistry;
     private final ArticleSessionAnchorService articleSessionAnchorService;
     private final ArticleInteractionBatchService articleInteractionBatchService;
+    private final com.hailin.blogsystem.ai.task.plan.TaskPlanningFacade taskPlanningFacade;
+    private final com.hailin.blogsystem.ai.task.TaskOrchestrationService taskOrchestrationService;
+    private final com.hailin.blogsystem.ai.task.TaskResultRenderer taskResultRenderer;
     private final LearningPlanAnchorService learningPlanAnchorService;
     private final AgentFollowUpResolver agentFollowUpResolver;
     private final LearningProgressHandoffResolver learningProgressHandoffResolver;
@@ -298,6 +307,26 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                 routeDecision
         );
 
+        /*
+         * 第三刀：TaskPlan-first。先看分类器有没有给出候选任务目标——
+         * 计划里每一步都有执行器才交给 TaskOrchestrationService，否则保持原有兼容链路。
+         *
+         * 放在决策审计之后：审计记录的是"Planner 怎么裁决的"，与任务路由无关，
+         * 保持它的完整性（无论后面走哪条路，决策都被如实记录）。
+         *
+         * **判定不在这里做**——"这个组合支不支持"是编排层的知识（TaskPlanningFacade）。
+         */
+        TaskRoute taskRoute = taskPlanningFacade.decide(message, intent, userId);
+        if (taskRoute.isOrchestrate()) {
+            return streamTaskOrchestration(
+                    taskRoute.plan(), message, sessionId, userId, session,
+                    pageContext, rawPageContextJson, requestId, routeUsage, mdcSnapshot);
+        }
+        if (taskRoute.route() == TaskRoute.Route.CTA) {
+            return streamTaskCta(taskRoute.reason(), message, sessionId, userId, session,
+                    rawPageContextJson, routeUsage);
+        }
+
         // V4.x 会话学习计划锚：这一轮用户点名了某个计划 → 记下来，下一轮省略主语时它就是兜底依据。
         // 放在分发之前的总入口——原先写在两个 route 方法里，Agent 路径（LEARNING_AGENT）漏在外面：
         // 实测「帮我分析我的c++学习计划」走 Agent，锚没写，下一句「那就按你说的建议改」便定位不到。
@@ -315,7 +344,11 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             );
         }
 
-        if (routeDecision.getArticleActionBatch() != null) {
+        // 纯动作批次（第一刀）：不进 LLM，就地执行。
+        // 复合请求（批次 + 分析）不走这里——它的 batch 非 null、followUpGoal 也非 null，
+        // 要落到下面的 AGENT 分支，由 streamAgentReply 的 worker 在权威准入成功后执行批次。
+        if (routeDecision.getArticleActionBatch() != null
+                && routeDecision.getFollowUpGoal() == null) {
             return streamArticleInteractionBatch(
                     sessionId,
                     userId,
@@ -446,9 +479,14 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
         if (routeDecision.getAction() == AgentAction.AGENT) {
             // V3.5：按意图查路由注册表分发领域 Runtime（intent → runtime + 兜底文案单点登记）
             MdcContext.LogContext agentLogContext = captureAgentLogContext(mdcSnapshot);
+            // 复合请求的分析段只接收 Planner 已验证的分析目标；普通 Agent 仍使用原有 goal。
+            String runtimeGoal = routeDecision.getFollowUpGoal() == null
+                    ? agentGoal
+                    : routeDecision.getFollowUpGoal();
             return dispatchAgentRuntime(
-                    intent, message, agentGoal, pageContext, rawPageContextJson,
-                    userId, sessionId, session, requestId, agentLogContext, routeUsage
+                    routeDecision.getIntent(), message, runtimeGoal, pageContext, rawPageContextJson,
+                    userId, sessionId, session, requestId, agentLogContext, routeUsage,
+                    routeDecision.getArticleActionBatch()
             );
         }
 
@@ -534,6 +572,269 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         "message", text
                 ))
                 .build());
+    }
+
+    /**
+     * 任务编排链路（第三刀）：把一份已校验的计划跑完，并把过程与结果推给前端。
+     *
+     * <p>与批次链路（{@code streamArticleInteractionBatch}）的区别：批次是"一批同域动作"，
+     * 这里是"用户要的几件事"——每件事的类型可以不同（写动作 / 检索 / 导航）。
+     *
+     * <p>事件分两层：{@code TASK_PLAN} / {@code TASK_STEP} 是外层任务层，
+     * 将来接 ARTICLE_ANALYSIS 时，它内部的 {@code AGENT_STEP} 作为子层挂在对应步骤下。
+     */
+    private Flux<AiChatEventVO> streamTaskOrchestration(
+            TaskPlan plan,
+            String message,
+            Long sessionId,
+            Long userId,
+            AiSessions session,
+            PageContextDTO pageContext,
+            String rawPageContextJson,
+            String requestId,
+            TokenUsageAccumulator routeUsage,
+            Map<String, String> mdcSnapshot
+    ) {
+        /*
+         * 阶段 0（第四步，2026-09-30）：含长 LLM 步骤的计划必须过 AI 长任务准入。
+         *
+         * precheck 的位置与 streamAgentReply 同一约束：**必须在任何 Flux 构造之前**
+         * （响应一旦按 200 SSE 提交，状态码就改不动了），也在 save(userMessage) 之前
+         * （否则拒绝后会留下孤立的用户消息）。
+         *
+         * 纯确定性计划（写动作 / 检索 / 导航）不走准入——它们秒级完成，
+         * 占「8 在跑 + 32 排队」的长任务池只会挤掉真正需要资源的 Agent 任务。
+         */
+        final AiTaskRequest taskRequest;
+        if (plan.requiresLongTaskAdmission()) {
+            String taskBusinessRef = requestId + ":" + sessionId;
+            admission.precheck(userId, AiTaskType.TASK_ORCHESTRATION, taskBusinessRef);
+            taskRequest = AiTaskRequest.of(userId, AiTaskType.TASK_ORCHESTRATION, taskBusinessRef,
+                    captureAgentLogContext(mdcSnapshot));
+        } else {
+            taskRequest = null;
+        }
+
+        AiMessages userMessage = new AiMessages();
+        userMessage.setSessionId(sessionId);
+        userMessage.setRole(ROLE_USER);
+        userMessage.setContent(message);
+        userMessage.setPageContext(rawPageContextJson);
+        userMessage.setCreatedAt(LocalDateTime.now());
+        save(userMessage);
+
+        AiChatEventVO paramEvent = AiChatEventVO.builder()
+                .eventType(AiChatEventType.PARAM.getValue())
+                .eventData(Map.of(
+                        "session", AiSessionVO.from(session),
+                        "userMessage", AiMessageVO.from(userMessage)
+                ))
+                .build();
+
+        Flux<AiChatEventVO> events = Flux.create(sink -> {
+            if (taskRequest != null) {
+                // 权威准入：原子占用户名额 + 进有界池。submit 失败由 Reactor 转成流内错误（与 Agent 路径一致）
+                admission.submit(taskRequest, () -> runOrchestrationBody(
+                        sink, plan, sessionId, userId, pageContext, rawPageContextJson, routeUsage));
+            } else {
+                // 纯确定性计划：秒级完成，走快路径、不占长任务池
+                runOrchestrationBody(sink, plan, sessionId, userId, pageContext, rawPageContextJson, routeUsage);
+            }
+        });
+
+        return Flux.concat(Flux.just(paramEvent), events);
+    }
+
+    /**
+     * 任务编排执行体（阶段 0 从 lambda 里抽出）。
+     *
+     * <p>抽成独立方法的原因：准入要把同一段执行体交给 worker 线程跑，
+     * 抽出来才能让「已准入」与「确定性快路径」两条分支共用一份实现。
+     *
+     * <p>它**整体在 `admission.submit` 成功之后才被调用**——TASK_PLAN 事件也在里面，
+     * 否则被拒时用户会先看到"要做这些事"、紧接着看到流中断。
+     */
+    private void runOrchestrationBody(
+            FluxSink<AiChatEventVO> sink,
+            TaskPlan plan,
+            Long sessionId,
+            Long userId,
+            PageContextDTO pageContext,
+            String rawPageContextJson,
+            TokenUsageAccumulator routeUsage
+    ) {
+        // 计划事件：让前端先把"要做哪几件事"渲染出来，而不是等结果
+        emitIfOpen(sink, AiChatEventVO.builder()
+                .eventType(AiChatEventType.TASK_PLAN.getValue())
+                .eventData(Map.of(
+                        "goal", plan.goal(),
+                        "steps", plan.steps().stream().map(s -> Map.of(
+                                "stepId", s.stepId(),
+                                "type", s.type().name()
+                        )).toList()
+                ))
+                .build());
+
+        TaskStepListener pushListener = (step, result) -> emitIfOpen(sink,
+                AiChatEventVO.builder()
+                        .eventType(AiChatEventType.TASK_STEP.getValue())
+                        .eventData(Map.of(
+                                "stepId", step.stepId(),
+                                "type", step.type().name(),
+                                "state", result.state().name(),
+                                "code", result.code() == null ? "" : result.code().name(),
+                                "summary", result.summary() == null ? "" : result.summary(),
+                                "output", result.output() == null ? Map.of() : result.output()
+                        ))
+                        .build());
+
+        // 内部过程事件出口（第四步）：子 run 的 AGENT_STEP **显式带 taskStepId**，
+        // 前端据此把它挂到对应 TaskStep 之下——它是内层明细，不能和 TASK_STEP 混成同一层。
+        TaskStepEventSink stepEventSink =
+                (taskStepId, stepNo, actionType, status, message, thoughtSummary) ->
+                        emitIfOpen(sink, AiChatEventVO.builder()
+                                .eventType(AiChatEventType.AGENT_STEP.getValue())
+                                .eventData(Map.of(
+                                        "taskStepId", taskStepId,
+                                        "stepNo", stepNo,
+                                        "actionType", actionType,
+                                        "status", status,
+                                        "message", message == null ? "" : message,
+                                        "thoughtSummary", thoughtSummary == null ? "" : thoughtSummary
+                                ))
+                                .build());
+
+        try {
+            OrchestrationOutcome outcome = taskOrchestrationService.run(
+                    userId, sessionId, plan, pageContext, pushListener, stepEventSink);
+            String reply = taskResultRenderer.render(outcome);
+
+            for (String chunk : splitIntoChunks(reply, 32)) {
+                emitIfOpen(sink, AiChatEventVO.builder()
+                        .eventType(AiChatEventType.DATA.getValue())
+                        .eventData(chunk)
+                        .build());
+            }
+
+            AiMessages assistantMessage = saveStreamAssistantMessage(
+                    sessionId, userId, rawPageContextJson, reply);
+            /*
+             * P0-b：编排链路此前**完全没有落 token**——而 message.token_count 是「这条消息的完整成本」
+             * 口径，缺了它，开发者面板的 routingTokens（= message.token_count − run 子树）根本算不出来。
+             *
+             * 口径对齐 Agent 路径：分类器消耗 + 编排 run 消耗。P0 的三个执行器（写动作/检索/导航）
+             * 都是确定性的，外层 run 无 LLM 消耗，故此处即 routeUsage；
+             * 接入 ARTICLE_ANALYSIS 子 run 后，改为 routeUsage + 根 run 的 subtreeTokens（设计稿 §5.4）。
+             */
+            boolean needUpdate = false;
+            if (outcome.agentRunId() != null) {
+                assistantMessage.setAgentRunId(outcome.agentRunId());
+                needUpdate = true;
+            }
+            // 第四步：message 记「这条消息的完整成本」= 分类器 + **根 run 的子树总量**
+            // （子 run 的 Token 只存在自己行上，这里按 parent_run_id 查询聚合，不复制第二份账）
+            long messageTokens = (routeUsage == null ? 0 : routeUsage.getTotalTokens())
+                    + taskOrchestrationService.subtreeTokens(outcome.agentRunId());
+            if (messageTokens > 0) {
+                assistantMessage.setTokenCount(messageTokens);
+                needUpdate = true;
+            }
+            if (needUpdate) {
+                updateById(assistantMessage);
+            }
+
+            Map<String, Object> eventData = new HashMap<>();
+            eventData.put("session", AiSessionVO.from(getOwnedSession(sessionId, userId)));
+            eventData.put("assistantMessage", AiMessageVO.from(assistantMessage));
+            eventData.put("taskResults", outcome.results().stream().map(r -> Map.of(
+                    "stepId", r.stepId(),
+                    "state", r.state().name(),
+                    "summary", r.summary() == null ? "" : r.summary()
+            )).toList());
+
+            emitIfOpen(sink, AiChatEventVO.builder()
+                    .eventType(AiChatEventType.STOP.getValue())
+                    .eventData(eventData)
+                    .build());
+            completeIfOpen(sink);
+        } catch (Throwable e) {
+            log.error("任务编排流式执行异常: userId={}", userId, e);
+            AiMessages assistantMessage = saveStreamAssistantMessage(
+                    sessionId, userId, rawPageContextJson,
+                    "抱歉，这次操作没能完成，请稍后再试。");
+            // P0-b：异常出口同样要记成本——分类器已经调用过（可能已计费），用户却只看到失败文案，
+            // 不记就等于这段消耗在开发者面板上凭空消失。
+            long failedTokens = routeUsage == null ? 0 : routeUsage.getTotalTokens();
+            if (failedTokens > 0) {
+                assistantMessage.setTokenCount(failedTokens);
+                updateById(assistantMessage);
+            }
+            Map<String, Object> eventData = new HashMap<>();
+            eventData.put("session", AiSessionVO.from(getOwnedSession(sessionId, userId)));
+            eventData.put("assistantMessage", AiMessageVO.from(assistantMessage));
+            emitIfOpen(sink, AiChatEventVO.builder()
+                    .eventType(AiChatEventType.STOP.getValue())
+                    .eventData(eventData)
+                    .build());
+            completeIfOpen(sink);
+        }
+    }
+
+    /**
+     * 任务无法完整承接时的 CTA（第三刀）：**不执行半截**，只如实说明。
+     *
+     * <p>与普通 CTA 的区别：这条路径下分类器**已经识别出目标**，只是当前没有对应能力，
+     * 所以要给用户一个可行动的说法，而不是笼统的"我不太确定你想做什么"。
+     */
+    private Flux<AiChatEventVO> streamTaskCta(
+            String reason,
+            String message,
+            Long sessionId,
+            Long userId,
+            AiSessions session,
+            String rawPageContextJson,
+            TokenUsageAccumulator routeUsage
+    ) {
+        AiMessages userMessage = new AiMessages();
+        userMessage.setSessionId(sessionId);
+        userMessage.setRole(ROLE_USER);
+        userMessage.setContent(message);
+        userMessage.setPageContext(rawPageContextJson);
+        userMessage.setCreatedAt(LocalDateTime.now());
+        save(userMessage);
+
+        AiChatEventVO paramEvent = AiChatEventVO.builder()
+                .eventType(AiChatEventType.PARAM.getValue())
+                .eventData(Map.of(
+                        "session", AiSessionVO.from(session),
+                        "userMessage", AiMessageVO.from(userMessage)
+                ))
+                .build();
+
+        String reply = reason == null || reason.isBlank()
+                ? "这个请求我暂时没办法完整处理，能拆开一句一句说吗？"
+                : reason;
+
+        Flux<AiChatEventVO> events = Flux.create(sink -> {
+            for (String chunk : splitIntoChunks(reply, 32)) {
+                emitIfOpen(sink, AiChatEventVO.builder()
+                        .eventType(AiChatEventType.DATA.getValue())
+                        .eventData(chunk)
+                        .build());
+            }
+            AiMessages assistantMessage = saveStreamAssistantMessage(
+                    sessionId, userId, rawPageContextJson, reply);
+            Map<String, Object> eventData = new HashMap<>();
+            eventData.put("session", AiSessionVO.from(getOwnedSession(sessionId, userId)));
+            eventData.put("assistantMessage", AiMessageVO.from(assistantMessage));
+            emitIfOpen(sink, AiChatEventVO.builder()
+                    .eventType(AiChatEventType.STOP.getValue())
+                    .eventData(eventData)
+                    .build());
+            completeIfOpen(sink);
+        });
+
+        return Flux.concat(Flux.just(paramEvent), events);
     }
 
     private Flux<AiChatEventVO> streamArticleInteractionBatch(
@@ -887,7 +1188,7 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
      * 注意：这里不持有任何域判定逻辑（needsThinking / 游客门等在 Planner），只查表 + 防御兜底。
      */
     private Flux<AiChatEventVO> dispatchAgentRuntime(
-            AiIntent intent,
+            String runtimeIntent,
             String message,
             String agentGoal,
             PageContextDTO pageContext,
@@ -897,15 +1198,16 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             AiSessions session,
             String requestId,
             MdcContext.LogContext logContext,
-            TokenUsageAccumulator routeUsage
+            TokenUsageAccumulator routeUsage,
+            // 复合请求（动作 + 分析）的动作批次；非复合路径一律 null（第二刀）
+            ArticleActionBatch preBatch
     ) {
-        String intentName = intent == null ? null : intent.getIntent();
-        AgentRuntime runtime = agentRuntimeRouteRegistry.resolve(intentName);
+        AgentRuntime runtime = agentRuntimeRouteRegistry.resolve(runtimeIntent);
         if (runtime == null) {
-            log.warn("Agent intent 未登记路由，落入学习域显式兜底: intent={}", intentName);
+            log.warn("Agent intent 未登记路由，落入学习域显式兜底: intent={}", runtimeIntent);
             runtime = learningAgentRuntime;
         }
-        String fallbackReply = agentRuntimeRouteRegistry.fallbackMessage(intentName);
+        String fallbackReply = agentRuntimeRouteRegistry.fallbackMessage(runtimeIntent);
         if (fallbackReply == null) {
             // 与 learning 兜底同文（防御分支：只会在未登记漏配时走到，文案随注册表 learning 行同步）
             fallbackReply = "暂时无法整理学习建议，请稍后重试。";
@@ -922,7 +1224,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                 requestId,
                 fallbackReply,
                 logContext,
-                routeUsage
+                routeUsage,
+                preBatch
         );
     }
 
@@ -942,7 +1245,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             String requestId,
             String fallbackReply,
             MdcContext.LogContext logContext,
-            TokenUsageAccumulator routeUsage
+            TokenUsageAccumulator routeUsage,
+            // 复合请求（动作 + 分析）要跑的动作批次；非复合路径为 null（第二刀）
+            ArticleActionBatch preBatch
     ) {
         // 准入前置：放在方法最开头——既在任何 Flux 构造之前（响应一旦按 200 SSE 提交，
         // 状态码就改不动了），也在下面 save(userMessage) 之前（否则拒绝后会留下孤立消息）。
@@ -1013,22 +1318,47 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             };
 
             admission.submit(agentTaskRequest, () -> {
+                // 复合请求的前置批次结果：声明在 try 外，异常兜底也要用它保留已经发生的动作事实
+                ArticleInteractionBatchService.Execution preExecution = null;
                 try {
-                    AgentRunResult result = runtime.run(
-                            userId, sessionId, agentGoal, pageContext, emitter
-                    );
+                    String goalForAgent = agentGoal;
+                    if (preBatch != null) {
+                        // ① 批次在此执行——权威 submit 已成功（名额已占、已在 worker 线程），
+                        //    这时才允许产生文章写副作用。若放在 precheck 与 submit 之间，
+                        //    会出现「点赞已提交、Agent 却被 429/503 拒掉且没有回复」的窗口。
+                        preExecution = articleInteractionBatchService.execute(
+                                userId, sessionId, message, preBatch);
+                        // ② 动作结果作为正文第一段先发：用户先看到动作结果，再看分析流
+                        for (String chunk : splitIntoChunks(preExecution.message() + "\n\n", 32)) {
+                            emitIfOpen(sink, AiChatEventVO.builder()
+                                    .eventType(AiChatEventType.DATA.getValue())
+                                    .eventData(chunk)
+                                    .build());
+                        }
+                        // ③ 注入 goal：分析段要知道动作已经做过，避免在回答里重复许诺
+                        goalForAgent = agentGoal + "\n\n【已完成的前置动作】\n" + preExecution.message();
+                    }
 
-                    String reply = result.finalAnswer() == null
+                    AgentRunResult result = preBatch == null
+                            ? runtime.run(userId, sessionId, goalForAgent, pageContext, emitter)
+                            : runtime.runAnalysisOnly(userId, sessionId, goalForAgent, pageContext, emitter);
+
+                    String agentReply = result.finalAnswer() == null
                             ? fallbackReply
                             : result.finalAnswer();
 
-                    // 正文按 32 字符切块流式输出
-                    for (String chunk : splitIntoChunks(reply, 32)) {
+                    // 正文：复合路径的动作段已在上面发过，这里只发分析段
+                    for (String chunk : splitIntoChunks(agentReply, 32)) {
                         emitIfOpen(sink, AiChatEventVO.builder()
                                 .eventType(AiChatEventType.DATA.getValue())
                                 .eventData(chunk)
                                 .build());
                     }
+
+                    // 落库的是完整文案：复合路径 = 动作段 + 分析段，刷新后看到的是完整回复
+                    String reply = preExecution == null
+                            ? agentReply
+                            : preExecution.message() + "\n\n" + agentReply;
 
                     // 消息落库 + 记忆提取 + 压缩 + suggestion 透出（原 STOP 逻辑）
                     AiMessages assistantMessage = saveStreamAssistantMessage(
@@ -1084,6 +1414,10 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                     if (writeAction != null) {
                         eventData.put("writeAction", writeAction);
                     }
+                    // 复合请求：STOP 带上动作结果，前端据此刷新点赞/收藏/关注的权威状态
+                    if (preExecution != null) {
+                        eventData.put("actionResults", preExecution.actionResults());
+                    }
 
                     emitIfOpen(sink, AiChatEventVO.builder()
                             .eventType(AiChatEventType.STOP.getValue())
@@ -1093,13 +1427,20 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                     completeIfOpen(sink);
                 } catch (Throwable e) {
                     log.error("Agent 流式执行异常: userId={}", userId, e);
+                    // 复合请求：批次可能已经产生了真实结果，不能因为分析段异常就把它丢掉——
+                    // 动作是已经发生的 DB 事实，用户必须看到它（第二刀 §4.6）。
+                    String failureReply = preExecution == null
+                            ? "抱歉，AI 助手暂时不可用，请稍后再试。"
+                            : preExecution.message() + "\n\n（分析没能完成，请稍后再试。）";
                     AiMessages assistantMessage = saveStreamAssistantMessage(
-                            sessionId, userId, rawPageContextJson,
-                            "抱歉，AI 助手暂时不可用，请稍后再试。"
+                            sessionId, userId, rawPageContextJson, failureReply
                     );
                     Map<String, Object> eventData = new HashMap<>();
                     eventData.put("session", AiSessionVO.from(getOwnedSession(sessionId, userId)));
                     eventData.put("assistantMessage", AiMessageVO.from(assistantMessage));
+                    if (preExecution != null) {
+                        eventData.put("actionResults", preExecution.actionResults());
+                    }
                     emitIfOpen(sink, AiChatEventVO.builder()
                             .eventType(AiChatEventType.STOP.getValue())
                             .eventData(eventData)
@@ -2422,10 +2763,13 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
 
             // V3.5：与主分发同一注册表分发（intent → runtime + 兜底文案单点）
             // 这条是 Workflow 回退路径，不经过追问续答 → 目标就是用户原话（两个参数相同）
+            String runtimeGoal = routeDecision.getFollowUpGoal() == null
+                    ? message
+                    : routeDecision.getFollowUpGoal();
             return dispatchAgentRuntime(
-                    intent, message, message, pageContext, rawPageContextJson,
+                    routeDecision.getIntent(), message, runtimeGoal, pageContext, rawPageContextJson,
                     userId, sessionId, session, requestId, captureAgentLogContext(mdcSnapshot),
-                    routeUsage
+                    routeUsage, routeDecision.getArticleActionBatch()
             );
         }
 
