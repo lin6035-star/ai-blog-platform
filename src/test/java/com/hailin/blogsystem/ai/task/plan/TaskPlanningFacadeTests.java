@@ -7,6 +7,7 @@ import com.hailin.blogsystem.ai.task.TaskStep;
 import com.hailin.blogsystem.ai.task.TaskStepExecutor;
 import com.hailin.blogsystem.ai.task.TaskStepExecutorRegistry;
 import com.hailin.blogsystem.entity.dto.AiIntent;
+import com.hailin.blogsystem.entity.dto.AiWorkflowType;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -44,6 +45,35 @@ class TaskPlanningFacadeTests {
     private final TaskPlanningFacade facadeWithAnalysis = new TaskPlanningFacade(
             new TaskPlanner(new TaskStepExecutorRegistry(
                     List.of(fake(StepType.ARTICLE_WRITE), fake(StepType.ARTICLE_ANALYSIS)))));
+
+    /** 又登记了导航执行器的门面：用来构造「Workflow + 导航」这类复合请求 */
+    private final TaskPlanningFacade facadeWithNavigation = new TaskPlanningFacade(
+            new TaskPlanner(new TaskStepExecutorRegistry(
+                    List.of(fake(StepType.ARTICLE_WRITE), fake(StepType.NAVIGATE)))));
+
+    /**
+     * 5b：**注册了 handoff 执行器之后**的门面。
+     *
+     * <p>此时 {@code registry.supports(WORKFLOW_HANDOFF)} 转真，单一 Workflow 请求不再是
+     * "未覆盖目标"，而是变成一条正常计划——所以"它还能不能留在旧链"必须被单独锁住。
+     */
+    private final TaskPlanningFacade facadeWithHandoff = new TaskPlanningFacade(
+            new TaskPlanner(new TaskStepExecutorRegistry(
+                    List.of(fake(StepType.ARTICLE_WRITE), fake(StepType.WORKFLOW_HANDOFF)))));
+
+    private final TaskPlanningFacade facadeWithSearchAndHandoff = new TaskPlanningFacade(
+            new TaskPlanner(new TaskStepExecutorRegistry(List.of(
+                    fake(StepType.ARTICLE_WRITE),
+                    fake(StepType.ARTICLE_SEARCH),
+                    fake(StepType.WORKFLOW_HANDOFF)))));
+
+    private final TaskPlanningFacade facadeWithFullHandoff = new TaskPlanningFacade(
+            new TaskPlanner(new TaskStepExecutorRegistry(List.of(
+                    fake(StepType.ARTICLE_WRITE),
+                    fake(StepType.ARTICLE_SEARCH),
+                    fake(StepType.NAVIGATE),
+                    fake(StepType.ARTICLE_ANALYSIS),
+                    fake(StepType.WORKFLOW_HANDOFF)))));
 
     private static TaskStepExecutor fake(StepType type) {
         return new TaskStepExecutor() {
@@ -140,6 +170,189 @@ class TaskPlanningFacadeTests {
 
         assertThat(route.route()).isEqualTo(TaskRoute.Route.CTA);
         assertThat(route.reason()).doesNotContain("changeTitle");
+    }
+
+    // ==================== 5a：单个已知 Workflow 目标交回旧链 ====================
+
+    /** 5a 最小协议形态：只有 type + params.workflowType + goalEvidence */
+    private Map<String, Object> workflowGoal(String workflowType) {
+        return Map.of("type", "WORKFLOW_HANDOFF",
+                "params", Map.of("workflowType", workflowType),
+                "goalEvidence", List.of("点赞这篇文章"));
+    }
+
+    @Test
+    void singleKnownWorkflowFallsBackToLegacy() {
+        // 不回归的关键：分类器开始输出 WORKFLOW_HANDOFF 后，
+        // 「帮我优化这篇文章」这类请求必须仍能启动，而不是被拦成 CTA
+        AiIntent intent = intent("TASK", workflowGoal("OPTIMIZE_ARTICLE"));
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setSuggestedWorkflowType("OPTIMIZE_ARTICLE");
+
+        assertThat(facade.decide(MESSAGE, intent, 1L).route()).isEqualTo(TaskRoute.Route.LEGACY);
+    }
+
+    @Test
+    void legacyFieldsMissingGoesCta() {
+        // 旧字段残缺 → 旧链的 isWorkflowSuggestion / hasWorkflowSuggestion 会直接降级 CTA，
+        // 那 LEGACY 就是**假路由**：Facade 说"交给旧链"，旧链说"做不了"，用户看到的还是失败
+        AiIntent withoutAction = intent("TASK", workflowGoal("OPTIMIZE_ARTICLE"));
+        withoutAction.setSuggestedWorkflowType("OPTIMIZE_ARTICLE");
+        assertThat(facade.decide(MESSAGE, withoutAction, 1L).route())
+                .as("缺 suggestedAction=WORKFLOW")
+                .isEqualTo(TaskRoute.Route.CTA);
+
+        AiIntent withoutType = intent("TASK", workflowGoal("OPTIMIZE_ARTICLE"));
+        withoutType.setSuggestedAction("WORKFLOW");
+        assertThat(facade.decide(MESSAGE, withoutType, 1L).route())
+                .as("缺 suggestedWorkflowType")
+                .isEqualTo(TaskRoute.Route.CTA);
+    }
+
+    @Test
+    void everyRegisteredWorkflowTypeIsAccepted() {
+        // 这里锁的是「旧链兼容契约」而不是 enum.valueOf 本身：
+        // 将来新增第 6 个 Workflow 却忘了同步旧路由，显式 switch 应先让这条测试变红。
+        for (AiWorkflowType type : AiWorkflowType.values()) {
+            AiIntent intent = intent("TASK", workflowGoal(type.name()));
+            intent.setSuggestedAction("WORKFLOW");
+            intent.setSuggestedWorkflowType(type.name());
+
+            assertThat(facade.decide(MESSAGE, intent, 1L).route())
+                    .as("已登记类型 %s 必须能交回旧链", type)
+                    .isEqualTo(TaskRoute.Route.LEGACY);
+        }
+    }
+
+    // ==================== 5b：单一 handoff 留在旧链，复合才进新编排 ====================
+
+    @Test
+    void singleHandoffStaysOnLegacyEvenAfterExecutorRegistered() {
+        // 不回归的关键：注册 handoff 执行器之后，「帮我优化这篇文章」会变成
+        // "有计划步骤、没有未覆盖目标"的请求。若不显式拦住，它会顺着通用判据走进新编排器，
+        // 而设计稿 §3.1 要的是：5b 第一版**只接「Workflow + 其他目标」的复合请求**，
+        // 单独那一条继续走已验证的旧 Workflow 链。
+        AiIntent intent = intent("TASK", workflowGoal("OPTIMIZE_ARTICLE"));
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setSuggestedWorkflowType("OPTIMIZE_ARTICLE");
+
+        assertThat(facadeWithHandoff.decide(MESSAGE, intent, 1L).route())
+                .as("单一 handoff：即使已有执行器，也要留在旧链")
+                .isEqualTo(TaskRoute.Route.LEGACY);
+    }
+
+    @Test
+    void handoffPlusWriteGoesToNewOrchestrator() {
+        // 复合请求才是 5b 要接的：旧链只会执行一半（点赞照做、优化丢掉），必须进新编排器
+        AiIntent intent = intent("TASK",
+                goal("ARTICLE_WRITE", "点赞这篇文章"),
+                workflowGoal("OPTIMIZE_ARTICLE"));
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setSuggestedWorkflowType("OPTIMIZE_ARTICLE");
+
+        TaskRoute route = facadeWithHandoff.decide(MESSAGE, intent, 1L);
+        assertThat(route.route())
+                .as("handoff + 其他目标：必须进新编排器")
+                .isEqualTo(TaskRoute.Route.ORCHESTRATE);
+        assertThat(route.plan().steps()).hasSize(2);
+    }
+
+    @Test
+    void analysisAfterHandoffFailsClosedEvenWhenBothExecutorsExist() {
+        String message = "优化这篇文章，再分析一下它写得怎么样";
+        AiIntent intent = intent("TASK",
+                goal("WORKFLOW_HANDOFF", Map.of("workflowType", "OPTIMIZE_ARTICLE"), "优化这篇文章"),
+                goal("ARTICLE_ANALYSIS", Map.of(), "分析一下它写得怎么样"));
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setSuggestedWorkflowType("OPTIMIZE_ARTICLE");
+
+        assertThat(facadeWithFullHandoff.decide(message, intent, 1L).route())
+                .isEqualTo(TaskRoute.Route.CTA);
+    }
+
+    @Test
+    void legacyWorkflowSignalMissingFromExecutablePlanFailsClosed() {
+        AiIntent intent = intent("TASK", goal("ARTICLE_WRITE", "点赞这篇文章"));
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setSuggestedWorkflowType("CREATE_ARTICLE");
+
+        assertThat(facade.decide("点赞这篇文章，再写一篇新文章", intent, 1L).route())
+                .as("旧字段声明还有 Workflow，但计划没承接时不能只执行点赞")
+                .isEqualTo(TaskRoute.Route.CTA);
+    }
+
+    @Test
+    void unknownWorkflowTypeGoesCta() {
+        // 其余条件都给全，确保它挂在"类型不认识"这一条上，而不是挂在"字段缺失"上
+        AiIntent intent = intent("TASK", workflowGoal("UNKNOWN_WORKFLOW"));
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setSuggestedWorkflowType("UNKNOWN_WORKFLOW");
+
+        assertThat(facade.decide(MESSAGE, intent, 1L).route())
+                .as("未知 Workflow 不能进旧链")
+                .isEqualTo(TaskRoute.Route.CTA);
+    }
+
+    @Test
+    void conflictingWorkflowFieldsGoCta() {
+        // 脏数据形态：taskGoals 说 CREATE_ARTICLE，顶层旧字段说 OPTIMIZE_ARTICLE。
+        // 不能择一猜测——挑错了就是执行了用户没要的 Workflow
+        AiIntent intent = intent("TASK", workflowGoal("CREATE_ARTICLE"));
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setSuggestedWorkflowType("OPTIMIZE_ARTICLE");
+
+        assertThat(facade.decide(MESSAGE, intent, 1L).route()).isEqualTo(TaskRoute.Route.CTA);
+    }
+
+    @Test
+    void missingWorkflowTypeGoesCta() {
+        AiIntent intent = intent("TASK",
+                Map.of("type", "WORKFLOW_HANDOFF", "params", Map.of(),
+                        "goalEvidence", List.of("点赞这篇文章")));
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setSuggestedWorkflowType("OPTIMIZE_ARTICLE");
+
+        assertThat(facade.decide(MESSAGE, intent, 1L).route())
+                .as("workflowType 缺失 → 没有可裁决的类型")
+                .isEqualTo(TaskRoute.Route.CTA);
+    }
+
+    @Test
+    void workflowParamsWithExtraKeysGoCta() {
+        AiIntent intent = intent("TASK",
+                Map.of("type", "WORKFLOW_HANDOFF",
+                        "params", Map.of("workflowType", "OPTIMIZE_ARTICLE", "articleId", "12"),
+                        "goalEvidence", List.of("点赞这篇文章")));
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setSuggestedWorkflowType("OPTIMIZE_ARTICLE");
+
+        assertThat(facade.decide(MESSAGE, intent, 1L).route())
+                .as("5a 最小契约只允许 workflowType，额外业务参数不能进入旧链")
+                .isEqualTo(TaskRoute.Route.CTA);
+    }
+
+    @Test
+    void workflowPlusWriteGoesCta() {
+        // 「点赞 + 优化」：旧链只会执行点赞还声称完成 → 不能执行半边
+        AiIntent intent = intent("TASK", goal("ARTICLE_WRITE", "点赞这篇文章"),
+                workflowGoal("OPTIMIZE_ARTICLE"));
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setSuggestedWorkflowType("OPTIMIZE_ARTICLE");
+
+        assertThat(facade.decide(MESSAGE, intent, 1L).route()).isEqualTo(TaskRoute.Route.CTA);
+    }
+
+    @Test
+    void workflowPlusNavigateGoesCta() {
+        // 「优化后跳转作者主页」：等 5b 的执行器，现在不猜。
+        // 旧字段同样给全——否则测的是"字段缺失"而不是"多目标"
+        AiIntent intent = intent("TASK", workflowGoal("OPTIMIZE_ARTICLE"),
+                goal("NAVIGATE", Map.of("target", "userProfile"), "跳转到作者主页"));
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setSuggestedWorkflowType("OPTIMIZE_ARTICLE");
+
+        assertThat(facadeWithNavigation.decide(MESSAGE, intent, 1L).route())
+                .isEqualTo(TaskRoute.Route.CTA);
     }
 
     // ==================== 不是任务 → 普通聊天 ====================
@@ -270,6 +483,31 @@ class TaskPlanningFacadeTests {
         intent.setRequestedActions(List.of("likeArticle"));
 
         assertThat(facade.decide("点赞这篇文章", intent, 1L).isOrchestrate()).isTrue();
+    }
+
+    @Test
+    void explicitSearchComparisonMissingFromPlanBecomesCta() {
+        String message = "点赞并收藏这篇文章，再帮我优化一下，再搜一下 Redis 相关文章，并比较各篇文章";
+        AiIntent intent = intent("TASK",
+                goalOf("ARTICLE_WRITE", Map.of("action", "likeArticle"), "点赞"),
+                goalOf("ARTICLE_WRITE", Map.of("action", "favoriteArticle"), "收藏这篇文章"),
+                goalOf("WORKFLOW_HANDOFF", Map.of("workflowType", "OPTIMIZE_ARTICLE"), "优化一下"),
+                goalOf("ARTICLE_SEARCH", Map.of("query", "Redis"), "Redis 相关文章"));
+
+        TaskRoute route = facadeWithSearchAndHandoff.decide(message, intent, 1L);
+
+        assertThat(route.route())
+                .as("明确要求搜索后比较时，不能只执行前四步并静默漏掉比较")
+                .isEqualTo(TaskRoute.Route.CTA);
+    }
+
+    @Test
+    void comparativeAdjectiveInSearchQueryDoesNotTriggerMissingComparisonGuard() {
+        String message = "帮我找比较新的 Redis 文章";
+        AiIntent intent = intent("TASK",
+                goalOf("ARTICLE_SEARCH", Map.of("query", "Redis"), "找比较新的 Redis 文章"));
+
+        assertThat(facadeWithSearch.decide(message, intent, 1L).isOrchestrate()).isTrue();
     }
 
     // ==================== 多目标含未迁移 → CTA，不执行一半 ====================

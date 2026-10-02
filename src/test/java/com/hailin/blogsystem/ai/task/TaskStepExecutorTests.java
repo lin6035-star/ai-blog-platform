@@ -191,7 +191,9 @@ class TaskStepExecutorTests {
     void searchReturnsTitles() {
         when(searchService.search("Redis", null, null, 1, 5)).thenReturn(
                 new ArticleSearchService.SearchHits(List.of(ARTICLE_ID), 1L, Map.of()));
-        when(articlesService.listByIds(any())).thenReturn(List.of(article()));
+        Articles matched = article();
+        matched.setSummary("介绍 Redis 缓存一致性、击穿与高并发治理");
+        when(articlesService.listByIds(any())).thenReturn(List.of(matched));
 
         ArticleSearchExecutor executor = new ArticleSearchExecutor(searchService, articlesService);
         StepResult result = executor.execute(context("12"),
@@ -200,6 +202,10 @@ class TaskStepExecutorTests {
         assertThat(result.state()).isEqualTo(StepState.SUCCEEDED);
         assertThat(result.summary()).contains("Redis 缓存设计");
         assertThat(result.output()).containsEntry("total", 1L);
+        assertThat(result.output().get("articles")).isEqualTo(List.of(Map.of(
+                "articleId", String.valueOf(ARTICLE_ID),
+                "title", "Redis 缓存设计",
+                "summary", "介绍 Redis 缓存一致性、击穿与高并发治理")));
     }
 
     @Test

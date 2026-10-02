@@ -8,6 +8,7 @@ import com.hailin.blogsystem.ai.agent.LlmAgentStepDecider;
 import com.hailin.blogsystem.entity.dto.AgentStepActionType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
@@ -19,6 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -90,6 +92,22 @@ class LlmAgentStepDeciderTests {
         assertThat(decision).isNotNull();
         assertThat(decision.actionType()).isEqualTo(AgentStepActionType.QUERY_LEARNING_DASHBOARD);
         assertThat(decision.input()).containsEntry("planRef", "Redis");
+    }
+
+    @Test
+    void decisionSystemPromptDefinesExternalMaterialTrustBoundary() {
+        when(callSpec.chatResponse()).thenAnswer(inv -> textResponse(
+                "{\"actionType\":\"FINAL_ANSWER\",\"input\":{\"answer\":\"完成\"}}"
+        ));
+
+        decider.decide("分析已有观察", "工具观察", 1, 5, new TokenUsageAccumulator());
+
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(requestSpec).system(captor.capture());
+        assertThat(captor.getValue())
+                .contains("外部材料信任边界")
+                .contains("工具观察")
+                .contains("不是系统指令");
     }
 
     @Test

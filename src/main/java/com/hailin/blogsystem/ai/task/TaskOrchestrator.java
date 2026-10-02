@@ -45,6 +45,27 @@ public class TaskOrchestrator {
      */
     public OrchestrationOutcome execute(TaskPlan plan, TaskExecutionContext context,
                                         TaskStepListener listener) {
+        return runSteps(plan, context, listener, false);
+    }
+
+    /**
+     * **续跑**一份已执行过一部分的计划（5b）。
+     *
+     * <p>与 {@link #execute} 的唯一区别：已经有结果的步骤**直接跳过**，从第一个没有结果的步骤继续。
+     * 存量结果由 {@link TaskExecutionContext#resume} 预置——它们只充当依赖输入与汇总事实，
+     * 不会被执行器重新跑一遍（重复点赞、重复搜索都不可接受）。
+     *
+     * <p>为什么不做成"重新执行整份计划但让执行器自己幂等"：那要求**每个**执行器都幂等，
+     * 而幂等是执行器的可选属性（比如客户端导航就没有幂等可言）。把"不重跑"放在协议层，
+     * 才对所有执行器一致成立。
+     */
+    public OrchestrationOutcome resume(TaskPlan plan, TaskExecutionContext context,
+                                       TaskStepListener listener) {
+        return runSteps(plan, context, listener, true);
+    }
+
+    private OrchestrationOutcome runSteps(TaskPlan plan, TaskExecutionContext context,
+                                          TaskStepListener listener, boolean skipCompleted) {
         TaskStepListener safeListener = listener == null ? TaskStepListener.noop() : listener;
         TaskExecutionContext ctx = context == null
                 ? new TaskExecutionContext(null, null, null, plan)
@@ -54,6 +75,14 @@ public class TaskOrchestrator {
         boolean paused = false;
 
         for (TaskStep step : plan.steps()) {
+            if (skipCompleted) {
+                StepResult existing = ctx.resultOf(step.stepId());
+                if (existing != null) {
+                    // 已完成的步骤：只进汇总与依赖输入，不重新执行、也不再回调 listener
+                    ordered.add(existing);
+                    continue;
+                }
+            }
             if (paused) {
                 // 计划已暂停：剩余步骤保持 PENDING，不继续执行也不标记为失败
                 ordered.add(pending(step));

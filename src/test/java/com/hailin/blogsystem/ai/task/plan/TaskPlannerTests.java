@@ -27,6 +27,14 @@ class TaskPlannerTests {
     private final TaskPlanner planner = new TaskPlanner(new TaskStepExecutorRegistry(List.of(
             fake(StepType.ARTICLE_WRITE), fake(StepType.NAVIGATE))));
 
+    /** 5b 完整注册表：用来验证 handoff 后的第一版恢复边界，而不是“有没有执行器”。 */
+    private final TaskPlanner handoffPlanner = new TaskPlanner(new TaskStepExecutorRegistry(List.of(
+            fake(StepType.ARTICLE_WRITE),
+            fake(StepType.ARTICLE_SEARCH),
+            fake(StepType.NAVIGATE),
+            fake(StepType.ARTICLE_ANALYSIS),
+            fake(StepType.WORKFLOW_HANDOFF))));
+
     private static TaskStepExecutor fake(StepType type) {
         return new TaskStepExecutor() {
             @Override
@@ -124,6 +132,52 @@ class TaskPlannerTests {
                 .isEqualTo(OnFailure.SKIP);
     }
 
+    // ==================== C0 收尾：onFailure 三态 ====================
+
+    @Test
+    void explicitlyUnknownOnFailureIsRejected() {
+        // 模型编出来的 STOP：不能静默降级成 CONTINUE——
+        // 那等于把"失败就停"执行成"失败也照常跑"，语义正好相反
+        TaskPlanCandidate.CandidateGoal goal = new TaskPlanCandidate.CandidateGoal(
+                "ARTICLE_WRITE", Map.of("action", "likeArticle"),
+                List.of("点赞这篇文章"), List.of(), List.of(), "STOP");
+
+        PlanningResult result = planner.plan(MESSAGE,
+                candidate(TaskPlanCandidate.RequestKind.TASK, goal));
+
+        assertThat(result.plan().steps()).as("显式非法值必须让该目标不被承接").isEmpty();
+        assertThat(result.plan().uncoveredTypes()).containsExactly("ARTICLE_WRITE");
+    }
+
+    @Test
+    void blankOnFailureFallsBackToContinue() {
+        // 空白 = 未提供（模型经常这么输出），允许默认 CONTINUE
+        TaskPlanCandidate.CandidateGoal goal = new TaskPlanCandidate.CandidateGoal(
+                "ARTICLE_WRITE", Map.of("action", "likeArticle"),
+                List.of("点赞这篇文章"), List.of(), List.of(), "   ");
+
+        PlanningResult result = planner.plan(MESSAGE,
+                candidate(TaskPlanCandidate.RequestKind.TASK, goal));
+
+        assertThat(result.plan().steps()).hasSize(1);
+        assertThat(result.plan().steps().get(0).dependency().onFailure())
+                .isEqualTo(OnFailure.CONTINUE);
+    }
+
+    @Test
+    void onFailureParsingIsCaseInsensitive() {
+        TaskPlanCandidate.CandidateGoal goal = new TaskPlanCandidate.CandidateGoal(
+                "ARTICLE_WRITE", Map.of("action", "likeArticle"),
+                List.of("点赞这篇文章"), List.of(), List.of(), "confirm");
+
+        PlanningResult result = planner.plan(MESSAGE,
+                candidate(TaskPlanCandidate.RequestKind.TASK, goal));
+
+        assertThat(result.plan().steps()).as("小写要能用，别修着修着把它弄成非法").hasSize(1);
+        assertThat(result.plan().steps().get(0).dependency().onFailure())
+                .isEqualTo(OnFailure.CONFIRM);
+    }
+
     // ==================== 不是任务 ====================
 
     @Test
@@ -167,6 +221,50 @@ class TaskPlannerTests {
         assertThat(result.plan().steps()).hasSize(2);
         assertThat(result.plan().steps().get(0).stepId()).isEqualTo("s1");
         assertThat(result.plan().steps().get(1).stepId()).isEqualTo("s2");
+    }
+
+    // ==================== 5b：handoff 后置步骤边界 ====================
+
+    @Test
+    void searchIsAllowedAfterWorkflowHandoff() {
+        String message = "优化这篇文章，再搜索 Redis 相关文章";
+        PlanningResult result = handoffPlanner.plan(message,
+                candidate(TaskPlanCandidate.RequestKind.TASK,
+                        goal("WORKFLOW_HANDOFF", Map.of("workflowType", "OPTIMIZE_ARTICLE"), "优化这篇文章"),
+                        goal("ARTICLE_SEARCH", Map.of("query", "Redis"), "搜索 Redis 相关文章")));
+
+        assertThat(result.plan().steps())
+                .extracting(TaskStep::type)
+                .containsExactly(StepType.WORKFLOW_HANDOFF, StepType.ARTICLE_SEARCH);
+        assertThat(result.plan().hasUncoveredGoals()).isFalse();
+    }
+
+    @Test
+    void analysisAfterWorkflowHandoffIsUncoveredEvenWhenExecutorExists() {
+        String message = "优化这篇文章，再分析一下它写得怎么样";
+        PlanningResult result = handoffPlanner.plan(message,
+                candidate(TaskPlanCandidate.RequestKind.TASK,
+                        goal("WORKFLOW_HANDOFF", Map.of("workflowType", "OPTIMIZE_ARTICLE"), "优化这篇文章"),
+                        goal("ARTICLE_ANALYSIS", Map.of(), "分析一下它写得怎么样")));
+
+        assertThat(result.plan().steps())
+                .extracting(TaskStep::type)
+                .containsExactly(StepType.WORKFLOW_HANDOFF);
+        assertThat(result.plan().uncoveredTypes()).containsExactly("ARTICLE_ANALYSIS");
+    }
+
+    @Test
+    void navigationAfterWorkflowHandoffIsUncoveredByPositionNotDependency() {
+        String message = "优化这篇文章，然后跳转到作者主页";
+        PlanningResult result = handoffPlanner.plan(message,
+                candidate(TaskPlanCandidate.RequestKind.TASK,
+                        goal("WORKFLOW_HANDOFF", Map.of("workflowType", "OPTIMIZE_ARTICLE"), "优化这篇文章"),
+                        goal("NAVIGATE", Map.of("target", "userProfile"), "跳转到作者主页")));
+
+        assertThat(result.plan().steps())
+                .extracting(TaskStep::type)
+                .containsExactly(StepType.WORKFLOW_HANDOFF);
+        assertThat(result.plan().uncoveredTypes()).containsExactly("NAVIGATE");
     }
 
     // ==================== 证据校验 ====================

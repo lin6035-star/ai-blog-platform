@@ -84,7 +84,7 @@ spring:
           model: ${AI_CHAT_MODEL:qwen3.7-flash}
       embedding:
         options:
-          model: text-embedding-v3
+          model: qwen3.7-text-embedding
           dimensions: 1024
 
     # LLM 调用重试策略（**只作用于非流式的 .call()**，流式路径见 LlmStreamCaller）。
@@ -259,9 +259,19 @@ blog:
 
   ai:
     project-key: global
+    # 分类器 system prompt 模式（P3 分类器收缩，2026-10-01）：
+    #   FULL      = 19 块全装（原行为，安全兜底）
+    #   ON_DEMAND = 按需装载（三级装载 + fail-open；含"再/然后/顺便"等复合信号时保守回退 FULL）
+    # 默认启用 ON_DEMAND；线上判错时设 BLOG_AI_CLASSIFIER_MODE=FULL 并重启即可回退，
+    # 不需要回滚代码。当前 Prompt 离线重测输入降幅 23.1%，调用次数不增加。
+    # 设计稿：docs/agent/agent-token-optimization-design.md；结论与证据：docs/agent/p3-classifier-shrink-handoff.md
+    classifier-mode: ${BLOG_AI_CLASSIFIER_MODE:ON_DEMAND}
+    task:
+      # 仅用于 5b 恢复权已抢到、进程却中断后遗留的 RUNNING；合法 WAITING_WORKFLOW 不会过期。
+      handoff-recovery-stale-minutes: 15
     # 判断链模型（分类器 / Agent 决策器 / 证据验证器）：这些环节判错会让整条路走偏，
     # 建议绑一个稳的模型；留空则跟随 spring.ai.openai.chat.options.model（生成链模型）。
-    judge-model: ${AI_JUDGE_MODEL:qwen3-max-2026-01-23}
+    judge-model: ${AI_JUDGE_MODEL:qwen3.7-max-2026-05-20}
     # AI 计费（预扣 / 结算 / 退款）：docs/redis/钱包与秒杀计划.md §5
     billing:
       enabled: true
@@ -291,7 +301,7 @@ blog:
     rag:
       rerank:
         enabled: true
-        model: gte-rerank-v2
+        model: qwen3.7-text-rerank
         workspace-id: ${ALIYUN_WORKSPACE_ID:}
         top-n: 5
         max-documents: 30

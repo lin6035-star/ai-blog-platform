@@ -164,6 +164,21 @@ class AgentRunInspectionServiceTests {
     }
 
     @Test
+    void taskStepExposesTypeAndGoalEvidenceForResultDisplay() {
+        when(runMapper.selectById(1L)).thenReturn(run(1L, 100L, "COMPLETED", null));
+        AiAgentStep task = step(1, "TASK_STEP",
+                "{\"state\":\"FAILED\",\"summary\":\"目前收集到的信息不足\",\"data\":{}}");
+        task.setInputJson("{\"stepId\":\"s4\",\"type\":\"ARTICLE_ANALYSIS\","
+                + "\"params\":{},\"goalEvidence\":[\"比较各篇文章\"]}");
+        when(stepMapper.selectList(any())).thenReturn(List.of(task));
+
+        AgentStepVO step = service.listSteps(1L).get(0);
+
+        assertThat(step.getType()).isEqualTo("ARTICLE_ANALYSIS");
+        assertThat(step.getGoalEvidence()).containsExactly("比较各篇文章");
+    }
+
+    @Test
     void agentStepHasNoChildRunId() {
         // 普通思考步骤不该被误认为有子 run
         when(runMapper.selectById(1L)).thenReturn(run(1L, 100L, "COMPLETED", null));
@@ -185,6 +200,13 @@ class AgentRunInspectionServiceTests {
         devRun.setOutputTokens(300);
         devRun.setTotalTokens(1500);
         when(runMapper.selectById(1L)).thenReturn(devRun);
+        AiAgentRun childA = run(2L, 100L, "COMPLETED", null);
+        childA.setTotalTokens(200);
+        childA.setParentRunId(1L);
+        AiAgentRun childB = run(3L, 100L, "COMPLETED", null);
+        childB.setTotalTokens(300);
+        childB.setParentRunId(1L);
+        when(runMapper.selectList(any())).thenReturn(List.of(childA, childB));
 
         AiAgentStep tokenStep = step(1, "QUERY_ARTICLE", "{\"summary\":\"读到了正文\"}");
         tokenStep.setInputTokens(900);
@@ -195,6 +217,8 @@ class AgentRunInspectionServiceTests {
         assertThat(detail.getInputTokens()).isEqualTo(1200);
         assertThat(detail.getOutputTokens()).isEqualTo(300);
         assertThat(detail.getTotalTokens()).isEqualTo(1500);
+        assertThat(detail).extracting("localTokens", "subtreeTokens")
+                .containsExactly(1500L, 2000L);
 
         List<AgentStepRawVO> rawSteps = service.listRawSteps(1L);
         assertThat(rawSteps).hasSize(1);

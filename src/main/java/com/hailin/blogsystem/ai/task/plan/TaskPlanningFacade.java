@@ -4,13 +4,16 @@ import com.hailin.blogsystem.ai.LogValues;
 import com.hailin.blogsystem.ai.task.StepType;
 import com.hailin.blogsystem.ai.task.TaskPlan;
 import com.hailin.blogsystem.entity.dto.AiIntent;
+import com.hailin.blogsystem.entity.dto.AiWorkflowType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 任务规划门面（第三刀·2c）——**聊天入口与编排层之间唯一的接口**。
@@ -26,6 +29,10 @@ import java.util.Map;
 @Slf4j
 @RequiredArgsConstructor
 public class TaskPlanningFacade {
+
+    private static final Set<String> EXPLICIT_COMPARISON_MARKERS = Set.of(
+            "并比较", "再比较", "并对比", "再对比",
+            "比较各", "对比各", "比较这些", "对比这些");
 
     private final TaskPlanner planner;
 
@@ -45,7 +52,7 @@ public class TaskPlanningFacade {
         return switch (planning.outcome()) {
             case NOT_TASK -> TaskRoute.chat(planning.reason());
             case CTA -> TaskRoute.cta(planning.reason());
-            case TASK -> routeTask(planning.plan(), intent);
+            case TASK -> routeTask(message, planning.plan(), intent);
         };
     }
 
@@ -57,13 +64,39 @@ public class TaskPlanningFacade {
      * 那正是这一刀要消灭的"多目标静默丢失"。所以退回旧路径必须是**确认它能完整处理**后才做的决定，
      * 不是兜底。
      */
-    private TaskRoute routeTask(TaskPlan plan, AiIntent intent) {
+    private TaskRoute routeTask(String message, TaskPlan plan, AiIntent intent) {
         if (!plan.hasUncoveredGoals() && plan.steps().isEmpty()) {
             // 一个目标都没识别出来——既没得编排，也没有未迁移的证据可退回
             return TaskRoute.cta("这些操作我现在还做不了。");
         }
 
+        /*
+         * 5b（2026-10-01）：**单一 WORKFLOW_HANDOFF 计划继续走旧链**。
+         *
+         * 注册 WorkflowHandoffExecutor 之后 registry.supports(WORKFLOW_HANDOFF) 自然转真，
+         * 于是"帮我优化这篇文章"会变成一个「有计划步骤、没有未覆盖目标」的请求，
+         * 顺着下面的判据走进新编排器——而设计稿 §3.1 要的是：5b 第一版只接
+         * 「Workflow + 其他目标」的复合请求，**单独那一条继续走已验证的旧 Workflow 链**。
+         *
+         * 判据刻意写成"只有一步、且就是 handoff"：只要还有别的步骤，就该进新链。
+         */
+        if (!plan.hasUncoveredGoals()
+                && plan.steps().size() == 1
+                && plan.steps().get(0).type() == StepType.WORKFLOW_HANDOFF) {
+            log.info("[TASK-PLAN] 单一 Workflow 目标继续走旧链（5b 第一版不动已验证路径）");
+            return TaskRoute.legacy("单一 Workflow 目标交给既有链路");
+        }
+
         if (!plan.hasUncoveredGoals()) {
+            if (explicitSearchComparisonNotInPlan(message, plan)) {
+                log.info("[TASK-PLAN] 原话明确要求搜索后比较，但计划未承接比较目标，拒绝执行一半");
+                return TaskRoute.cta("我识别到了搜索和比较，但这次没有把比较步骤可靠拆出来，先不执行半份任务。请再试一次。");
+            }
+            if (workflowSignalNotInPlan(plan, intent)) {
+                log.info("[TASK-PLAN] 旧字段声明 Workflow，但计划未承接 handoff，拒绝执行一半: steps={}",
+                        plan.steps().size());
+                return TaskRoute.cta("这个请求里还有一条流程任务没有被可靠拆出来，先不执行半份任务。请再试一次。");
+            }
             /*
              * ★ 2026-09-30 实测修复：**分类器没把分析诉求拆进 taskGoals 时，不能判 ORCHESTRATE。**
              *
@@ -105,6 +138,16 @@ public class TaskPlanningFacade {
             return TaskRoute.legacy("存在未承接的写动作，交回旧确认链重新裁决");
         }
 
+        // 5a：单个**已知** Workflow 目标交回旧 Workflow 链。
+        // 存在的理由是"不回归"：分类器一旦开始稳定输出 WORKFLOW_HANDOFF，而该类型暂无执行器，
+        // 若不退回，原本能正常启动的「帮我优化这篇文章」会被拦成 CTA。
+        // 它没有放宽安全边界——旧链会按自己的规则重新裁决，且这里只放单目标、已知类型、无字段冲突。
+        if (legacyCanReAdjudicateWorkflow(plan, intent)) {
+            log.info("[TASK-PLAN] 单个已知 Workflow 目标交回旧 Workflow 链: uncoveredTypes={}",
+                    safeTypes(plan));
+            return TaskRoute.legacy("存在未承接的 Workflow 目标，交给兼容链路");
+        }
+
         log.info("[TASK-PLAN] 多目标含未迁移部分，拒绝而不是执行一半: uncoveredTypes={}",
                 safeTypes(plan));
         return TaskRoute.cta("这个请求里有一部分我暂时做不到，先不动手——能拆开一句一句说吗？");
@@ -143,6 +186,125 @@ public class TaskPlanningFacade {
     }
 
     /**
+     * 5a：单个**已知** Workflow 目标能否交回旧 Workflow 链。
+     *
+     * <p>条件必须同时成立（对应 5a 路由规则表）：
+     * <ol>
+     *   <li>未覆盖目标**只有一项**，且类型是 {@code WORKFLOW_HANDOFF}；</li>
+     *   <li>计划里**没有其他已生成步骤**——否则旧链只会执行一半（「点赞 + 优化」）；</li>
+     *   <li>{@code taskGoals[].params.workflowType} 必须是 {@link AiWorkflowType} 里登记的已知值；</li>
+     *   <li>旧字段 {@code suggestedAction == WORKFLOW}；</li>
+     *   <li>旧字段 {@code suggestedWorkflowType} 非空，且与第 3 条的类型一致。</li>
+     * </ol>
+     *
+     * <p><b>为什么第 4、5 条是硬要求</b>：真正启动 Workflow 的不是本类，而是旧链
+     * （{@code AgentPlannerSupport.decideArticleWorkflow / decideLearning}）——它先看
+     * {@code isWorkflowSuggestion}（要求 {@code suggestedAction == WORKFLOW}），再看
+     * {@code hasWorkflowSuggestion}（要求类型一致），任一不满足就直接降级 CTA。
+     * 这里若放行旧字段残缺的请求，LEGACY 就是**假路由**：Facade 说"交给旧链"，
+     * 旧链说"做不了"，用户看到的仍然是失败，只是日志显得正常。
+     *
+     * <p>反过来，旧链**自己**的业务拒绝（如 {@code OPTIMIZE_ARTICLE} 在无文章上下文的页面
+     * 因 {@code article_context_missing} 降级 CTA）不算假路由——那正是"退回后由旧链重新裁决"
+     * 的预期结果，这里不重复判断。
+     *
+     * <p>第 3 条同时防脏数据：分类器可能给出
+     * {@code workflowType=UNKNOWN_WORKFLOW} 配 {@code suggestedWorkflowType=OPTIMIZE_ARTICLE}，
+     * 那种情况一律 CTA，不挑一个信的。
+     */
+    private boolean legacyCanReAdjudicateWorkflow(TaskPlan plan, AiIntent intent) {
+        if (plan.uncoveredTypes().size() != 1) {
+            return false;
+        }
+        if (!StepType.WORKFLOW_HANDOFF.name().equalsIgnoreCase(plan.uncoveredTypes().get(0))) {
+            return false;
+        }
+        if (!plan.steps().isEmpty()) {
+            return false;
+        }
+        if (intent == null) {
+            return false;
+        }
+        Map<String, Object> params = singleTaskGoalWorkflowParams(intent);
+        if (params == null || params.size() != 1 || !params.containsKey("workflowType")) {
+            return false;
+        }
+        String workflowType = text(params.get("workflowType"));
+        if (!isKnownWorkflowType(workflowType)) {
+            return false;
+        }
+        if (!"WORKFLOW".equalsIgnoreCase(intent.getSuggestedAction())) {
+            return false;
+        }
+        String suggested = intent.getSuggestedWorkflowType();
+        if (suggested == null || suggested.isBlank()) {
+            return false;
+        }
+        return suggested.trim().equalsIgnoreCase(workflowType);
+    }
+
+    /**
+     * 取唯一 Workflow 目标的原始参数。
+     *
+     * <p>5a 冻结的最小契约是 {@code params} 只能有 {@code workflowType}。这里必须在旧链回退前
+     * 确定性校验，不能只靠 prompt：否则模型夹带 {@code articleId/topic/planRef} 时仍会被放进
+     * LEGACY，等 5b 开始消费这些字段后就会把今天的脏候选变成明天的执行输入。
+     */
+    private Map<String, Object> singleTaskGoalWorkflowParams(AiIntent intent) {
+        List<Map<String, Object>> goals = intent == null ? null : intent.getTaskGoals();
+        if (goals == null) {
+            return null;
+        }
+        Map<String, Object> matched = null;
+        for (Map<String, Object> goal : goals) {
+            if (goal == null) {
+                continue;
+            }
+            if (!StepType.WORKFLOW_HANDOFF.name().equalsIgnoreCase(text(goal.get("type")))) {
+                continue;
+            }
+            if (matched != null) {
+                return null;
+            }
+            Object params = goal.get("params");
+            if (params instanceof Map<?, ?> map) {
+                matched = new java.util.LinkedHashMap<>();
+                for (Map.Entry<?, ?> entry : map.entrySet()) {
+                    if (entry.getKey() != null) {
+                        matched.put(String.valueOf(entry.getKey()), entry.getValue());
+                    }
+                }
+            } else {
+                return null;
+            }
+        }
+        return matched;
+    }
+
+    /**
+     * 是否是**当前旧路由确实支持**的 Workflow 类型。
+     *
+     * <p>这里不能只调用 {@link AiWorkflowType#valueOf(String)}。枚举值只是领域登记，
+     * 并不证明 {@code AiMessageServiceImpl} 已经有对应的旧入口；如果未来只新增枚举而忘了
+     * 同步旧路由，单 Workflow 退回 {@code LEGACY} 会落到没有处理分支的路径。
+     * 因此用显式 switch 把「可退回旧链」作为兼容期契约，新增 Workflow 时测试会先红。
+     */
+    private boolean isKnownWorkflowType(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return false;
+        }
+        try {
+            AiWorkflowType type = AiWorkflowType.valueOf(raw.trim().toUpperCase(Locale.ROOT));
+            return switch (type) {
+                case CREATE_ARTICLE, OPTIMIZE_ARTICLE, LEARNING_PLAN,
+                        LEARNING_PROGRESS, LEARNING_ASSIST -> true;
+            };
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    /**
      * 复合请求的「分析诉求没有被计划承接」判据。
      *
      * <p>{@code analysisGoalEvidence} 非空（分类器声明"这句话里除了动作还有分析诉求"）
@@ -159,6 +321,39 @@ public class TaskPlanningFacade {
             return false;
         }
         return plan.steps().stream().noneMatch(s -> s.type() == StepType.ARTICLE_ANALYSIS);
+    }
+
+    /**
+     * 旧分类字段已经声明存在 Workflow，但可执行计划里没有对应 handoff。
+     *
+     * <p>只在计划已经有其他步骤时拦截：纯单 Workflow 若 taskGoals 整体缺失，仍由既有旧链裁决；
+     * 真正危险的是“点赞 + 写文章”只拆出点赞，此时新编排会提前 return，旧 Workflow 链没有机会运行。
+     */
+    private boolean workflowSignalNotInPlan(TaskPlan plan, AiIntent intent) {
+        if (intent == null || plan.steps().isEmpty()) {
+            return false;
+        }
+        boolean legacySignal = "WORKFLOW".equalsIgnoreCase(text(intent.getSuggestedAction()))
+                || (intent.getSuggestedWorkflowType() != null
+                && !intent.getSuggestedWorkflowType().isBlank());
+        if (!legacySignal) {
+            return false;
+        }
+        return plan.steps().stream().noneMatch(step -> step.type() == StepType.WORKFLOW_HANDOFF);
+    }
+
+    /**
+     * 分类器可能把「搜索后比较」只拆成搜索。这里只做 fail-closed，不自行补造分析步骤。
+     * 标记词刻意要求有连接语义，避免把「比较新的 Redis 文章」误判成比较任务。
+     */
+    private boolean explicitSearchComparisonNotInPlan(String message, TaskPlan plan) {
+        boolean hasSearch = plan.steps().stream().anyMatch(s -> s.type() == StepType.ARTICLE_SEARCH);
+        boolean hasAnalysis = plan.steps().stream().anyMatch(s -> s.type() == StepType.ARTICLE_ANALYSIS);
+        if (!hasSearch || hasAnalysis) {
+            return false;
+        }
+        String normalized = message == null ? "" : message.replaceAll("\\s+", "");
+        return EXPLICIT_COMPARISON_MARKERS.stream().anyMatch(normalized::contains);
     }
 
     private boolean allStepsAreWrites(TaskPlan plan) {

@@ -159,9 +159,70 @@ public class ArticleAnalysisExecutor implements TaskStepExecutor {
         if (!done.isEmpty()) {
             sb.append("\n\n【已完成的前置动作】\n").append(String.join("\n", done));
         }
+        appendSearchEvidence(sb, context, step);
         if (!step.goalEvidence().isEmpty()) {
             sb.append("\n\n【这一步要完成的】").append(String.join("；", step.goalEvidence()));
         }
         return sb.toString();
+    }
+
+    /**
+     * 搜索结果比较的轻量证据：只取已完成搜索步骤的 ID / 标题 / 摘要，不注入多篇完整正文。
+     * 上限与 ArticleSearchExecutor 一致为 5 条，摘要再截断，避免比较任务把 Prompt 撑大。
+     */
+    private void appendSearchEvidence(StringBuilder sb, TaskExecutionContext context, TaskStep current) {
+        List<String> lines = new ArrayList<>();
+        for (TaskStep other : context.plan().steps()) {
+            if (other.stepId().equals(current.stepId())) {
+                break;
+            }
+            if (other.type() != StepType.ARTICLE_SEARCH) {
+                continue;
+            }
+            StepResult result = context.resultOf(other.stepId());
+            if (result == null || !result.isSuccessLike()) {
+                continue;
+            }
+            Object rawArticles = result.output().get("articles");
+            if (!(rawArticles instanceof List<?> articles)) {
+                continue;
+            }
+            for (Object rawArticle : articles) {
+                if (!(rawArticle instanceof Map<?, ?> article) || lines.size() >= 5) {
+                    continue;
+                }
+                String id = text(article.get("articleId"));
+                String title = text(article.get("title"));
+                String summary = limit(text(article.get("summary")), 240);
+                if (title.isBlank()) {
+                    continue;
+                }
+                StringBuilder line = new StringBuilder("- 《").append(title).append("》");
+                if (!id.isBlank()) {
+                    line.append('(').append(id).append(')');
+                }
+                if (!summary.isBlank()) {
+                    line.append("：").append(summary);
+                }
+                lines.add(line.toString());
+            }
+        }
+        if (!lines.isEmpty()) {
+            sb.append("\n\n【搜索结果证据】\n")
+                    .append(String.join("\n", lines))
+                    .append("\n只基于以上证据比较；证据未覆盖的维度明确写无法判断，不要声称已经读完全文。");
+        }
+    }
+
+    private String text(Object value) {
+        return value == null ? "" : String.valueOf(value).trim();
+    }
+
+    private String limit(String value, int maxLength) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        String normalized = value.replaceAll("\\s+", " ").trim();
+        return normalized.length() <= maxLength ? normalized : normalized.substring(0, maxLength) + "…";
     }
 }

@@ -1,5 +1,6 @@
 package com.hailin.blogsystem.service;
 
+import com.hailin.blogsystem.ai.ClassifierProbe;
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
 import com.hailin.blogsystem.entity.dto.AiIntent;
 import com.hailin.blogsystem.entity.dto.PageContextDTO;
@@ -16,4 +17,17 @@ public interface AiIntentClassifier {
      */
     AiIntent classify(String message, PageContextDTO pageContext, Long userId,
                       TokenUsageAccumulator usage);
+
+    /**
+     * P3.0：带**调用账本**的重载——记录每次调用的角色（首轮 / repair / 计划定位）与最终落点。
+     *
+     * <p>为什么用 default 方法而不是加抽象方法：生产链路只用旧签名。
+     * 加抽象方法会逼所有实现（含测试替身）跟着改，把"增加可观测性"变成一次"接口变更"。
+     *
+     * @param probe 出参：调用角色与结果状态；允许为 null（不观测时零开销）
+     */
+    default AiIntent classify(String message, PageContextDTO pageContext, Long userId,
+                              TokenUsageAccumulator usage, ClassifierProbe probe) {
+        return classify(message, pageContext, userId, usage);
+    }
 }

@@ -37,6 +37,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.ai.chat.metadata.Usage;
 import reactor.core.publisher.Flux;
 
 import java.time.LocalDateTime;
@@ -59,6 +60,7 @@ class ArticleInteractionStreamTests {
     private static final Long ARTICLE_ID = 9_991_003L;
     private static final Long AGENT_RUN_ID = 9_991_004L;
     private static final String MESSAGE = "帮我给这篇文章点赞并收藏";
+    private static final String TASK_CTA_MESSAGE = "给这篇文章生成一个视频";
 
     @Autowired
     private AiMessageService aiMessageService;
@@ -202,5 +204,48 @@ class ArticleInteractionStreamTests {
         assertThat(messages.get(1).getAgentRunId()).isEqualTo(AGENT_RUN_ID);
         verify(batchService).execute(USER_ID, SESSION_ID, MESSAGE, batch);
         verify(modelService, never()).streamChat(any(), anyString(), any());
+    }
+
+    @Test
+    void taskCtaPersistsClassifierTokens() {
+        AiIntent intent = new AiIntent();
+        intent.setIntent("TASK");
+        intent.setRequestKind("TASK");
+        intent.setConfidence(1.0);
+        intent.setTaskGoals(List.of(Map.of(
+                "type", "VIDEO_EDIT",
+                "params", Map.of(),
+                "goalEvidence", List.of("生成一个视频"))));
+        Usage usage = org.mockito.Mockito.mock(Usage.class);
+        when(usage.getPromptTokens()).thenReturn(100);
+        when(usage.getCompletionTokens()).thenReturn(23);
+        when(usage.getTotalTokens()).thenReturn(123);
+        when(intentClassifier.classify(eq(TASK_CTA_MESSAGE), any(PageContextDTO.class), eq(USER_ID),
+                any(TokenUsageAccumulator.class))).thenAnswer(invocation -> {
+                    TokenUsageAccumulator accumulator = invocation.getArgument(3);
+                    accumulator.add(usage);
+                    return intent;
+                });
+        when(planner.decide(eq(TASK_CTA_MESSAGE), eq(intent), any(PageContextDTO.class),
+                eq(USER_ID), any(AiSessions.class)))
+                .thenReturn(AgentDecision.builder()
+                        .action(AgentAction.CHAT)
+                        .intent("TASK")
+                        .retrievalMode("NONE")
+                        .ruleHits(List.of())
+                        .build());
+
+        AiChatDTO request = new AiChatDTO();
+        request.setSessionId(String.valueOf(SESSION_ID));
+        request.setMessage(TASK_CTA_MESSAGE);
+        request.setPageContext(new PageContextDTO());
+        aiMessageService.streamChat(request).collectList().block();
+
+        AiMessages assistant = messageMapper.selectOne(new LambdaQueryWrapper<AiMessages>()
+                .eq(AiMessages::getSessionId, SESSION_ID)
+                .eq(AiMessages::getRole, "assistant")
+                .orderByDesc(AiMessages::getId)
+                .last("limit 1"));
+        assertThat(assistant.getTokenCount()).isEqualTo(123L);
     }
 }

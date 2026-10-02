@@ -1,6 +1,7 @@
 package com.hailin.blogsystem.ai.workflow;
 
 import com.hailin.blogsystem.ai.LlmErrorClassifier;
+import com.hailin.blogsystem.ai.PromptTrustBoundary;
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
 import com.hailin.blogsystem.entity.dto.AiWorkflowStep;
 import com.hailin.blogsystem.utils.MdcContext;
@@ -186,11 +187,12 @@ public class LlmStreamCaller {
         try {
             StringBuilder content = new StringBuilder();
             TokenUsageAccumulator usage = new TokenUsageAccumulator();
+            String effectiveSystemPrompt = PromptTrustBoundary.append(systemPrompt);
             // 单次流式调用只记峰值，流结束后提交一次（原因见 TokenUsageAccumulator.trackPeak）
             AtomicReference<Usage> peakUsage = new AtomicReference<>();
 
             int systemPromptChars =
-                    systemPrompt == null ? 0 : systemPrompt.length();
+                    effectiveSystemPrompt.length();
 
             int userPromptChars =
                     userPrompt == null ? 0 : userPrompt.length();
@@ -215,7 +217,7 @@ public class LlmStreamCaller {
             chatClientBuilder.build()
                     .prompt()
                     .options(options.build())
-                    .system(systemPrompt)
+                    .system(effectiveSystemPrompt)
                     .user(userPrompt)
                     .stream()
                     .chatResponse()

@@ -66,6 +66,23 @@ public class AiWorkflowRunServiceImpl
     private final WorkflowStatusSupport workflowStatusSupport;
     private final WorkflowActionLock workflowActionLock;
     private final WorkflowActionIdempotency workflowActionIdempotency;
+    private final com.hailin.blogsystem.ai.workflow.WorkflowAdvancedNotifier workflowAdvancedNotifier;
+
+    /**
+     * 保存 Workflow 并通知外层任务（5b）。
+     *
+     * <p>为什么收口成一个方法：Workflow 的状态推进在本类里有 **5 个出口**
+     * （创建 / approve / retry / resume / …）。分散去发事件必然漏一处，
+     * 而漏掉的那一处表现是"用户点了确认，外层计划永远不继续"——
+     * 属于要翻半天日志才找得到的故障。以后新增出口只要用这个方法就不会漏。
+     *
+     * <p>事件在**事务提交后**才真正触发（监听端用 {@code @TransactionalEventListener(AFTER_COMMIT)}），
+     * 所以在这里的事务内发布是安全的：不会出现"状态还没提交就有人按旧状态去续跑"。
+     */
+    private void persistAndNotify(AiWorkflowRun run) {
+        updateById(run);
+        workflowAdvancedNotifier.notifyAdvanced(run.getId());
+    }
 
     @Override
     @Transactional //创建文章创作 Workflow
@@ -94,7 +111,18 @@ public class AiWorkflowRunServiceImpl
         return createWorkflowInternal(
                 articleOptimizeWorkflowHandler,
                 dto == null ? null : dto.getConversationId(),
-                userId -> articleOptimizeWorkflowHandler.create(userId, dto, emitter),
+                userId -> {
+                    AiWorkflowAdvanceResult result = articleOptimizeWorkflowHandler.create(userId, dto, emitter);
+                    // 5b：**父关联必须在首次 save 之前**写进 run（设计稿 §7.3）。
+                    // 创建后再补关联会留下「Workflow 已存在、却没挂到外层步骤」的窗口——
+                    // 恰好崩在那个窗口里，恢复巡检就找不到它，成了一条孤儿记录。
+                    // 普通独立 Workflow 的 dto 里两个字段都是 null，写进去也是 null，行为不变。
+                    if (result != null && result.getRun() != null && dto != null) {
+                        result.getRun().setTaskRunId(dto.getTaskRunId());
+                        result.getRun().setTaskStepId(dto.getTaskStepId());
+                    }
+                    return result;
+                },
                 "创建文章优化工作流",
                 emitter);
     }
@@ -289,7 +317,7 @@ public class AiWorkflowRunServiceImpl
             // 初始步骤必须在 run 入库后才能落 StepLog，也要先把真实 ID 交给 SSE emitter。
             safeEmitter.bindWorkflowRunId(result.getRun().getId());
             result = handler.runInitialSteps(result.getRun(), safeEmitter);
-            updateById(result.getRun());
+            persistAndNotify(result.getRun());
             workflowRunManager.clearErrorMessage(result.getRun().getId());
 
             workflowRunManager.bindSessionActiveWorkflow(result.getRun());
@@ -393,7 +421,7 @@ public class AiWorkflowRunServiceImpl
             AiWorkflowAdvanceResult result =
                     handler.approve(run, emitter);
 
-            updateById(result.getRun());
+            persistAndNotify(result.getRun());
             workflowRunManager.clearErrorMessage(run.getId());
 
             if (AiWorkflowStatus.COMPLETED.name()
@@ -464,7 +492,7 @@ public class AiWorkflowRunServiceImpl
             AiWorkflowAdvanceResult result =
                     handler.reject(run, feedback, emitter);
 
-            updateById(result.getRun());
+            persistAndNotify(result.getRun());
             workflowRunManager.clearErrorMessage(run.getId());
 
             // 否定反馈导致取消，清理会话中的 active Workflow
@@ -540,7 +568,7 @@ public class AiWorkflowRunServiceImpl
 
             run.setStatus(AiWorkflowStatus.CANCELLED.name());
             workflowRunManager.touch(run);
-            updateById(run);
+            persistAndNotify(run);
 
             workflowRunManager.clearSessionActiveWorkflow(run);
 
@@ -615,7 +643,7 @@ public class AiWorkflowRunServiceImpl
             AiWorkflowAdvanceResult result =
                     handler.retry(run, emitter);
 
-            updateById(result.getRun());
+            persistAndNotify(result.getRun());
             workflowRunManager.clearErrorMessage(run.getId());
 
             recordWorkflowSuccess(

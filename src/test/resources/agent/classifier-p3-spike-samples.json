@@ -1,0 +1,138 @@
+[
+  {
+    "name": "闲聊：纯概念问答",
+    "layer": "chat",
+    "evalCaseName": "纯概念问答不思考"
+  },
+  {
+    "name": "闲聊：状态依赖建议",
+    "layer": "chat",
+    "evalCaseName": "状态依赖句 GENERAL_CHAT 需思考"
+  },
+  {
+    "name": "文章问答：单节内容评价",
+    "layer": "article-qa",
+    "evalCaseName": "V4 第一刀：单节内容评价走 ARTICLE_DETAIL_QA"
+  },
+  {
+    "name": "文章问答：详情页近指内容问",
+    "layer": "article-qa",
+    "evalCaseName": "V3.9 详情页近指文章内容问走 ARTICLE_DETAIL_QA"
+  },
+  {
+    "name": "文章动作：单动作不得带分析证据",
+    "layer": "action",
+    "evalCaseName": "反例：单动作不得带分析证据"
+  },
+  {
+    "name": "文章动作：详情页隐藏当前文章",
+    "layer": "action",
+    "evalCaseName": "分界：详情页隐藏当前文章走 ARTICLE_AGENT 受控写"
+  },
+  {
+    "name": "复合：动作在前 + 分析在后（核心支持句）",
+    "layer": "composite",
+    "evalCaseName": "复合目标：动作在前 + 分析在后（核心支持句；第四步起两项都要进 taskGoals）"
+  },
+  {
+    "name": "复合：扩展表达（顺便）",
+    "layer": "composite",
+    "evalCaseName": "复合目标：扩展表达（顺便）"
+  },
+  {
+    "name": "Workflow：优化当前文章",
+    "layer": "workflow-single",
+    "evalCaseName": "5a：优化文章——新协议 WORKFLOW_HANDOFF + 旧字段双写"
+  },
+  {
+    "name": "Workflow：写一篇新文章",
+    "layer": "workflow-single",
+    "evalCaseName": "5a：写新文章——CREATE_ARTICLE"
+  },
+  {
+    "name": "Workflow：制定学习计划",
+    "layer": "workflow-single",
+    "evalCaseName": "5a：制定学习计划——LEARNING_PLAN"
+  },
+  {
+    "name": "Workflow：调整计划阶段",
+    "layer": "workflow-single",
+    "evalCaseName": "5a：调整计划阶段——LEARNING_PROGRESS"
+  },
+  {
+    "name": "Workflow：攻坚难点",
+    "layer": "workflow-single",
+    "evalCaseName": "5a：攻坚难点——LEARNING_ASSIST"
+  },
+  {
+    "name": "Workflow复合：点赞 + 优化文章",
+    "layer": "workflow-composite",
+    "evalCaseName": "5a：复合目标——点赞 + 优化文章，两个目标都要拆出来"
+  },
+  {
+    "name": "Workflow复合：优化 + 搜索",
+    "layer": "workflow-composite",
+    "evalCaseName": "5a：复合目标——优化 + 搜索"
+  },
+  {
+    "name": "Workflow复合：优化 + 导航",
+    "layer": "workflow-composite",
+    "evalCaseName": "5a：复合目标——优化 + 导航"
+  },
+  {
+    "name": "学习域：分析计划内容",
+    "layer": "learning",
+    "evalCaseName": "分界：分析计划内容走 LEARNING_AGENT 而非 PLAN_QUERY"
+  },
+  {
+    "name": "学习域：问计划进度",
+    "layer": "learning",
+    "evalCaseName": "回归：问计划进度仍走 LEARNING_PLAN_QUERY"
+  },
+  {
+    "name": "页面动作：钱包充值",
+    "layer": "page-action",
+    "evalCaseName": "充值进入 WALLET_AGENT（2026-09-21）"
+  },
+  {
+    "name": "页面动作：写动作 + 客户端导航",
+    "layer": "page-action",
+    "evalCaseName": "第三刀：写动作 + 客户端导航（第一刀验收句 1；intent 两轮实测稳定但非本样例关注点，故不写死）"
+  },
+  {
+    "name": "计划定位：两个相似计划中选中 C++（最坏三调用链）",
+    "layer": "plan-locating",
+    "message": "帮我把c++的第一阶段浓缩成四个小任务",
+    "userId": 109,
+    "planFixtureTitles": ["C语言系统学习计划", "C++ 系统学习与工程化实践计划"],
+    "planIdMustEqualTitle": "C++ 系统学习与工程化实践计划"
+  },
+  {
+    "name": "计划定位：未点名计划时不得猜",
+    "layer": "plan-locating",
+    "message": "帮我把第一阶段浓缩成四个小任务",
+    "userId": 109,
+    "planFixtureTitles": ["C语言系统学习计划", "C++ 系统学习与工程化实践计划"],
+    "planIdMustBeBlank": true
+  },
+  {
+    "name": "编辑器：编辑器页保存草稿",
+    "layer": "editor",
+    "evalCaseName": "编辑器：编辑器页保存草稿"
+  },
+  {
+    "name": "编辑器：编辑器页发布文章",
+    "layer": "editor",
+    "evalCaseName": "编辑器：编辑器页发布文章"
+  },
+  {
+    "name": "编辑器：非编辑器页保存草稿",
+    "layer": "editor",
+    "evalCaseName": "编辑器：非编辑器页说保存草稿仍判 EDITOR_ACTION"
+  },
+  {
+    "name": "编辑器：非编辑器页发布",
+    "layer": "editor",
+    "evalCaseName": "编辑器：非编辑器页说发布仍判 EDITOR_ACTION"
+  }
+]

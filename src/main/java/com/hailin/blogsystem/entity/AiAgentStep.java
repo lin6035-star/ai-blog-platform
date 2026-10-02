@@ -27,8 +27,19 @@ public class AiAgentStep {
 
     /**
      * 步号，从 1 开始。
+     *
+     * <p>外层编排步骤里它是**计划序号**（预创建时定下、之后不再变）；
+     * 内部 Agent 步骤里它仍是回调顺序号。
      */
     private Integer stepNo;
+
+    /**
+     * 外层 TaskStep 的稳定标识（5b，2026-10-01）——预创建 PENDING 行时写入，恢复时按它对齐步骤。
+     *
+     * <p>内部 Agent 步骤为 {@code null}；与 {@code agent_run_id} 组成唯一键
+     * （{@code uk_agent_task_step}），保证"同一外层步骤只有一行"。
+     */
+    private String taskStepId;
 
     /**
      * 动作类型：QUERY_LEARNING_DASHBOARD / QUERY_MEMORY / SEARCH_RAG / ASK_USER / FINAL_ANSWER。

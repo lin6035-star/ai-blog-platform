@@ -21,6 +21,23 @@ public interface TaskStepEventSink {
     void emit(String taskStepId, int stepNo, String actionType, String status,
               String message, String thoughtSummary);
 
+    /**
+     * **Workflow 内部步骤事件**（5b，2026-10-01）。
+     *
+     * <p>为什么必须单开一个方法而不是复用 {@link #emit}：两者在前端是**两个层级**——
+     * {@code emit} 发的是 AGENT_STEP，会挂到某个任务步骤下的展开明细里；
+     * 这个方法发的是 WORKFLOW_STEP，作用是让 **Workflow 卡片立刻出现**。
+     * 合成一个的话，"流程已经启动"在界面上就没有任何表示，用户要等方案生成完
+     * 才看得到卡——中间那几十秒完全不知道发生了什么。
+     *
+     * <p>默认空实现：纯协议单测与不接线的链路不需要它。
+     *
+     * @param taskStepId 归属的外层任务步骤（Workflow 由这个步骤 handoff 而来）
+     */
+    default void emitWorkflowStep(Long workflowRunId, String workflowType, String step,
+                                  String status, String message, String taskStepId) {
+    }
+
     /** 未接线的默认出口：纯协议单测与不推事件的链路 */
     static TaskStepEventSink noop() {
         return (taskStepId, stepNo, actionType, status, message, thoughtSummary) -> {

@@ -4,12 +4,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.AiJudgeModelSupport;
 import com.hailin.blogsystem.ai.LlmErrorClassifier;
 import com.hailin.blogsystem.ai.LlmResponseSupport;
+import com.hailin.blogsystem.ai.ClassifierProbe;
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
+import com.hailin.blogsystem.config.BlogAiProperties;
 import com.hailin.blogsystem.entity.LearningPlans;
 import com.hailin.blogsystem.entity.dto.AiIntent;
 import com.hailin.blogsystem.entity.dto.PageContextDTO;
 import com.hailin.blogsystem.service.AiIntentClassifier;
 import com.hailin.blogsystem.service.LearningPlansService;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -18,6 +21,7 @@ import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Map;
 
 @Service
 @RequiredArgsConstructor
@@ -28,19 +32,41 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
     private final ObjectMapper objectMapper;
     private final LearningPlansService learningPlansService;
     private final AiJudgeModelSupport aiJudgeModelSupport;
+    private final BlogAiProperties blogAiProperties;
+
+    /**
+     * 启动时把生效的 prompt 模式打出来。
+     *
+     * <p>这个开关的价值全在"出事时能不能一眼确认自己改对了"——配置写错名字、profile 覆盖、
+     * 环境变量没生效，都会让"我以为切回 FULL 了"变成又一次误判。一行日志成本最低。
+     */
+    @PostConstruct
+    void logClassifierMode() {
+        log.info("[P3] 分类器 prompt 模式 = {}（FULL = 19 块全装 / ON_DEMAND = 按需装载 + 复合目标回退）",
+                blogAiProperties.getClassifierMode());
+    }
 
     @Override  //判断分类，用户想要干什么，如果是要生成文章，单独拆一个实现类专门实现
     public AiIntent classify(String message, PageContextDTO pageContextDTO, Long userId,
                              TokenUsageAccumulator usage){
+        // 生产链路走这个签名；带调用账本的观测版在下面（P3.0）
+        return classify(message, pageContextDTO, userId, usage, null);
+    }
+
+    @Override
+    public AiIntent classify(String message, PageContextDTO pageContextDTO, Long userId,
+                             TokenUsageAccumulator usage, ClassifierProbe probe){
         /*
          * 第一段：不带计划列表。
          *
          * 绝大多数消息（闲聊、文章问答、概念问答、创建计划）到此为止——
          * 不查库、user prompt 里也没有计划列表（普通聊天不该背这个包袱）。
          */
-        AiIntent aiIntent = callOnce(message, pageContextDTO, List.of(), usage);
+        AiIntent aiIntent = callOnce(message, pageContextDTO, List.of(), usage,
+                probe, ClassifierProbe.CallRole.FIRST_PASS);
         if (aiIntent == null || aiIntent.getIntent() == null || aiIntent.getIntent().isBlank()) {
             log.warn("AI意图识别失败，降级为普通聊天");
+            markDegraded(probe);
             return generalChat();
         }
 
@@ -57,14 +83,21 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
             plans = loadActivePlans(userId);
             if (!plans.isEmpty()) {
                 log.info("意图命中计划定位，二次分类带列表：planRef={}", aiIntent.getLearningPlanRef());
-                AiIntent located = callOnce(message, pageContextDTO, plans, usage);
+                AiIntent located = callOnce(message, pageContextDTO, plans, usage,
+                        probe, ClassifierProbe.CallRole.PLAN_LOCATOR);
                 if (located != null && located.getIntent() != null && !located.getIntent().isBlank()) {
                     aiIntent = located;
+                } else if (probe != null) {
+                    // 定位失败但首轮结果可用 → 生产落点是**成功**。
+                    // 不改标记的话，报告会把这条样例算成"最终失败"，掩盖真实可用性。
+                    probe.markOutcome(ClassifierProbe.Outcome.SUCCESS_WITH_PLAN_LOCATOR_FALLBACK,
+                            "计划定位未命中，沿用首轮结果（" + probe.getDetail() + "）");
                 }
             }
         }
 
         resolveLearningPlanId(aiIntent, plans);
+        backfillWorkflowFields(aiIntent);
         log.info(
                 "AI意图识别结果: intent={}, confidence={}, "
                         + "suggestedAction={}, suggestedWorkflowType={}, "
@@ -99,7 +132,7 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
         try {
             ChatResponse response = chatClientBuilder.build()
                     .prompt()
-                    .system(buildSystemPrompt(repair))
+                    .system(systemPrompt(repair, message, pageContextDTO))
                     .user(buildUserPrompt(message, pageContextDTO, plans))
                     //判断链：配了 judge-model 用强模型（换模型导致判分界线漂移的实测见 AiJudgeModelSupport）
                     .options(aiJudgeModelSupport.applyTo(OpenAiChatOptions.builder()).build())
@@ -131,21 +164,66 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
      * 「点名单任务」这类诉求静默退化成无能力聊天。
      */
     private AiIntent callOnce(String message, PageContextDTO pageContextDTO,
-                              List<LearningPlans> plans, TokenUsageAccumulator usage) {
+                              List<LearningPlans> plans, TokenUsageAccumulator usage,
+                              ClassifierProbe probe, ClassifierProbe.CallRole role) {
+        if (probe != null) {
+            probe.recordRole(role);
+        }
         String json = callClassifier(message, pageContextDTO, plans, false, usage);
-        AiIntent intent = json == null ? null : tryParse(json);
-        if (intent != null || json == null) {
+        if (probe != null && json != null) {
+            probe.recordResponseChars(json.length());
+        }
+        if (json == null) {
+            markFailure(probe, ClassifierProbe.Outcome.CALL_FAILED, role + " 调用未返回内容");
+            return null;
+        }
+        AiIntent intent = tryParse(json);
+        if (intent != null) {
             return intent;
         }
+        if (probe != null) {
+            probe.recordRole(ClassifierProbe.CallRole.REPAIR);
+        }
         String repaired = callClassifier(message, pageContextDTO, plans, true, usage);
+        if (probe != null && repaired != null) {
+            probe.recordResponseChars(repaired.length());
+        }
         if (repaired == null) {
+            markFailure(probe, ClassifierProbe.Outcome.CALL_FAILED, "repair 调用未返回内容");
             return null;
         }
         AiIntent repairedIntent = tryParse(repaired);
         if (repairedIntent != null) {
             log.warn("AI意图识别 repair 成功：首次输出混入非 JSON 文字，已恢复");
+        } else {
+            markFailure(probe, ClassifierProbe.Outcome.PARSE_FAILED, "首轮与 repair 均解析失败");
         }
         return repairedIntent;
+    }
+
+    /** 记一次失败原因（最终是否降级由"用户可见落点"覆盖，原因链保留在 detail 里） */
+    private void markFailure(ClassifierProbe probe, ClassifierProbe.Outcome outcome, String detail) {
+        if (probe != null) {
+            probe.markOutcome(outcome, detail);
+        }
+    }
+
+    /**
+     * 记最终降级（P3.0）。
+     *
+     * <p>降级是**用户可见的落点**，所以 outcome 用 {@code DEGRADED}；但真正有用的信息是
+     * "为什么降级"——把它连同前面的失败原因一起写进 detail，否则报告里只剩一句"降级了"，
+     * 分不清是供应商 429 还是模型输出坏了（这两者现象一样、根因完全不同）。
+     */
+    private void markDegraded(ClassifierProbe probe) {
+        if (probe == null) {
+            return;
+        }
+        ClassifierProbe.Outcome previous = probe.getOutcome();
+        String detail = previous == ClassifierProbe.Outcome.SUCCESS
+                ? "首轮返回了空 intent"
+                : previous + "：" + probe.getDetail();
+        probe.markOutcome(ClassifierProbe.Outcome.DEGRADED, detail);
     }
 
     /**
@@ -199,6 +277,67 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
         aiIntent.setLearningPlanId(String.valueOf(plans.get(index - 1).getId()));
     }
 
+    /**
+     * 旧字段一致性兜底（P3，2026-10-01）：**taskGoals 是对的，就让旧字段跟着它走**。
+     *
+     * <p><b>为什么需要它</b>：P3 配对测量抓到一条 4/4 稳定复现的失败——"搜索一下 Redis 相关文章，
+     * 再优化当前这篇"：{@code taskGoals=[ARTICLE_SEARCH, WORKFLOW_HANDOFF]} 完全正确，
+     * 但旧字段被裁减后的 prompt 判成了 {@code intent=ARTICLE_SEARCH / suggestedWorkflowType=null}。
+     * 而**真正启动 Workflow 的是旧字段**（5a 已冻结的语义）→ 这条请求不会启动优化 Workflow，
+     * 是真实的功能退化。
+     *
+     * <p><b>为什么不改 prompt</b>：实测过——在候选 prompt 末尾加"旧字段必须跟着 WORKFLOW_HANDOFF 走"
+     * 能修好这一条，却把"帮我充10块钱"的 taskGoals 从 {@code [WALLET_RECHARGE]} 推成
+     * {@code [WORKFLOW_HANDOFF]}，硬门仍是 25/26。修一条坏一条，是打地鼠；
+     * 而"旧字段该填什么"本来就能从 taskGoals 确定性推导，不该交给模型。
+     *
+     * <p><b>边界（刻意收窄，宁可不补也不乱补）</b>：
+     * <ul>
+     *   <li>只在 taskGoals 里**恰好一条** WORKFLOW_HANDOFF 时生效——两条及以上时旧字段本就该留空，
+     *       各自的 workflowType 由 taskGoals 携带（这是 5a 已冻结的语义，不能被这里覆盖）；</li>
+     *   <li>workflowType 必须是已登记的五个之一，缺失或模型自编的值一律不采信（不猜）；</li>
+     *   <li>只补旧字段，**不碰 taskGoals**——它是事实来源，不是被修正的对象。</li>
+     * </ul>
+     */
+    static void backfillWorkflowFields(AiIntent intent) {
+        if (intent == null || intent.getTaskGoals() == null) {
+            return;
+        }
+        int handoffCount = 0;
+        String workflowType = null;
+        for (Map<String, Object> goal : intent.getTaskGoals()) {
+            if (goal == null || !"WORKFLOW_HANDOFF".equals(String.valueOf(goal.get("type")))) {
+                continue;
+            }
+            handoffCount++;
+            if (goal.get("params") instanceof Map<?, ?> params && params.get("workflowType") != null) {
+                workflowType = String.valueOf(params.get("workflowType"));
+            }
+        }
+        if (handoffCount != 1 || workflowType == null) {
+            return;
+        }
+        String intentName = intentForWorkflowType(workflowType);
+        if (intentName == null) {
+            return;
+        }
+        intent.setSuggestedWorkflowType(workflowType);
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setIntent(intentName);
+    }
+
+    /** workflowType → 旧字段的 intent 名；不在登记表里返回 null（不猜） */
+    private static String intentForWorkflowType(String workflowType) {
+        return switch (workflowType) {
+            case "CREATE_ARTICLE" -> "CREATE_ARTICLE_WORKFLOW";
+            case "OPTIMIZE_ARTICLE" -> "OPTIMIZE_ARTICLE_WORKFLOW";
+            case "LEARNING_PLAN" -> "LEARNING_PLAN";
+            case "LEARNING_PROGRESS" -> "LEARNING_PROGRESS";
+            case "LEARNING_ASSIST" -> "LEARNING_ASSIST";
+            default -> null;
+        };
+    }
+
     private AiIntent tryParse(String json) {
         try {
             return objectMapper.readValue(cleanJson(json), AiIntent.class);
@@ -215,512 +354,75 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
         return text.length() > 200 ? text.substring(0, 200) + "..." : text;
     }
 
-    private String buildSystemPrompt(boolean repair){
-        if (repair) {
-            return """
-                    你是意图识别器。你上一次的输出不是合法 JSON——混入了注释、规则文字或额外文本。
-                    现在重新输出：只能输出一个 JSON 对象，直接以 { 开始、以 } 结束。
-                    禁止输出任何解释、注释、规则说明、markdown 代码块标记。
-                    字段与第一次要求完全一致，拿不准的字段输出 null。
-                    """;
+    /**
+     * 分类器 system prompt。
+     *
+     * <p>可见性从 {@code private} 放开到**包私有 static**（2026-10-01，P3.0 切块）：
+     * 它不依赖任何实例字段，而"按域切块"必须先有一份**逐字基线**可比对——
+     * 拿不到 prompt 就只能靠人眼，而 500+ 行靠人眼必然出错。
+     * 暴露范围刻意压到最小（同包测试可见），不进任何公开 API。
+     */
+    /**
+     * 分类器 system prompt（P3.0 起改为**按片段拼装**）。
+     *
+     * <p>片段由脚本从切块前的原文逐行生成（{@link ClassifierPromptBlocks}），
+     * 所以 FULL 拼装与切块前**逐字一致**——由 {@code ClassifierPromptBlocksTests} 锁定。
+     * 切块本身不省 Token（单调用仍要全装），它的意义是让候选 A / B 能按需装载。
+     *
+     * <p>可见性从 {@code private} 放开到**包私有 static**：它不依赖任何实例字段，
+     * 而"按域切块"必须先有一份逐字基线可比对——拿不到 prompt 就只能靠人眼，
+     * 而 500+ 行靠人眼必然出错。暴露范围刻意压到最小（同包测试可见），不进公开 API。
+     */
+    static String buildSystemPrompt(boolean repair){
+        String normalPrompt = String.join("\n",
+                ClassifierPromptBlocks.HEAD_INTENT_LIST,
+                ClassifierPromptBlocks.GENERAL_AND_PROFILE,
+                ClassifierPromptBlocks.ARTICLE_CONTENT,
+                ClassifierPromptBlocks.NAVIGATE,
+                ClassifierPromptBlocks.SEARCH,
+                ClassifierPromptBlocks.CREATE_ARTICLE,
+                ClassifierPromptBlocks.LEARNING_AGENT,
+                ClassifierPromptBlocks.SUGGEST_FIELDS,
+                ClassifierPromptBlocks.NEEDS_THINKING,
+                ClassifierPromptBlocks.RISK,
+                ClassifierPromptBlocks.LEARNING_PLAN,
+                ClassifierPromptBlocks.CONFIDENCE_MISC,
+                ClassifierPromptBlocks.ARTICLE_OPTIMIZE,
+                ClassifierPromptBlocks.PROJECT_CONSULT,
+                ClassifierPromptBlocks.EXAMPLES_AND_SCHEMA,
+                ClassifierPromptBlocks.PAGE_ACTION_RULES,
+                ClassifierPromptBlocks.EDITOR,
+                ClassifierPromptBlocks.WALLET,
+                ClassifierPromptBlocks.OUTPUT_FORMAT);
+        return repair ? normalPrompt + "\n\n" + ClassifierPromptBlocks.REPAIR : normalPrompt;
+    }
+
+    /**
+     * 本次调用要用的 system prompt——**一键回退的落点**。
+     *
+     * <p>{@code blog.ai.classifier-mode=FULL}（默认）走现状 19 块全装；
+     * {@code ON_DEMAND} 走候选 A 的三级按需装载。切换只影响这一处选择：
+     * 调用链、解析、repair、计划定位、planId 解析、旧字段兜底全部不变——
+     * 这是"改配置就能回退"能成立的前提，也是它比"改代码回滚"值得做的原因。
+     */
+    private String systemPrompt(boolean repair, String message, PageContextDTO pageContext) {
+        return systemPromptFor(blogAiProperties.getClassifierMode(), repair, message,
+                pageContext == null ? null : pageContext.getPageType());
+    }
+
+    /**
+     * 包私有 static：把"模式 → prompt"的选择单独拎出来，好让它能**离线单测**（不启 Spring）。
+     *
+     * <p>开关的价值在于"出事时一定切得回去"，而"切得回去"是可测的：给 FULL 就必须拿到
+     * 与切换前逐字相同的 prompt，给 ON_DEMAND 就必须走按需装载。
+     */
+    static String systemPromptFor(BlogAiProperties.ClassifierMode mode, boolean repair,
+                                  String message, String pageType) {
+        if (mode != BlogAiProperties.ClassifierMode.ON_DEMAND) {
+            return buildSystemPrompt(repair);
         }
-        return """
-                你是意图识别器，只能输出 JSON，不能回答用户。
-                
-                                可选 intent：
-                                - GENERAL_CHAT
-                                - USER_PROFILE_INSIGHT
-                                - ARTICLE_ACTION
-                                - NAVIGATE
-                                - EDITOR_ACTION
-                                - CREATE_ARTICLE_WORKFLOW
-                                - OPTIMIZE_ARTICLE_WORKFLOW
-                                - ARTICLE_DETAIL_QA
-                                - ARTICLE_SEARCH
-                                - LEARNING_PLAN_QUERY
-                                - LEARNING_PROGRESS
-                                - LEARNING_ASSIST
-                                - LEARNING_AGENT
-                                - ARTICLE_AGENT
-                                - WALLET_AGENT
-
-                                当用户只是问普通技术问题、闲聊、解释概念时，输出 GENERAL_CHAT。
-                
-                                当 pageType 是 profile 或 public-profile，且用户询问这个人/自己/我的主页、主要信息、发过什么文章、点赞收藏评论情况时，输出 USER_PROFILE_INSIGHT，并填写 userId（从页面上下文中获取）。
-                
-                                当 pageType 是 article-detail，且用户要求点赞、取消点赞、收藏、取消收藏、关注作者、取消关注作者、分享、复制链接、跳到评论区时，输出 ARTICLE_ACTION。
-                                ARTICLE_ACTION 必须填写 requestedActions 数组，按用户表达顺序列出全部动作；actionType 仅兼容单动作，取数组第一项。
-                                例如“点赞并收藏”必须输出 requestedActions=["likeArticle","favoriteArticle"]，不能只保留一个。
-                                【复合目标例外】当句子 =「上述服务端动作在**前**」+「对当前文章的分析诉求在**后**」
-                                （例如“点赞这篇文章，再分析一下它写得怎么样”）时，**仍然输出 ARTICLE_ACTION**，
-                                不要因为“一句话里有两个子目标”就升级成 ARTICLE_AGENT；
-                                动作在后（“先分析再点赞”）或带条件（“写得好就点赞”）的**不适用**本条，按原规则判：
-                                - requestedActions 填动作部分，按用户表达顺序；
-                                - analysisGoalEvidence 填分析诉求在用户原话中的**连续片段**，
-                                  必须逐字摘录，不能改写、总结、翻译或补充；后端会验证它是否真实出现在原始消息中。
-                                例：intent=ARTICLE_ACTION, requestedActions=["likeArticle"],
-                                    analysisGoalEvidence="分析一下它写得怎么样"
-                                当 pageType 是 article-detail，且用户询问“这篇文章讲了什么”“总结这篇文章”“这篇文章重点是什么”“这篇文章里的某个内容是什么意思”“分析当前文章”时，输出 ARTICLE_DETAIL_QA。
-                                当 pageType 是 article-detail，且用户要求回到顶部、回到文章开头、滚动到顶部时，输出 ARTICLE_ACTION，actionType=scrollToTop。
-                                注意区分：“看看开头”“先看开头再看结尾”是**阅读文章内容**，不是滚动动作；
-                                只有明确要求“回到 / 滚到顶部或开头”才是 scrollToTop。阅读请求按内容意图判
-                                （单个目标 -> ARTICLE_DETAIL_QA，多个目标 -> ARTICLE_AGENT）。
-                                
-                                ARTICLE_DETAIL_QA = 对一篇具体文章的内容问答、评价或比较
-                                （讲了什么 / 总结 / 文中概念解释 / 追问文中观点 /
-                                某一节写得好不好 / 对比某两节的写法），不需要 actionType。
-                                判定不依赖页面（V3.9 跨页指代）：在任意页面或无页面上下文的对话里，
-                                用户明确近指一篇本对话中已出现/刚聊过的文章问内容
-                                （“这篇文章”“那篇”“刚刚那篇”“你刚才说的那篇”）时，
-                                同样输出 ARTICLE_DETAIL_QA：
-
-                                - intent=ARTICLE_DETAIL_QA
-                                - suggestedAction=CHAT
-                                - suggestedWorkflowType=null
-
-                                后端按 pageContext 文章 → 本会话最近聊过的文章 的顺序定位目标；
-                                articleId 允许为空（跨页取不到就不填，禁止编造或猜测 articleId）。
-                                区分（务必遵守）：
-                                - 无文章指代的纯概念问（“Redis 缓存是什么”“Java 怎么学”）-> GENERAL_CHAT
-                                - 找站内有没有某类文章（“有没有/推荐 XX 文章”）-> ARTICLE_SEARCH
-                                - 用标题/主题词指某篇文章的内容问答（“Redis 缓存那篇讲了什么”）-> 仍判 ARTICLE_DETAIL_QA：
-                                后端按 页面文章 → 本会话最近聊过的文章 定位，定位不到会追问澄清，
-                                不要因为不确定目标文章就降级 GENERAL_CHAT
-                                - 评价 / 比较文章已有内容（“这一节写得怎么样”“这两节哪个写得好”
-                                  “检查一下某一节”）-> 仍判 ARTICLE_DETAIL_QA：
-                                这是对已有内容的评价，不是要你改动它；
-                                不要因为出现“怎么样 / 检查 / 分析”这类词就升级为 ARTICLE_AGENT
-                                - 一句话里包含两个或以上不同的处理动作 / 分析角度 / 待办项
-                                  （“先…再…”“从 A 和 B 两方面”“分别看 X 和 Y”）
-                                  -> ARTICLE_AGENT。
-                                  这条**优先于**上面的“分析 / 总结 / 评价当前文章 -> ARTICLE_DETAIL_QA”：
-                                  只要句子里有多个并列的子目标，即使每个子目标单独看都像 QA，也判 ARTICLE_AGENT
-                                  （**例外**：若其中一个子目标是上文列出的服务端文章动作、另一个是对当前文章的
-                                  分析诉求，则按 ARTICLE_ACTION 处理并填 analysisGoalEvidence，不判 ARTICLE_AGENT）
-                                - 明确要求结合长期记忆 / 写作偏好 -> ARTICLE_AGENT
-                                 
-                                actionType / requestedActions 元素可选：likeArticle, unlikeArticle, favoriteArticle, unfavoriteArticle, followAuthor, unfollowAuthor, copyArticleLink, scrollToComments, saveDraft, publish, fillArticle, scrollToTop。
-
-                                当用户要求跳转页面、打开页面、进入页面、回到某页时，输出 NAVIGATE。
-                                当 pageType 是 article-detail，且用户要求查看该作者或者进入该作者的主页时，输出 NAVIGATE。
-                                
-                                 target 可选：
-                                 - home：首页
-                                 - profile：个人中心/我的主页
-                                 - editor：写文章/新建文章/编辑器
-                                 - drafts：草稿箱/我的草稿
-                                 - hotRank：热门排行/排行榜
-                                 - article：文章详情页，需要 param=文章ID
-                                 - userProfile：用户主页/作者主页，需要 param=用户ID/authorId
-                                
-                                当用户询问站内是否有某类文章、查找文章、推荐相关文章、有没有关于某主题的博客时，输出 ARTICLE_SEARCH。
-                
-                                从用户问题中提取最核心的搜索关键词，填写 keyword。
-                                keyword 要短，优先保留技术名词，不要包含“有没有”“文章”“博客”“推荐”等泛词。
-               
-                                例如：
-                                “有没有关于 Java 注解的文章” -> keyword=Java注解
-                                “找一下 Redis 缓存相关的博客” -> keyword=Redis 缓存
-                                “有没有讲 Spring Boot 配置的内容” -> keyword=Spring Boot 配置
-                                
-                                当用户明确要求查询、搜索、查找、推荐站内文章时：
-
-                                - intent=ARTICLE_SEARCH
-                                - suggestedAction=CHAT
-                                - suggestedWorkflowType=null
-
-                                ARTICLE_SEARCH 由后端执行文章 RAG 检索，
-                                不是让模型直接决定是否调用文章 Tool。
-                                keyword 只能提取用户原话中的核心技术词，
-                                不能猜测用户没有提到的主题。
-
-                                如果用户说”打开第 X 篇文章”，但没有明确文章ID，不要猜ID，输出 GENERAL_CHAT。
-                                
-                                当用户要求帮他写一篇关于特定主题的文章、博客、博文、草稿、大纲时：
-
-                                - intent=CREATE_ARTICLE_WORKFLOW
-                                - suggestedAction=WORKFLOW
-                                - suggestedWorkflowType=CREATE_ARTICLE
-
-                                这类请求不要求用户必须在编辑器页面。
-                                如果用户指定了主题：
-
-                                - topic：主题的规范化名称
-                                - topicEvidence：用户原话中连续出现的、代表主题的原始片段
-
-                                topicEvidence 必须逐字摘录用户原话，不能改写、总结、翻译或补充。
-                                后端会验证 topicEvidence 是否真实出现在用户原始消息中。
-
-                                用户没有明确给出主题时：
-
-                                - topic=null
-                                - topicEvidence=null
-
-                                禁止猜测、联想或编造主题。
-                                “文章”“博客”“博文”“草稿”“大纲”“内容”不能作为有效主题。
-
-                                当用户要求“继续学什么 / 下一步学什么 / 今天学什么 /
-                                帮我安排今天的学习 / 学习有点乱帮我理一下思路”时：
-                                - intent=LEARNING_AGENT
-                                - suggestedAction=AGENT
-                                - suggestedWorkflowType=null
-
-                                当用户要求**分析、评价自己已有学习计划的内容**（只是要分析结论或建议，
-                                **不要求动手改**），例如"帮我分析我的 X 学习计划，看看有没有问题"
-                                "我的 X 计划安排得合理吗""这个计划写得怎么样"时：
-                                - intent=LEARNING_AGENT
-                                - suggestedAction=AGENT
-                                - suggestedWorkflowType=null
-                                Agent 会读取计划内容后给出分析与改进建议（不改任何数据）。
-                                三条分界（易混，务必按判据选）：
-                                - 问"有哪些计划 / 进行到哪了" → LEARNING_PLAN_QUERY（查状态）
-                                - 问"好不好 / 有没有问题 / 哪里不合理" → 本类（要分析结论）
-                                - **要求动手改计划本身** → LEARNING_PROGRESS（要执行），不是本类。
-                                  典型措辞：优化 / 调整 / 改一下 / 压缩 / 重排 + 计划，
-                                  含"**那就按照你的建议优化一下我的计划**"这类承接上轮建议、要动手执行的说法；
-                                  "改"出现在"要你改"里就是 PROGRESS，只有"问你该怎么改"才是本类。
-                                句子里出现"我的X学习计划"不代表就是查询。
-
-                                当用户明确要求勾选 / 取消勾选学习计划中的任务、
-                                标记任务完成 / 取消完成时（V2.4 受控写动作），
-                                或把已有任务改名 / 重命名（V3.3 受控写改名，新名来自用户原话）时：
-                                - intent=LEARNING_AGENT
-                                - suggestedAction=AGENT
-                                - suggestedWorkflowType=null
-                                Agent 会先查询计划定位任务，产出写动作提案，用户确认后才执行。
-
-                                这些是 Agent Runtime 学习建议 / 受控写提案请求，
-                                不是制定计划，也不是调整计划。
-                                Agent 只查询学习进度、记忆、站内知识后给出建议或提案，
-                                不会直接创建或修改任何数据（写动作必须用户确认）。
-
-                                边界例子（务必区分）：
-                                - “我想学 Redis，帮我制定学习计划” -> LEARNING_PLAN
-                                - “帮我调整第二阶段” -> LEARNING_PROGRESS
-                                - “Redis 跳表我不懂，帮我拆小一点” -> LEARNING_ASSIST
-                                - “帮我分析我的 Agent 学习计划，看看有没有问题” -> LEARNING_AGENT（分析计划内容，不是 PLAN_QUERY）
-                                - “我今天继续学 Redis，帮我安排今天学什么” -> LEARNING_AGENT
-                                - “我下一步学什么” -> LEARNING_AGENT
-                                - “我最近学 Redis 有点乱，帮我理一下” -> LEARNING_AGENT
-                                - “帮我把 Redis 计划的缓存击穿任务勾掉 / 标记完成” -> LEARNING_AGENT（受控写提案）
-                                - “把那个任务取消勾选” -> LEARNING_AGENT（受控写提案）
-                                - “给 Redis 计划第二阶段加一个'缓存雪崩防护'任务” -> LEARNING_AGENT（受控写追加，任务名用户已给）
-                                - “把 Redis 计划的缓存击穿任务改名为缓存击穿防护” -> LEARNING_AGENT（受控写改名，旧名新名都来自用户原话）
-                                - “第二阶段太难，帮我加几个练习任务” -> LEARNING_ASSIST（任务名要 AI 生成）
-                                - “我有几个学习规划” -> LEARNING_PLAN_QUERY（查询已有计划，不是 Agent）
-                                - “Redis 是什么” -> GENERAL_CHAT
-
-                                对 LEARNING_AGENT：learningPlanRef 只能摘录用户原话中的计划名称或关键词，
-                                不允许猜测、编造计划名或 ID。
-
-                                Agent 建议字段规则：
-                                - suggestedAction：只能是 CHAT / TOOL / WORKFLOW / CTA / AGENT
-                                - suggestedWorkflowType：只能是 CREATE_ARTICLE / OPTIMIZE_ARTICLE / LEARNING_PLAN / LEARNING_PROGRESS / LEARNING_ASSIST，没有对应 Workflow 时填 null
-                                - risk：只能是 LOW / MEDIUM / HIGH
-                                - reason：一句简短的分类理由，不要写长篇解释
-
-                                这些字段只是给后端 Planner 的建议，不能代替后端最终裁决。
-
-                                suggestedAction 规则：
-
-                                - 普通知识问答、闲聊、概念解释：CHAT
-                                - 站内文章查询、推荐相关文章：CHAT
-                                - 当前文章内容问答、总结当前文章：CHAT
-                                - 查询已有学习计划、阶段、进度：TOOL
-
-                                - 明确要求创建文章、写文章、写博客、生成文章大纲：
-                                  WORKFLOW，suggestedWorkflowType=CREATE_ARTICLE
-
-                                - 明确要求优化、润色、改写、重写当前文章：
-                                  WORKFLOW，suggestedWorkflowType=OPTIMIZE_ARTICLE
-                                  注意：只要求“对某几节 / 某几处提改进建议”，或“改进”只是
-                                  多个子目标之一（如“先总结，再挑一段讲讲怎么改进”）-> ARTICLE_AGENT，
-                                  不要升级为 OPTIMIZE_ARTICLE
-
-                                - 明确制定学习计划：
-                                  WORKFLOW，suggestedWorkflowType=LEARNING_PLAN
-
-                                - 明确调整已有学习计划或进度：
-                                  WORKFLOW，suggestedWorkflowType=LEARNING_PROGRESS
-
-                                - 明确表达学习计划、阶段或任务中的困难，请求拆解、解释，
-                                  或请求帮忙加练习任务但未给具体任务名（任务内容由 AI 生成）：
-                                  WORKFLOW，suggestedWorkflowType=LEARNING_ASSIST
-
-                                - 用户点名具体任务要求加入某计划/阶段
-                                  （任务名来自用户原话，如"给 Redis 计划第二阶段加一个'缓存雪崩防护'任务"）：
-                                  AGENT（intent=LEARNING_AGENT，受控写追加，不是 WORKFLOW）
-
-                                - 用户点名已有任务并给出新名要求改名 / 重命名
-                                  （如"把缓存击穿改成缓存击穿防护"）：
-                                  AGENT（intent=LEARNING_AGENT，受控写改名，不是 WORKFLOW）
-
-                                - 继续学习安排、下一步学什么、理一下学习思路：
-                                  AGENT（intent=LEARNING_AGENT）
-
-                                - 文章页对当前文章的模糊优化诉求（无明确指令）：
-                                  AGENT（intent=ARTICLE_AGENT）
-                                  注意：单纯评价 / 比较已有内容（“这一节写得怎么样”“对比这两节”）
-                                  是 ARTICLE_DETAIL_QA，不是优化诉求
-
-                                - 需求模糊、可能需要用户进一步说明：
-                                  CTA
-
-                                needsThinking 字段规则（V3 通用思考模式，只对 GENERAL_CHAT 生效）：
-                                - needsThinking 含义：这句话是否需要结合用户记忆、前文状态或站内上下文，先查再答
-                                - 只对 GENERAL_CHAT 有意义：其他 intent 一律输出 false
-                                - 默认 false：只有明确的上下文依赖信号才判 true，吃不准就 false
-                                - 判定标准是语义，不是关键词：判断这句话是否指向前文、
-                                  是否依赖用户记忆/历史状态、是否存在信息缺口
-                                - 判 true 的例子：
-                                  - "你觉得我现在这套方案还有什么问题"（依赖前文方案）
-                                  - "结合我现在的情况，给个建议"（依赖用户记忆/状态）
-                                  - "刚才那个方向还能继续吗"（指向前文）
-                                  - "帮我总结一下我最近的学习进展"（依赖记忆与历史）
-                                - 判 false 的例子：
-                                  - "什么是缓存穿透"（纯概念问答，不依赖上下文）
-                                  - "你好"（寒暄）
-                                  - 明确指令或已有专属 intent 的诉求（如"帮我优化这篇文章"、学习类指令）
-                                - needsThinkingReason：判定依据的一句话，仅用于后端抽样排查，
-                                  不进入任何用户可见界面，不影响路由结果
-                                - 两个字段都必须输出，needsThinking 不能省略，
-                                  needsThinkingReason 没有依据时输出 null
-
-                                risk 规则：
-                                - 用户意图清晰，且自动进入学习流程的错误代价较低：LOW
-                                - 用户表达有歧义、计划对象不清楚、可能需要澄清：MEDIUM
-                                - 涉及高风险写入、越权、敏感操作或无法确认目标：HIGH
-
-                                注意：
-                                - confidence 表示"意图判断有多确定"
-                                - risk 表示"判断错误后的代价"
-                                - confidence 和 risk 是两个独立字段
-
-                                当用户表达学习某技术的想法或规划诉求
-                                （例如"我想学XX""不知道怎么开始""帮我规划学习路线"）时：
-                                - intent=LEARNING_PLAN
-                                - suggestedAction=WORKFLOW
-                                - suggestedWorkflowType=LEARNING_PLAN
-
-                                是否真正创建 Workflow 由后端 Planner 决定。
-                                分类器只负责识别学习意图，不直接创建 Workflow。
-
-                                如果用户只是询问知识、了解概念
-                                （例如"Redis 是什么"），输出：
-                                - intent=GENERAL_CHAT
-                                - suggestedAction=CHAT
-                                - suggestedWorkflowType=null
-
-                                当用户询问或查看自己已有的学习计划、阶段或进度
-                                （例如"我有几个学习规划""我的 MySQL 学习计划学到哪了"）时：
-                                - intent=LEARNING_PLAN_QUERY
-                                - suggestedAction=TOOL
-                                - suggestedWorkflowType=null
-                                边界：本类只处理「有哪些计划 / 某个计划进行到哪了」这类**列表与状态查询**。
-                                用户要求对计划**内容**做分析、评价、挑问题、给改进建议时，
-                                即使句子里出现"我的X学习计划"，也**不是**本类 → 走 LEARNING_AGENT（见上）。
-
-                                当用户要求调整、压缩、重排、延长、缩短、
-                                重新生成已有学习计划或进度时：
-                                - intent=LEARNING_PROGRESS
-                                - suggestedAction=WORKFLOW
-                                - suggestedWorkflowType=LEARNING_PROGRESS
-                                （本节优先于 LEARNING_AGENT 的"分析计划"：**只要用户是要你动手改计划**，
-                                哪怕话里带"建议 / 分析"字样（如"按你刚才的建议优化一下我的计划"），
-                                也归本类——分析是手段，执行才是诉求。）
-                                （注意：仅把某个已有任务改名 / 重命名且新名来自用户原话 →
-                                不是 LEARNING_PROGRESS，走 LEARNING_AGENT 受控写改名提案；
-                                “调整、压缩、重排”整段/整体结构仍属本类）
-
-                                当用户表达某个学习计划、阶段或任务难度过高、
-                                卡住、理解困难，并希望解释、拆解，
-                                或请求帮忙加辅助任务但未给出具体任务名（任务内容由 AI 生成）时：
-                                - intent=LEARNING_ASSIST
-                                - suggestedAction=WORKFLOW
-                                - suggestedWorkflowType=LEARNING_ASSIST
-                                （用户已点名具体任务要求直接加入计划 → 不是 LEARNING_ASSIST，
-                                走 LEARNING_AGENT 受控写追加）
-
-                                例如：
-                                "我感觉微服务计划中的阶段二挺难的"
-                                "第二阶段有点啃不动，帮我拆小一点"
-                                "Redis 计划里的缓存击穿看不懂"
-                                "第二阶段太难，帮我加几个练习任务"（任务名由 AI 生成）
-                                （对照："给 Redis 计划第二阶段加一个'缓存雪崩防护'任务"——
-                                任务名用户已给 → LEARNING_AGENT 受控写追加，不是 LEARNING_ASSIST）
-
-                                对 LEARNING_PROGRESS / LEARNING_ASSIST：
-                                - learningPlanRef 只能摘录用户原话中的计划名称或关键词
-                                - learningStageRef 只能摘录用户原话中的阶段或任务名称
-                                - 不允许猜测、编造计划名、阶段名或 ID
-
-                                learningPlanIndex（该用户的学习计划列表会在用户问题前给出，按序号编号）：
-                                - 当用户指代了列表里的某个计划时，输出它在列表中的序号（从 1 开始）。
-                                  简称、别名、口语说法都算指代，例如用户说"c++ 计划"或"C加加那个"，
-                                  而列表里有「C++ 系统学习与工程化实践计划」，就输出它的序号
-                                - 用户没提到任何计划，或者你无法确定指代哪一个 → 输出 null
-                                - 列表里没有用户说的那个计划 → 输出 null，不要退而求其次挑一个最接近的
-                                - 序号必须真实存在于列表中，禁止编造；不要输出计划 ID
-                                - 只对 LEARNING_ASSIST / LEARNING_PROGRESS 输出；其他意图一律输出 null
-                                - learningPlanIndex 字段必须输出，没有值时输出 null
-
-                                对模糊学习表达：
-                                例如"我最近学 Redis 有点乱"
-                                可以输出：
-                                - intent=GENERAL_CHAT 或相关学习意图
-                                - suggestedAction=CTA
-                                - risk=MEDIUM
-                                - reason=需要进一步确认用户是想咨询知识还是调整学习计划
-
-                                对所有意图输出 confidence，范围为 0 到 1，表示本次意图判断置信度。
-                                如果用户指定了分类，填写 categoryName，默认为随笔分类。
-                                如果用户有额外要求，填写 requirements。
-                                不要在意图识别阶段生成完整正文。
-
-                                当 pageType 是 article-detail，
-                                且用户要求优化、改进、润色、重写当前文章时：
-
-                                - intent=OPTIMIZE_ARTICLE_WORKFLOW
-                                - suggestedAction=WORKFLOW
-                                - suggestedWorkflowType=OPTIMIZE_ARTICLE
-                                - articleId 从页面上下文中获取
-
-                                例外：当用户原话给出完整新标题要求改名（"把标题改成 XX" / "标题改名为 XX"）时，
-                                不是 OPTIMIZE——新标题已由用户指定、无需 AI 生成改法，这是受控写改标题，判 ARTICLE_AGENT（见下）。
-                                例外（V3.7）：用户要求隐藏 / 公开 / 取消隐藏当前文章（状态操作，不涉及内容）时，
-                                也不是 OPTIMIZE——状态操作不走内容优化 Workflow，判 ARTICLE_AGENT 受控写（见下）。
-
-                                这类请求不需要用户在编辑器页面。
-                                如果缺少 articleId，输出 GENERAL_CHAT。
-                                不要在意图识别阶段生成优化方案。
-                                是否真正启动 Workflow，由后端 Planner 决定。
-
-                                当 pageType 是 article-detail，
-                                且用户对当前文章表达模糊的优化诉求（没有明确改哪里、怎么改）时：
-
-                                - intent=ARTICLE_AGENT
-                                - suggestedAction=AGENT
-                                - suggestedWorkflowType=null
-                                - articleId 从页面上下文中获取
-
-                                模糊诉求例子：
-                                - "帮我看看这篇文章" / "这篇文章写得怎么样"
-                                - "这篇文章还能怎么改" / "感觉写得不太好，帮我分析一下"
-                                - "帮我看看这篇文章有什么问题"（没有具体指令）
-
-                                例外（V3.4 受控写改标题）：当用户原话给出完整新标题要求改当前文章标题
-                                （"把标题改成 XX" / "标题改名为 XX"，XX 完整出现在用户原话里）时，
-                                判 ARTICLE_AGENT（Agent 提案改标题 → 后端弹确认卡 → 用户确认后才执行，
-                                后端只改标题不动其他内容），不要判 OPTIMIZE_ARTICLE_WORKFLOW。
-
-                                例外（V3.7 受控写可见性）：当用户要求隐藏 / 公开 / 取消隐藏当前文章
-                                （"把这篇隐藏了" / "设为隐藏" / "把这篇公开" / "取消隐藏"）时，
-                                判 ARTICLE_AGENT（Agent 提案隐藏/公开 → 后端弹确认卡 → 确认后执行），
-                                不要判 OPTIMIZE_ARTICLE_WORKFLOW——状态操作不涉及内容修改，不属于文章优化。
-
-                                例外（V3.8 跨页文章操作）：当用户不在文章详情页（首页/其他页），
-                                但原话里明确要对某篇文章做受控操作（改标题/改名/隐藏/公开/取消隐藏）时，
-                                不管用近指（"帮我把刚刚那篇文章隐藏了"）还是标题/主题词指代
-                                （"把我 Redis 那篇隐藏了""把 JVM 那篇公开"），都判 ARTICLE_AGENT（suggestedAction=AGENT），
-                                articleId 置空不填、不要编造——后端用本会话最近聊过的文章兜底定位并校验归属，
-                                定位不到会追问澄清，不要因为不确定目标文章就降级 GENERAL_CHAT。
-                                只有原话没有文章操作/内容问答意图时（如"Redis 那篇写得不错"），维持 GENERAL_CHAT。
-
-                                明确优化指令（不判 ARTICLE_AGENT，判 OPTIMIZE_ARTICLE_WORKFLOW）：
-                                - "把第二段删掉" / "帮我把标题改短" / "把开头重写得更吸引人"
-                                - "帮我优化这篇文章"（明确要求优化）
-                                注意："帮我把标题改短"这类没有给出具体新标题的仍走 Workflow，与上面的改名例外不冲突。
-
-                                articleId 只从页面上下文获取；页面上下文缺失时按上方 V3.8 例外处理
-                                （受控操作仍判 ARTICLE_AGENT 并留空 articleId，后端会话锚兜底）。
-                                Agent 只查询文章、记忆、站内知识后给出优化建议或建议启动优化流程，
-                                不会直接修改文章（写动作必须用户确认）。
-
-                                当用户说自己在做博客项目、文章项目、Agent 项目，并咨询技术方案、架构选型、实现方式时，输出 GENERAL_CHAT。
-                                 不要因为问题中出现“博客”“文章”“RAG”就输出 ARTICLE_SEARCH。
-                                 只有用户明确要求“找文章 / 搜博客 / 推荐站内文章 / 有没有相关文章”时，才输出 ARTICLE_SEARCH。
-
-                                输出示例：
-
-                                普通聊天（直达）：
-                                {"intent":"GENERAL_CHAT","confidence":0.98,"learningPlanRef":null,"learningStageRef":null,"actionType":null,"articleId":null,"userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"suggestedAction":"CHAT","suggestedWorkflowType":null,"risk":"LOW","reason":"普通知识问答","needsThinking":false,"needsThinkingReason":null}
-
-                                普通聊天（需思考，进通用 Agent）：
-                                {"intent":"GENERAL_CHAT","confidence":0.85,"learningPlanRef":null,"learningStageRef":null,"actionType":null,"articleId":null,"userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"suggestedAction":"CHAT","suggestedWorkflowType":null,"risk":"LOW","reason":"依赖前文方案状态","needsThinking":true,"needsThinkingReason":"问题指向前文讨论的方案，需结合记忆与上下文先查再答"}
-
-                                文章创作：
-                                {"intent":"CREATE_ARTICLE_WORKFLOW","confidence":0.95,"learningPlanRef":null,"learningStageRef":null,"actionType":null,"articleId":null,"userId":null,"content":null,"target":null,"param":null,"topic":"Redis缓存","topicEvidence":"Redis 缓存","categoryName":null,"requirements":null,"suggestedAction":"WORKFLOW","suggestedWorkflowType":"CREATE_ARTICLE","risk":"LOW","reason":"用户明确要求创建文章","needsThinking":false,"needsThinkingReason":null}
-
-                                文章优化：
-                                {"intent":"OPTIMIZE_ARTICLE_WORKFLOW","confidence":0.95,"learningPlanRef":null,"learningStageRef":null,"actionType":null,"articleId":"12","userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"suggestedAction":"WORKFLOW","suggestedWorkflowType":"OPTIMIZE_ARTICLE","risk":"MEDIUM","reason":"用户明确要求优化当前文章","needsThinking":false,"needsThinkingReason":null}
-
-                                文章页模糊优化（Agent 建议）：
-                                {"intent":"ARTICLE_AGENT","confidence":0.9,"learningPlanRef":null,"learningStageRef":null,"actionType":null,"articleId":"12","userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"suggestedAction":"AGENT","suggestedWorkflowType":null,"risk":"LOW","reason":"用户对当前文章表达模糊优化诉求","needsThinking":false,"needsThinkingReason":null}
-
-                                文章查询：
-                                {"intent":"ARTICLE_SEARCH","confidence":0.96,"learningPlanRef":null,"learningStageRef":null,"actionType":null,"articleId":null,"userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"suggestedAction":"CHAT","suggestedWorkflowType":null,"risk":"LOW","reason":"用户明确查询站内文章","needsThinking":false,"needsThinkingReason":null}
-
-                                文章动作 + 分析（复合目标）：
-                                {"intent":"ARTICLE_ACTION","confidence":0.95,"learningPlanRef":null,"learningStageRef":null,"actionType":"likeArticle","articleId":"12","userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"requestedActions":["likeArticle"],"analysisGoalEvidence":"分析一下它写得怎么样","suggestedAction":"CHAT","suggestedWorkflowType":null,"risk":"LOW","reason":"用户要求点赞并分析当前文章","needsThinking":false,"needsThinkingReason":null}
-
-                                topicEvidence 字段必须输出。
-                                没有明确主题时必须输出 null。
-                                analysisGoalEvidence 字段必须输出：只在「服务端文章动作 + 分析诉求」的
-                                复合目标里填分析诉求的原文片段，其余情况一律 null。
-                                requestKind / taskGoals 字段必须输出：
-                                【taskGoals】把用户这句话拆成"用户想完成哪几件事"，按原话顺序列出每一项：
-                                  {"type":"...","params":{...},"goalEvidence":"原话连续片段","after":[],"requires":[],"onFailure":"CONTINUE"}
-                                  type 取值：ARTICLE_WRITE（点赞/取消点赞/收藏/取消收藏/关注/取消关注，动作放 params.action）
-                                             ARTICLE_SEARCH（站内找文章，关键词放 params.query）
-                                             NAVIGATE（跳转，目标放 params.target，如 userProfile）
-                                             ARTICLE_ANALYSIS（对当前文章做分析 / 评价，params 留空即可）。
-                                  goalEvidence 必须逐字摘录用户原话中的连续片段，不能改写、总结或补充；后端会验证它真在原文里。
-                                  **单目标也要输出**（数组长度为 1），例如"点赞这篇文章" -> 一项 ARTICLE_WRITE。
-                                  常见组合：
-                                    "点赞这篇文章，再跳转到该作者的个人主页"
-                                      -> [ARTICLE_WRITE(action=likeArticle), NAVIGATE(target=userProfile)]
-                                    "点赞这篇文章，再帮我找找还有没有关于Redis的文章"
-                                      -> [ARTICLE_WRITE(action=likeArticle), ARTICLE_SEARCH(query=Redis)]
-                                    "点赞这篇文章，再分析一下它写得怎么样"
-                                      -> [ARTICLE_WRITE(action=likeArticle), ARTICLE_ANALYSIS()]
-                                  ARTICLE_ANALYSIS 的两个边界：
-                                    - 只用于「服务端文章动作**之后**」的分析诉求（如上一例），此时 analysisGoalEvidence 同样要填；
-                                    - 单纯评价当前文章（"这篇写得怎么样""这一节如何"）**不是任务**，
-                                      照常判 ARTICLE_DETAIL_QA，不要产出 taskGoals。
-                                  **反例**：讨论机制（"分析这篇文章里的点赞机制"）不是在要求执行动作，
-                                  不要产出 taskGoals；问余额、问比例这类同理。
-                                【requestKind】是任务时为 TASK；普通问答 / 闲聊 / 纯粹讨论时为 CHAT 且 taskGoals=null。
-                                所有字段都必须输出。
-                                没有值的字段必须输出 null。
-                                suggestedAction、suggestedWorkflowType、risk、reason 不能省略。
-
-                                页面动作规则：
-
-                                - ARTICLE_ACTION 中点赞/收藏/关注六类低风险写动作会由后端执行；滚动、复制链接等仍属于客户端页面动作。
-                                - 这三类意图的 suggestedAction 固定输出 CHAT。
-                                - 这三类意图的 suggestedWorkflowType 必须输出 null。
-                                - 是否真正执行，由后端 AgentPlannerSupport 决定。
-                                - 后端不会因为 actionType、target 缺失而猜测字段。
-
-                                当用户在写文章页面要求保存草稿、存草稿、保存文章时，输出 EDITOR_ACTION，actionType=saveDraft。
-                
-                                当用户在写文章页面要求发布文章、发布这篇、直接发布时，输出 EDITOR_ACTION，actionType=publish。
-                
-                                只有 pageType 是 editor-new 或 editor-edit 时，才输出 EDITOR_ACTION。
-                                如果用户不在编辑器页面却要求保存或发布，仍然输出 EDITOR_ACTION，让后端/前端提示用户先进入编辑器。
-
-                                当用户要求给钱包充值、充值额度、充钱、充 N 元或 N 块时，输出 WALLET_AGENT，
-                                suggestedAction 固定输出 AGENT。
-                                ⚠️ 金额不用你提取，也不要在输出里加任何金额字段——后端会自己从用户原话里解析。
-
-                                反例（同样重要）：问余额、够不够、还差多少、还能用多久，这些都是**查询**不是充值，
-                                输出 GENERAL_CHAT——**即使句子里带数字**（比如「我余额够1000吗」「充值比例是多少」）。
-                                只有用户明确表达「要充钱」的意思时才输出 WALLET_AGENT。
-
-                                只输出纯 JSON，禁止 markdown、代码块或任何额外文本。
-                                规则、示例、注释这些说明性文字一律禁止出现在输出里。
-                                输出必须直接以 { 开始，不能有任何前缀文字。
-               """;
+        String normalPrompt = CandidateA.assemble(message, pageType).prompt();
+        return repair ? normalPrompt + "\n\n" + ClassifierPromptBlocks.REPAIR : normalPrompt;
     }
 
     private String buildUserPrompt(String message, PageContextDTO pageContext, List<LearningPlans> plans) {

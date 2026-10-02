@@ -24,6 +24,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -119,6 +120,15 @@ public class AgentRunInspectionService {
         vo.setInputTokens(zeroIfNull(run.getInputTokens()));
         vo.setOutputTokens(zeroIfNull(run.getOutputTokens()));
         vo.setTotalTokens(zeroIfNull(run.getTotalTokens()));
+        long localTokens = zeroIfNull(run.getTotalTokens()).longValue();
+        long subtreeTokens = localTokens;
+        List<AiAgentRun> children = runMapper.selectList(new LambdaQueryWrapper<AiAgentRun>()
+                .eq(AiAgentRun::getParentRunId, run.getId()));
+        for (AiAgentRun child : children) {
+            subtreeTokens += zeroIfNull(child.getTotalTokens()).longValue();
+        }
+        vo.setLocalTokens(localTokens);
+        vo.setSubtreeTokens(subtreeTokens);
         return vo;
     }
 
@@ -181,6 +191,9 @@ public class AgentRunInspectionService {
         if (AgentStepActionType.TASK_STEP.name().equals(step.getActionType())) {
             vo.setKind("TASK");
             vo.setSummary(parseSummary(step.getOutputJson()));
+            TaskStepDisplayInput displayInput = parseTaskDisplayInput(step.getInputJson());
+            vo.setType(displayInput.type());
+            vo.setGoalEvidence(displayInput.goalEvidence());
             // 第四步：任务步骤若由子 run 承接（ARTICLE_ANALYSIS），透出子 run id——
             // 前端刷新后据此补拉内部明细（子 run 的步骤不在外层 run 的 steps 里）
             vo.setChildRunId(parseChildRunId(step.getOutputJson()));
@@ -200,6 +213,37 @@ public class AgentRunInspectionService {
         vo.setSummary(parseSummary(step.getOutputJson()));
         vo.setCreatedAt(step.getCreatedAt());
         return vo;
+    }
+
+    /** TASK_STEP 只透出展示需要的白名单字段，不把完整 inputJson 交给普通用户侧。 */
+    private TaskStepDisplayInput parseTaskDisplayInput(String inputJson) {
+        if (inputJson == null || inputJson.isBlank()) {
+            return TaskStepDisplayInput.empty();
+        }
+        try {
+            JsonNode root = objectMapper.readTree(inputJson);
+            String type = root.path("type").asText(null);
+            List<String> evidence = new ArrayList<>();
+            JsonNode evidenceNode = root.path("goalEvidence");
+            if (evidenceNode.isArray()) {
+                evidenceNode.forEach(item -> {
+                    String value = item.asText(null);
+                    if (value != null && !value.isBlank()) {
+                        evidence.add(value);
+                    }
+                });
+            }
+            return new TaskStepDisplayInput(type, List.copyOf(evidence));
+        } catch (Exception e) {
+            log.warn("任务步骤 inputJson 解析展示字段失败（按空处理）: {}", inputJson);
+            return TaskStepDisplayInput.empty();
+        }
+    }
+
+    private record TaskStepDisplayInput(String type, List<String> goalEvidence) {
+        private static TaskStepDisplayInput empty() {
+            return new TaskStepDisplayInput(null, List.of());
+        }
     }
 
     /**

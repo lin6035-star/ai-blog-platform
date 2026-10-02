@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.entity.LearningPlans;
 import com.hailin.blogsystem.entity.dto.AiIntent;
+import com.hailin.blogsystem.entity.dto.AiWorkflowType;
 import com.hailin.blogsystem.entity.dto.PageContextDTO;
 import com.hailin.blogsystem.mapper.LearningPlanMapper;
 import com.hailin.blogsystem.service.AiIntentClassifier;
@@ -29,6 +30,7 @@ import java.util.Objects;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 @Tag("integration")
@@ -86,7 +88,21 @@ class AiIntentClassifierIntegrationTests {
             // 在离线门与在线门之间穿了过去（实测见 TaskGoalsProbeTests）。
             String expectedRequestKind,
             List<String> expectedTaskGoalTypesContains,
-            Integer expectedTaskGoalCountAtLeast
+            Integer expectedTaskGoalCountAtLeast,
+            // 「页面缺文章上下文」反例：断言 articleId 必须为空——ID 只能由后端解析，模型不许硬编
+            Boolean expectedArticleIdBlank,
+            // 5a（2026-10-01）：WORKFLOW_HANDOFF 契约——**旧字段与新字段都要断言**。
+            // 只测 taskGoals 会漏掉"新协议把旧字段挤没了"，而旧字段才是真正启动 Workflow 的东西。
+            String expectedSuggestedWorkflowType,
+            // 多 Workflow 目标时旧单值字段必须为空，不能强行挑一个造成语义冲突。
+            Boolean expectedSuggestedWorkflowTypeBlank,
+            List<String> expectedTaskGoalWorkflowTypesContains,
+            // 反例专用：断言 taskGoals 里**不能**出现这些类型
+            // （「讨论一下 Workflow 是什么」绝不能被拆成任务目标）
+            List<String> expectedTaskGoalTypesNotContains,
+            // 样例可以先落库、后改 prompt：未就绪的显式跳过，
+            // 而不是等 prompt 改完才想起来补（那样评测集永远滞后于实现）
+            Boolean pendingUntilPromptReady
     ) {
     }
 
@@ -194,6 +210,9 @@ class AiIntentClassifierIntegrationTests {
     @ParameterizedTest(name = "[{index}] {0}")
     @MethodSource("evalCases")
     void classifierMatchesFixedEvalCase(String caseName, ClassifierEvalCase c) {
+        // 5a：prompt 未就绪的样例先落库、显式跳过——别等改完 prompt 才补评测集
+        assumeFalse(Boolean.TRUE.equals(c.pendingUntilPromptReady()),
+                "5a 样例待分类器 prompt 就绪（先搭骨架，不动 prompt）");
         // 样例可带页面上下文（V3.4 起：article-detail 分界依赖 pageType/articleId）
         PageContextDTO pageContext = null;
         if (c.pageType() != null) {
@@ -247,6 +266,11 @@ class AiIntentClassifierIntegrationTests {
                     .as("用例 %s：suggestedAction", caseName)
                     .isEqualTo(c.expectedSuggestedAction());
         }
+        if (Boolean.TRUE.equals(c.expectedArticleIdBlank())) {
+            assertThat(intent.getArticleId())
+                    .as("用例 %s：articleId 不许由模型硬编（只能来自页面上下文或会话锚）", caseName)
+                    .isBlank();
+        }
         if (c.expectedRequestedActionsContains() != null) {
             assertThat(intent.getRequestedActions())
                     .as("用例 %s：requestedActions 应包含", caseName)
@@ -283,6 +307,109 @@ class AiIntentClassifierIntegrationTests {
                     .as("用例 %s：taskGoals 类型集合", caseName)
                     .containsAll(c.expectedTaskGoalTypesContains());
         }
+        if (c.expectedTaskGoalTypesNotContains() != null) {
+            List<String> actualTypes = intent.getTaskGoals() == null
+                    ? List.of()
+                    : intent.getTaskGoals().stream()
+                    .map(g -> g == null ? "" : String.valueOf(g.get("type")))
+                    .toList();
+            assertThat(actualTypes)
+                    .as("用例 %s：taskGoals 不得包含这些类型", caseName)
+                    .doesNotContainAnyElementsOf(c.expectedTaskGoalTypesNotContains());
+        }
+        // ---- 5a：双写契约（新协议 + 旧字段都要有） ----
+        if (c.expectedSuggestedWorkflowType() != null) {
+            assertThat(intent.getSuggestedWorkflowType())
+                    .as("用例 %s：旧字段 suggestedWorkflowType 不能被新协议覆盖或清空——"
+                            + "真正启动 Workflow 的仍是它", caseName)
+                    .isEqualTo(c.expectedSuggestedWorkflowType());
+        }
+        if (Boolean.TRUE.equals(c.expectedSuggestedWorkflowTypeBlank())) {
+            assertThat(intent.getSuggestedWorkflowType())
+                    .as("用例 %s：多 Workflow 目标时 suggestedWorkflowType 必须为空", caseName)
+                    .isBlank();
+        }
+        // 不只校验正例：某条反例若意外产出 WORKFLOW_HANDOFF，也必须遵守最小契约，
+        // 不能因为该样例没有写 expectedWorkflowType 就放过伪造 ID / 额外参数 / 改写证据。
+        assertWorkflowGoalContract(caseName, c.message(), intent);
+        if (c.expectedTaskGoalWorkflowTypesContains() != null) {
+            assertThat(taskGoalWorkflowTypes(intent))
+                    .as("用例 %s：taskGoals[].params.workflowType（5a 新协议）", caseName)
+                    .containsAll(c.expectedTaskGoalWorkflowTypesContains());
+        }
+    }
+
+    /**
+     * 5a 最小契约：类型合法、params 只有 workflowType、证据非空且确实来自用户原话。
+     *
+     * <p>包私有（非 private）是刻意的：P3 spike 的硬门**必须复用这一套**——
+     * 两处各写一份，就会出现"候选 A 过得了这处、过不了那处"，而 P3 的排名建立在硬门之上。
+     */
+    static void assertWorkflowGoalContract(String caseName, String message, AiIntent intent) {
+        List<Map<String, Object>> workflowGoals = intent.getTaskGoals() == null
+                ? List.of()
+                : intent.getTaskGoals().stream()
+                .filter(Objects::nonNull)
+                .filter(g -> "WORKFLOW_HANDOFF".equals(String.valueOf(g.get("type"))))
+                .toList();
+        String normalizedMessage = message == null ? "" : message.replaceAll("\\s+", "");
+        for (Map<String, Object> goal : workflowGoals) {
+            assertThat(goal.get("params"))
+                    .as("用例 %s：WORKFLOW_HANDOFF.params 必须是对象", caseName)
+                    .isInstanceOf(Map.class);
+            Map<?, ?> params = (Map<?, ?>) goal.get("params");
+            List<String> paramKeys = params.keySet().stream().map(String::valueOf).toList();
+            assertThat(paramKeys)
+                    .as("用例 %s：params 只能包含 workflowType，业务 ID/引用由后端解析", caseName)
+                    .containsExactlyInAnyOrder("workflowType");
+            assertThat(String.valueOf(params.get("workflowType")))
+                    .as("用例 %s：workflowType 必须是已登记值", caseName)
+                    .isIn(Stream.of(AiWorkflowType.values()).map(Enum::name).toList());
+
+            List<String> evidence = textValues(goal.get("goalEvidence"));
+            assertThat(evidence)
+                    .as("用例 %s：goalEvidence 不能为空", caseName)
+                    .isNotEmpty()
+                    .allSatisfy(item -> assertThat(normalizedMessage)
+                            .as("用例 %s：goalEvidence 必须逐字来自用户原话", caseName)
+                            .contains(item.replaceAll("\\s+", "")));
+        }
+    }
+
+    static List<String> textValues(Object value) {
+        if (value instanceof String text) {
+            return text.isBlank() ? List.of() : List.of(text);
+        }
+        if (value instanceof List<?> list) {
+            return list.stream()
+                    .filter(Objects::nonNull)
+                    .map(String::valueOf)
+                    .filter(text -> !text.isBlank())
+                    .toList();
+        }
+        return List.of();
+    }
+
+    /** 从 taskGoals 里抽 {@code params.workflowType}——5a 新协议的业务参数（P3 spike 也复用） */
+    static List<String> taskGoalWorkflowTypes(AiIntent intent) {
+        List<Map<String, Object>> goals = intent.getTaskGoals();
+        if (goals == null) {
+            return List.of();
+        }
+        List<String> types = new ArrayList<>();
+        for (Map<String, Object> goal : goals) {
+            if (goal == null) {
+                continue;
+            }
+            Object params = goal.get("params");
+            if (params instanceof Map<?, ?> map) {
+                Object workflowType = map.get("workflowType");
+                if (workflowType != null) {
+                    types.add(String.valueOf(workflowType));
+                }
+            }
+        }
+        return types;
     }
 
     /**

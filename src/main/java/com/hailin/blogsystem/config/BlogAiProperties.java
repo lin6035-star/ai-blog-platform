@@ -12,6 +12,7 @@ import java.util.Map;
 public class BlogAiProperties {
     private String systemPrompt;
     private String projectKey = "global";
+    private ClassifierMode classifierMode = ClassifierMode.ON_DEMAND;
     private Memory memory = new Memory();
     private Rag rag = new Rag();
     private Agent agent = new Agent();
@@ -36,6 +37,24 @@ public class BlogAiProperties {
         /** 每用户并发上限（硬上限：竞态结果是拒绝，不是多跑一个）。 */
         private int maxConcurrentPerUser = 2;
         private String threadNamePrefix = "ai-task-";
+        /** 外层 Task run 停在 RUNNING 多久后才允许补偿巡检接管。 */
+        private long handoffRecoveryStaleMinutes = 15;
+    }
+
+    /**
+     * 分类器 system prompt 的模式（P3 分类器收缩，2026-10-01）。
+     *
+     * <p>分类器是全站 AI 请求的第一跳，它判错会让整条路走偏，所以它必须有一个**一键回退**：
+     * 线上发现分界漂移时改配置重启即可，不需要回滚代码、不需要重新发版。
+     *
+     * <p>P3 激活后默认使用 {@link #ON_DEMAND}；线上发现分界漂移时显式切回
+     * {@link #FULL}，仍能逐字恢复激活前的完整 prompt。
+     */
+    public enum ClassifierMode {
+        /** 19 块全装（原行为，安全兜底） */
+        FULL,
+        /** 候选 A 的按需装载：三级装载 + fail-open，复合目标信号直接 FULL（见 CandidateA） */
+        ON_DEMAND
     }
 
     @Data

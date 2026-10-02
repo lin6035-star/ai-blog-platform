@@ -63,12 +63,36 @@ class TaskStepParamValidatorTests {
     }
 
     @Test
-    @DisplayName("只读 / 分析类无必填参数；未接入类型不在这里拦")
-    void analysisAndUnwiredTypesHaveNoRequiredParams() {
+    @DisplayName("只读 / 分析类无必填参数")
+    void analysisTypesHaveNoRequiredParams() {
         assertThat(TaskStepParamValidator.validate(StepType.ARTICLE_ANALYSIS, Map.of())).isNull();
         assertThat(TaskStepParamValidator.validate(StepType.ARTICLE_ANALYSIS, null)).isNull();
-        assertThat(TaskStepParamValidator.validate(StepType.WORKFLOW_HANDOFF, Map.of())).isNull();
         assertThat(TaskStepParamValidator.validate(null, Map.of())).contains("步骤类型为空");
+    }
+
+    @Test
+    @DisplayName("WORKFLOW_HANDOFF：params 只能含白名单内的 workflowType（5a 协议，5b 起校验）")
+    void workflowHandoffOnlyAllowsWhitelistedType() {
+        assertThat(TaskStepParamValidator.validate(StepType.WORKFLOW_HANDOFF,
+                Map.of("workflowType", "OPTIMIZE_ARTICLE"))).isNull();
+
+        // 这里刻意比"未知键一律放过"更严：对 WORKFLOW_HANDOFF 来说，多余键
+        // （articleId / topic / planRef）不是无害冗余，而是**模型夹带业务定位值**的信号；
+        // 放行就等于把这些脏值变成执行输入（5a 冻结协议的原话：
+        // "否则模型夹带 articleId/topic/planRef 时仍会被放进 LEGACY，等 5b 开始消费这些字段
+        //   就会把今天的脏候选变成明天的执行输入"）。
+        Map<String, Object> withExtra = new HashMap<>();
+        withExtra.put("workflowType", "OPTIMIZE_ARTICLE");
+        withExtra.put("articleId", "12");
+        assertThat(TaskStepParamValidator.validate(StepType.WORKFLOW_HANDOFF, withExtra))
+                .as("多余键必须拒——通用尺度的'未知键无害'不适用于协议字段")
+                .contains("只能含 workflowType");
+
+        // 第一版只开 OPTIMIZE_ARTICLE：其余四个 Workflow 在领域登记表里，但不在 5b 白名单里
+        assertThat(TaskStepParamValidator.validate(StepType.WORKFLOW_HANDOFF,
+                Map.of("workflowType", "CREATE_ARTICLE"))).contains("白名单");
+        assertThat(TaskStepParamValidator.validate(StepType.WORKFLOW_HANDOFF, Map.of()))
+                .contains("只能含 workflowType");
     }
 
     @Test

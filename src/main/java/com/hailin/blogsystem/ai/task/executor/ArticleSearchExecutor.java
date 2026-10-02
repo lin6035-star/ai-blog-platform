@@ -62,6 +62,7 @@ public class ArticleSearchExecutor implements TaskStepExecutor {
 
             List<Articles> articles = articlesService.listByIds(hits.articleIds());
             List<String> titles = new ArrayList<>();
+            List<Map<String, Object>> articleEvidence = new ArrayList<>();
             if (articles != null) {
                 // listByIds 不保证顺序，按命中的 id 顺序还原，避免展示顺序随机
                 Map<Long, Articles> byId = new LinkedHashMap<>();
@@ -70,6 +71,11 @@ public class ArticleSearchExecutor implements TaskStepExecutor {
                     Articles a = byId.get(id);
                     if (a != null) {
                         titles.add(a.getTitle());
+                        Map<String, Object> evidence = new LinkedHashMap<>();
+                        evidence.put("articleId", String.valueOf(a.getId()));
+                        evidence.put("title", a.getTitle() == null ? "" : a.getTitle());
+                        evidence.put("summary", a.getSummary() == null ? "" : a.getSummary());
+                        articleEvidence.add(evidence);
                     }
                 }
             }
@@ -82,6 +88,7 @@ public class ArticleSearchExecutor implements TaskStepExecutor {
             output.put("query", query);
             output.put("total", hits.total());
             output.put("titles", titles);
+            output.put("articles", articleEvidence);
 
             return StepResult.applied(step.stepId(), summary, output);
         } catch (Exception e) {

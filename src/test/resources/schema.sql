@@ -167,8 +167,11 @@ CREATE TABLE IF NOT EXISTS ai_workflow_runs (
     total_tokens INT NOT NULL DEFAULT 0,
     pause_reason VARCHAR(255),
     error_message VARCHAR(1000),
+    task_run_id BIGINT,
+    task_step_id VARCHAR(64),
     created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL
+    updated_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_workflow_task_step UNIQUE (task_run_id, task_step_id)
 );
 
 CREATE TABLE IF NOT EXISTS ai_user_memories (
@@ -332,6 +335,7 @@ CREATE TABLE IF NOT EXISTS ai_agent_runs (
     total_tokens INT NOT NULL DEFAULT 0,
     error_message VARCHAR(1000),
     parent_run_id BIGINT,
+    task_plan_json CLOB,
     created_at TIMESTAMP NOT NULL,
     updated_at TIMESTAMP NOT NULL
 );
@@ -353,7 +357,9 @@ CREATE TABLE IF NOT EXISTS ai_agent_steps (
     input_tokens INT NOT NULL DEFAULT 0,
     output_tokens INT NOT NULL DEFAULT 0,
     error_message VARCHAR(1000),
-    created_at TIMESTAMP NOT NULL
+    created_at TIMESTAMP NOT NULL,
+    task_step_id VARCHAR(64),
+    CONSTRAINT uk_agent_task_step UNIQUE (agent_run_id, task_step_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_step_run ON ai_agent_steps (agent_run_id);

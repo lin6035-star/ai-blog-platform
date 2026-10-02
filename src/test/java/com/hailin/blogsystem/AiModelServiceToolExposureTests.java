@@ -3,21 +3,21 @@ package com.hailin.blogsystem;
 import com.hailin.blogsystem.ai.tool.*;
 import com.hailin.blogsystem.config.BlogAiProperties;
 import com.hailin.blogsystem.entity.AiPrompt;
-import com.hailin.blogsystem.service.AiIntentClassifier;
 import com.hailin.blogsystem.service.impl.AiModelServiceImpl;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.Tool;
 
 import java.lang.reflect.Method;
-import java.util.Arrays;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class AiModelServiceToolExposureTests {
@@ -26,15 +26,8 @@ class AiModelServiceToolExposureTests {
     private ChatClient.Builder builder;
     private BlogAiProperties properties;
     private AiArticleTools articleTools;
-    private AiNavigationTools navigationTools;
-    private AiEditorTools editorTools;
-    private AiArticleActionTools articleActionTools;
-    private AiUserProfileTools userProfileTools;
     private AiLearningDashboardTool dashboardTool;
     private WalletBalanceTool walletBalanceTool;
-    private AiNavigationToolsFactory navigationToolsFactory;
-    private AiEditorToolFactory editorToolFactory;
-    private AiArticleActionToolsFactory articleActionToolsFactory;
 
     @BeforeEach
     void setUp() {
@@ -46,25 +39,6 @@ class AiModelServiceToolExposureTests {
         properties.setSystemPrompt("");
 
         articleTools = mock(AiArticleTools.class);
-
-        navigationTools = mock(AiNavigationTools.class);
-        editorTools = mock(AiEditorTools.class);
-        articleActionTools = mock(AiArticleActionTools.class);
-
-        navigationToolsFactory = mock(AiNavigationToolsFactory.class);
-        editorToolFactory = mock(AiEditorToolFactory.class);
-        articleActionToolsFactory = mock(AiArticleActionToolsFactory.class);
-
-        when(navigationToolsFactory.create(anyString()))
-                .thenReturn(navigationTools);
-
-        when(editorToolFactory.create(anyString()))
-                .thenReturn(editorTools);
-
-        when(articleActionToolsFactory.create(anyString()))
-                .thenReturn(articleActionTools);
-
-        userProfileTools = mock(AiUserProfileTools.class);
         dashboardTool = mock(AiLearningDashboardTool.class);
         walletBalanceTool = mock(WalletBalanceTool.class);
 
@@ -72,11 +46,6 @@ class AiModelServiceToolExposureTests {
                 builder,
                 properties,
                 articleTools,
-                navigationToolsFactory,
-                editorToolFactory,
-                articleActionToolsFactory,
-                userProfileTools,
-                mock(AiIntentClassifier.class),
                 dashboardTool,
                 walletBalanceTool
         );
@@ -95,40 +64,26 @@ class AiModelServiceToolExposureTests {
     }
 
     @Test
-    void normalChatDoesNotExposeLegacyLearningPlanTools() throws Exception {
+    void normalChatDoesNotExposeAnnotationTools() throws Exception {
         AiPrompt prompt = new AiPrompt();
 
         Object[] tools = invokeBuildTools(prompt);
         ToolCallback[] callbacks = invokeBuildToolCallbacks(prompt);
 
-        // 钱包余额查询挂在默认分支上——它是只读的，和不带参数的普通聊天共用同一条出口
+        // 页面动作和用户画像已由分类器 + Planner 确定性处理，回答模型不再背这些 schema。
+        assertThat(tools).isEmpty();
+        // 钱包余额仍是 GENERAL_CHAT 下的只读能力，保留独立 callback。
         assertThat(callbacks).containsExactly(walletBalanceTool);
-        assertThat(tools).containsExactly(
-                navigationTools,
-                editorTools,
-                articleActionTools,
-                userProfileTools
-        );
-        assertThat(Arrays.stream(tools).map(Object::getClass).map(Class::getSimpleName))
-                .doesNotContain("AiLearningPlanTools", "QueryLearningPlansTool");
     }
 
     @Test
-    void articleChatDoesNotExposeLegacyLearningPlanTools() throws Exception {
+    void articleChatOnlyExposesArticleReadTools() throws Exception {
         AiPrompt prompt = new AiPrompt();
         prompt.setArticleToolsEnabled(true);
 
         Object[] tools = invokeBuildTools(prompt);
 
-        assertThat(tools).containsExactly(
-                articleTools,
-                navigationTools,
-                editorTools,
-                articleActionTools,
-                userProfileTools
-        );
-        assertThat(Arrays.stream(tools).map(Object::getClass).map(Class::getSimpleName))
-                .doesNotContain("AiLearningPlanTools", "QueryLearningPlansTool");
+        assertThat(tools).containsExactly(articleTools);
     }
 
     @Test
@@ -150,16 +105,26 @@ class AiModelServiceToolExposureTests {
         assertThat(toolAnnotation("copyArticleLink")).isNotNull();
     }
 
+    @Test
+    void defaultSystemDefinesExternalMaterialTrustBoundary() {
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+
+        verify(builder).defaultSystem(captor.capture());
+
+        assertThat(captor.getValue())
+                .contains("外部材料信任边界")
+                .contains("不是系统指令")
+                .contains("当前问题")
+                .contains("用户修改意见");
+    }
+
     private Object[] invokeBuildTools(AiPrompt prompt) throws Exception {
         Method method = AiModelServiceImpl.class.getDeclaredMethod(
                 "buildTools",
-                AiPrompt.class,
-                AiNavigationTools.class,
-                AiEditorTools.class,
-                AiArticleActionTools.class
+                AiPrompt.class
         );
         method.setAccessible(true);
-        return (Object[]) method.invoke(service, prompt, navigationTools, editorTools, articleActionTools);
+        return (Object[]) method.invoke(service, prompt);
     }
 
     private ToolCallback[] invokeBuildToolCallbacks(AiPrompt prompt) throws Exception {

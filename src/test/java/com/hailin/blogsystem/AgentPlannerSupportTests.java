@@ -454,6 +454,59 @@ class AgentPlannerSupportTests {
     }
 
     @Test
+    void missingLegacyFieldsDoNotStartWorkflow() {
+        /*
+         * 「假 LEGACY」的入口级证据：TaskPlanningFacade 判 LEGACY 只是"允许往下走"，
+         * 真正启动 Workflow 的是这里（旧字段 → AgentDecision）。
+         * 旧字段残缺时 isWorkflowSuggestion 直接降级 CTA——所以 Facade 那边必须要求旧字段完整，
+         * 否则 LEGACY 只是把失败推迟了一步，用户看到的仍然是失败。
+         */
+        AiIntent intent = new AiIntent();
+        intent.setIntent("OPTIMIZE_ARTICLE_WORKFLOW");
+        intent.setArticleId("12");
+        intent.setConfidence(0.95);
+        intent.setRisk("MEDIUM");
+        // 刻意不设 suggestedAction=WORKFLOW、不设 suggestedWorkflowType
+
+        AgentDecision decision = planner.decide(
+                "帮我优化这篇文章", intent, articlePage("12"), 1L, session(10L));
+
+        assertThat(decision.isWorkflow(AiWorkflowType.OPTIMIZE_ARTICLE))
+                .as("旧字段残缺时不能启动 Workflow")
+                .isFalse();
+    }
+
+    @Test
+    void optimizeArticleWithoutArticleContextGoesCta() {
+        /*
+         * 与上一条刻意区分：这里旧字段**完整**，缺的是页面文章上下文。
+         * 这属于旧链自己的业务拒绝（article_context_missing），**不是**假路由——
+         * Facade 的 LEGACY 判据刻意不重复判断它，退回后由旧链重新裁决。
+         */
+        AiIntent intent = workflowIntent("OPTIMIZE_ARTICLE_WORKFLOW",
+                AiWorkflowType.OPTIMIZE_ARTICLE, 0.95, "MEDIUM");
+
+        AgentDecision decision = planner.decide(
+                "帮我优化这篇文章", intent, articlePage(null), 1L, session(10L));
+
+        assertThat(decision.isWorkflow(AiWorkflowType.OPTIMIZE_ARTICLE)).isFalse();
+        assertThat(decision.getRuleHits()).contains("article_context_missing");
+    }
+
+    @Test
+    void learningPlanWorkflowStillStartsFromEntryPoint() {
+        // 五个旧入口里挑一个学习域的来验：白名单认得它 ≠ 这条链真的能启动
+        AiIntent intent = workflowIntent("LEARNING_PLAN",
+                AiWorkflowType.LEARNING_PLAN, 0.95, "LOW");
+
+        AgentDecision decision = planner.decide(
+                "帮我制定一个 Redis 学习计划", intent, articlePage(null), 1L, session(10L));
+
+        assertThat(decision.getAction()).isEqualTo(AgentAction.WORKFLOW);
+        assertThat(decision.getWorkflowType()).isEqualTo(AiWorkflowType.LEARNING_PLAN);
+    }
+
+    @Test
     void articleSearchUsesChatWithArticleRetrieval() {
         AiIntent intent = new AiIntent();
         intent.setIntent("ARTICLE_SEARCH");

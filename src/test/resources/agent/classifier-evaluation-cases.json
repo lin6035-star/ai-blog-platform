@@ -367,5 +367,204 @@
     "pageType": "article-detail",
     "pageArticleId": "12",
     "expectedAnalysisGoalEvidenceBlank": true
+  },
+
+  {
+    "name": "5a：优化文章——新协议 WORKFLOW_HANDOFF + 旧字段双写",
+    "category": "5a-workflow-handoff",
+    "message": "帮我优化这篇文章",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "OPTIMIZE_ARTICLE_WORKFLOW",
+    "expectedSuggestedAction": "WORKFLOW",
+    "expectedSuggestedWorkflowType": "OPTIMIZE_ARTICLE",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalTypesContains": ["WORKFLOW_HANDOFF"],
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE"],
+    "expectedTaskGoalCountAtLeast": 1
+  },
+  {
+    "name": "5a：写新文章——CREATE_ARTICLE",
+    "category": "5a-workflow-handoff",
+    "message": "帮我写一篇 Redis 缓存设计的文章",
+    "expectedIntent": "CREATE_ARTICLE_WORKFLOW",
+    "expectedSuggestedAction": "WORKFLOW",
+    "expectedSuggestedWorkflowType": "CREATE_ARTICLE",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalTypesContains": ["WORKFLOW_HANDOFF"],
+    "expectedTaskGoalWorkflowTypesContains": ["CREATE_ARTICLE"]
+  },
+  {
+    "name": "5a：制定学习计划——LEARNING_PLAN",
+    "category": "5a-workflow-handoff",
+    "message": "帮我制定一个 Redis 学习计划",
+    "expectedSuggestedAction": "WORKFLOW",
+    "expectedSuggestedWorkflowType": "LEARNING_PLAN",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalTypesContains": ["WORKFLOW_HANDOFF"],
+    "expectedTaskGoalWorkflowTypesContains": ["LEARNING_PLAN"]
+  },
+  {
+    "name": "5a：调整计划阶段——LEARNING_PROGRESS",
+    "category": "5a-workflow-handoff",
+    "message": "帮我把 Redis 计划的第二阶段调整一下",
+    "expectedSuggestedAction": "WORKFLOW",
+    "expectedSuggestedWorkflowType": "LEARNING_PROGRESS",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalTypesContains": ["WORKFLOW_HANDOFF"],
+    "expectedTaskGoalWorkflowTypesContains": ["LEARNING_PROGRESS"]
+  },
+  {
+    "name": "5a：攻坚难点——LEARNING_ASSIST",
+    "category": "5a-workflow-handoff",
+    "message": "Redis 缓存击穿我不懂，帮我拆几个练习",
+    "expectedSuggestedAction": "WORKFLOW",
+    "expectedSuggestedWorkflowType": "LEARNING_ASSIST",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalTypesContains": ["WORKFLOW_HANDOFF"],
+    "expectedTaskGoalWorkflowTypesContains": ["LEARNING_ASSIST"]
+  },
+  {
+    "name": "5a：口语变体「优化下」也要认成优化文章的 Workflow",
+    "category": "5a-workflow-handoff",
+    "message": "这篇帮我优化下",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedSuggestedWorkflowType": "OPTIMIZE_ARTICLE",
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE"]
+  },
+  {
+    "name": "5a：边界——「调整计划」不能漂成攻坚难点",
+    "category": "5a-workflow-handoff",
+    "message": "帮我把 C++ 计划第二阶段的顺序调整一下",
+    "expectedSuggestedWorkflowType": "LEARNING_PROGRESS",
+    "expectedTaskGoalWorkflowTypesContains": ["LEARNING_PROGRESS"]
+  },
+  {
+    "name": "5a：复合目标——点赞 + 优化文章，两个目标都要拆出来",
+    "category": "5a-workflow-handoff",
+    "message": "点赞这篇文章，再帮我优化一下",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 2,
+    "expectedTaskGoalTypesContains": ["ARTICLE_WRITE", "WORKFLOW_HANDOFF"],
+    "expectedSuggestedWorkflowType": "OPTIMIZE_ARTICLE",
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE"]
+  },
+  {
+    "name": "5a：复合目标——优化 + 搜索",
+    "category": "5a-workflow-handoff",
+    "message": "搜索一下 Redis 相关文章，再优化当前这篇",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 2,
+    "expectedTaskGoalTypesContains": ["ARTICLE_SEARCH", "WORKFLOW_HANDOFF"],
+    "expectedSuggestedWorkflowType": "OPTIMIZE_ARTICLE",
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE"]
+  },
+  {
+    "name": "5b：复合目标——搜索比较后再优化，五个目标不能丢",
+    "category": "5b-search-compare-handoff",
+    "message": "点赞并收藏这篇文章，再搜一下 Redis 相关文章，并比较各篇文章，最后再帮我优化一下该文章",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 5,
+    "expectedTaskGoalTypesContains": ["ARTICLE_WRITE", "ARTICLE_SEARCH", "ARTICLE_ANALYSIS", "WORKFLOW_HANDOFF"],
+    "expectedSuggestedWorkflowType": "OPTIMIZE_ARTICLE",
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE"]
+  },
+  {
+    "name": "5b：复合目标——优化后搜索比较，尾部比较不能丢",
+    "category": "5b-search-compare-handoff",
+    "message": "点赞并收藏这篇文章，再帮我优化一下，再搜一下 Redis 相关文章，并比较各篇文章",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 5,
+    "expectedTaskGoalTypesContains": ["ARTICLE_WRITE", "ARTICLE_SEARCH", "ARTICLE_ANALYSIS", "WORKFLOW_HANDOFF"],
+    "expectedSuggestedWorkflowType": "OPTIMIZE_ARTICLE",
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE"]
+  },
+  {
+    "name": "5a：复合目标——优化 + 导航",
+    "category": "5a-workflow-handoff",
+    "message": "优化这篇文章，然后跳转到作者主页",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 2,
+    "expectedTaskGoalTypesContains": ["NAVIGATE", "WORKFLOW_HANDOFF"],
+    "expectedSuggestedWorkflowType": "OPTIMIZE_ARTICLE",
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE"]
+  },
+  {
+    "name": "5a：两个 Workflow 目标（优化 + 写新文章）",
+    "category": "5a-workflow-handoff",
+    "message": "先优化当前这篇，再帮我写一篇 Redis 新文章",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 2,
+    "expectedTaskGoalTypesContains": ["WORKFLOW_HANDOFF"],
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE", "CREATE_ARTICLE"],
+    "expectedSuggestedWorkflowTypeBlank": true
+  },
+  {
+    "name": "5a 反例：文章分析不是 Workflow",
+    "category": "5a-workflow-handoff",
+    "message": "分析一下这篇文章写得怎么样",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedTaskGoalTypesNotContains": ["WORKFLOW_HANDOFF"]
+  },
+  {
+    "name": "5a 反例：讨论 Workflow 概念不能被拆成任务目标",
+    "category": "5a-workflow-handoff",
+    "message": "讨论一下 Workflow 到底是什么，和 Agent 有什么区别",
+    "expectedSuggestedAction": "CHAT",
+    "expectedTaskGoalTypesNotContains": ["WORKFLOW_HANDOFF"]
+  },
+  {
+    "name": "5a 反例：页面缺文章上下文时不许硬编 articleId",
+    "category": "5a-workflow-handoff",
+    "message": "帮我优化这篇文章",
+    "expectedArticleIdBlank": true
+  },
+  {
+    "name": "5a：多个学习计划但没有点名——不能瞎猜 planRef",
+    "category": "5a-workflow-handoff",
+    "message": "帮我调整一下我的学习计划",
+    "expectedSuggestedAction": "WORKFLOW",
+    "expectedSuggestedWorkflowType": "LEARNING_PROGRESS"
+  },
+
+  {
+    "name": "编辑器：编辑器页保存草稿",
+    "category": "editor",
+    "message": "保存草稿",
+    "pageType": "editor-new",
+    "expectedIntent": "EDITOR_ACTION"
+  },
+  {
+    "name": "编辑器：编辑器页发布文章",
+    "category": "editor",
+    "message": "发布这篇",
+    "pageType": "editor-edit",
+    "expectedIntent": "EDITOR_ACTION"
+  },
+  {
+    "name": "编辑器：非编辑器页说保存草稿仍判 EDITOR_ACTION",
+    "category": "editor",
+    "message": "保存草稿",
+    "expectedIntent": "EDITOR_ACTION"
+  },
+  {
+    "name": "编辑器：非编辑器页说发布仍判 EDITOR_ACTION",
+    "category": "editor",
+    "message": "发布这篇",
+    "expectedIntent": "EDITOR_ACTION"
   }
 ]

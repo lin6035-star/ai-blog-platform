@@ -1,6 +1,7 @@
 package com.hailin.blogsystem.service.impl;
 
 import com.hailin.blogsystem.ai.LlmErrorClassifier;
+import com.hailin.blogsystem.ai.PromptTrustBoundary;
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
 import com.hailin.blogsystem.ai.rag.ArticleRagPromptBuilder;
 import com.hailin.blogsystem.ai.rag.ArticleRagRetrieveService;
@@ -8,7 +9,6 @@ import com.hailin.blogsystem.ai.tool.*;
 import com.hailin.blogsystem.config.BlogAiProperties;
 import com.hailin.blogsystem.entity.AiPrompt;
 import com.hailin.blogsystem.entity.dto.ArticleRagContext;
-import com.hailin.blogsystem.service.AiIntentClassifier;
 import com.hailin.blogsystem.service.AiModelService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -38,11 +38,6 @@ public class AiModelServiceImpl implements AiModelService {
 
     private final ChatClient chatClient;
     private final AiArticleTools aiArticleTools;
-    private final AiNavigationToolsFactory aiNavigationToolsFactory;
-    private final AiEditorToolFactory aiEditorToolFactory;
-    private final AiArticleActionToolsFactory aiArticleActionToolsFactory;
-    private final AiUserProfileTools aiUserProfileTools;
-    private final AiIntentClassifier aiIntentClassifier;
     private final AiLearningDashboardTool aiLearningDashboardTool;
     private final WalletBalanceTool walletBalanceTool;
 
@@ -56,29 +51,22 @@ public class AiModelServiceImpl implements AiModelService {
     private final int chatMaxTokens;
 
 
-    public AiModelServiceImpl(ChatClient.Builder chatClientBuilder, BlogAiProperties blogAiProperties, AiArticleTools aiArticleTools, AiNavigationToolsFactory aiNavigationToolsFactory, AiEditorToolFactory aiEditorToolFactory, AiArticleActionToolsFactory aiArticleActionToolsFactory, AiUserProfileTools aiUserProfileTools, AiIntentClassifier aiIntentClassifier, AiLearningDashboardTool aiLearningDashboardTool, WalletBalanceTool walletBalanceTool) {
+    public AiModelServiceImpl(ChatClient.Builder chatClientBuilder, BlogAiProperties blogAiProperties,
+                              AiArticleTools aiArticleTools,
+                              AiLearningDashboardTool aiLearningDashboardTool,
+                              WalletBalanceTool walletBalanceTool) {
         this.aiArticleTools = aiArticleTools;
-        this.aiEditorToolFactory = aiEditorToolFactory;
-        this.aiArticleActionToolsFactory = aiArticleActionToolsFactory;
-        this.aiUserProfileTools = aiUserProfileTools;
-        this.aiIntentClassifier = aiIntentClassifier;
         this.aiLearningDashboardTool = aiLearningDashboardTool;
         this.walletBalanceTool = walletBalanceTool;
         this.chatClient = chatClientBuilder
-                .defaultSystem(blogAiProperties.getSystemPrompt())
+                .defaultSystem(PromptTrustBoundary.append(blogAiProperties.getSystemPrompt()))
                 .build();
-        this.aiNavigationToolsFactory = aiNavigationToolsFactory;
         this.chatMaxTokens = blogAiProperties.getBilling().getChatMaxTokens();
     }
 
 
     @Override
     public Flux<String> streamChat(AiPrompt prompt,String requestId,TokenUsageAccumulator usageAccumulator) {
-
-        AiNavigationTools aiNavigationTools = aiNavigationToolsFactory.create(requestId);
-        AiEditorTools aiEditorTools = aiEditorToolFactory.create(requestId);
-        AiArticleActionTools aiArticleActionTools = aiArticleActionToolsFactory.create(requestId);
-
         TokenUsageAccumulator usage = usageAccumulator == null ? new TokenUsageAccumulator() : usageAccumulator;
 
         // 单次流式调用的 usage 跟踪：只记峰值，流结束时统一提交一次（原因见 TokenUsageAccumulator.trackPeak）
@@ -95,12 +83,7 @@ public class AiModelServiceImpl implements AiModelService {
         // 在这里（请求线程）读一次 userId，通过 ToolContext 显式传给工具；重跑路径复用同一份。
         Map<String, Object> toolContext = buildToolContext(prompt);
 
-        Object[] tools = buildTools(
-                prompt,
-                aiNavigationTools,
-                aiEditorTools,
-                aiArticleActionTools
-        );
+        Object[] tools = buildTools(prompt);
 
         return chatClient.prompt()
                 .user(prompt.getFinalPromptContext())
@@ -134,7 +117,7 @@ public class AiModelServiceImpl implements AiModelService {
                         // toolName/toolInput 为空触发断言炸流。此时 LLM 尚未输出任何文本（第一轮全是工具调用），
                         // 降级非流式重跑：工具循环在非流式路径正常，最终文本切块模拟流式，用户无感知。
                         log.warn("流式工具调用聚合失败，降级非流式重跑: {}", e.getMessage());
-                        return retryNonStreamingWithTools(prompt, requestId, peakUsage, toolContext);
+                        return retryNonStreamingWithTools(prompt, peakUsage, toolContext);
                     }
                     log.error("AI 流式调用失败", e);
                     return Flux.just(fallbackMessage(e));
@@ -189,19 +172,10 @@ public class AiModelServiceImpl implements AiModelService {
 
     //非流式重跑：tool_calls 在非流式响应里是完整 JSON，无分片聚合问题。
     // 拿到最终全文后按固定长度切块 emit，保持 SSE 流式输出形态（前端无感知）。
-    private Flux<String> retryNonStreamingWithTools(AiPrompt prompt, String requestId,
+    private Flux<String> retryNonStreamingWithTools(AiPrompt prompt,
                                                     AtomicReference<Usage> peakUsage, Map<String, Object> toolContext) {
-        AiNavigationTools aiNavigationTools = aiNavigationToolsFactory.create(requestId);
-        AiEditorTools aiEditorTools = aiEditorToolFactory.create(requestId);
-        AiArticleActionTools aiArticleActionTools = aiArticleActionToolsFactory.create(requestId);
         try {
-
-            Object[] tools = buildTools(
-                    prompt,
-                    aiNavigationTools,
-                    aiEditorTools,
-                    aiArticleActionTools
-            );
+            Object[] tools = buildTools(prompt);
 
             ChatResponse response = chatClient.prompt()
                     .user(prompt.getFinalPromptContext())
@@ -256,32 +230,16 @@ public class AiModelServiceImpl implements AiModelService {
     }
 
 
-    private Object[] buildTools(
-            AiPrompt prompt,
-            AiNavigationTools aiNavigationTools,
-            AiEditorTools aiEditorTools,
-            AiArticleActionTools aiArticleActionTools
-    ) {
+    private Object[] buildTools(AiPrompt prompt) {
         if (prompt != null && prompt.isLearningDashboardToolEnabled()) {
             return new Object[]{};
         }
 
         if (prompt != null && prompt.isArticleToolsEnabled()) {
-            return new Object[]{
-                    aiArticleTools,
-                    aiNavigationTools,
-                    aiEditorTools,
-                    aiArticleActionTools,
-                    aiUserProfileTools
-            };
+            return new Object[]{aiArticleTools};
         }
 
-        return new Object[]{
-                aiNavigationTools,
-                aiEditorTools,
-                aiArticleActionTools,
-                aiUserProfileTools
-        };
+        return new Object[]{};
     }
 
 

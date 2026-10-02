@@ -66,6 +66,7 @@ public class TaskPlanner {
         // 记录未覆盖目标的**类型**——路由判据要据此决定"旧路径能不能完整处理"
         List<String> uncoveredTypes = new ArrayList<>();
         List<TaskPlanCandidate.CandidateGoal> goals = candidate.goals();
+        int firstHandoffIndex = firstGoalIndex(goals, StepType.WORKFLOW_HANDOFF);
 
         // ① 逐条判定能否承接（证据 / 类型 / 执行器 / 关键参数）——**先只判定、不建步骤**。
         //    C0.1 起必须两遍：stepId 按候选序号分配，而"哪些候选能承接"又决定依赖判定的结果。
@@ -86,10 +87,27 @@ public class TaskPlanner {
                 continue;
             }
 
+            // 5b 第一版的恢复出口没有原 SSE eventSink，也不重新抢长任务准入。
+            // 因此 handoff 之后只能续跑纯后端只读的 ARTICLE_SEARCH；判断必须按候选位置，
+            // 不能依赖 after/requires——暂停本身就会让后面的所有步骤进入恢复链。
+            if (firstHandoffIndex >= 0 && i > firstHandoffIndex && type != StepType.ARTICLE_SEARCH) {
+                log.info("[TASK-PLAN] handoff 后置步骤超出 5b 边界，按未覆盖处理: candidate=s{}, type={}",
+                        i + 1, type);
+                continue;
+            }
+
             // 依赖引用无法解析时不能静默删除，否则 requires 会退化成无条件执行，
             // after 也会丢失用户明确表达的顺序约束。只接受 sN 且指向另一候选。
             if (hasInvalidDependencyReference(goal, i, goals.size())) {
                 log.info("[TASK-PLAN] 依赖引用无法解析，按未覆盖处理: candidate=s{}", i + 1);
+                continue;
+            }
+
+            // C0 收尾：显式给了但无法解析的 onFailure 不能静默降级成 CONTINUE——
+            // 那等于把"失败就停"执行成"失败也照常跑"
+            if (parseOnFailureOrNull(goal.onFailure()) == null) {
+                log.info("[TASK-PLAN] onFailure 无法解析，按未覆盖处理: candidate=s{}, raw={}",
+                        i + 1, LogValues.safe(goal.onFailure()));
                 continue;
             }
 
@@ -177,6 +195,15 @@ public class TaskPlanner {
         }
     }
 
+    private int firstGoalIndex(List<TaskPlanCandidate.CandidateGoal> goals, StepType expected) {
+        for (int i = 0; i < goals.size(); i++) {
+            if (parseType(goals.get(i).type()) == expected) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     /**
      * 依赖映射（C0.1 修订）。
      *
@@ -198,7 +225,11 @@ public class TaskPlanner {
 
         List<String> after = goal.after().stream().map(String::trim).filter(valid::contains).toList();
         List<String> requires = goal.requires().stream().map(String::trim).filter(valid::contains).toList();
-        OnFailure onFailure = parseOnFailure(goal.onFailure());
+        // 第一遍扫描已保证：能走到这里的目标，onFailure 一定可解析（无法解析的已按未覆盖处理）
+        OnFailure onFailure = parseOnFailureOrNull(goal.onFailure());
+        if (onFailure == null) {
+            onFailure = OnFailure.CONTINUE;
+        }
         // requires 是硬约束：拿不到数据必须跳过，不能被 onFailure 覆盖（与 Orchestrator 的判定顺序一致）
         if (!requires.isEmpty()) {
             onFailure = OnFailure.SKIP;
@@ -243,14 +274,28 @@ public class TaskPlanner {
         }
     }
 
-    private OnFailure parseOnFailure(String raw) {
+    /**
+     * 解析 {@code onFailure}（C0 收尾）。
+     *
+     * <p>三态必须分开：
+     * <ul>
+     *   <li><b>未提供</b>（字段缺失 / null / 空白）→ 默认 {@link OnFailure#CONTINUE}；</li>
+     *   <li><b>显式给了但解析不了</b>（如模型编出来的 {@code STOP}）→ 返回 {@code null}，
+     *       由调用方按"校验失败"处理。</li>
+     * </ul>
+     *
+     * <p>原先这种情况静默回落 {@code CONTINUE}，语义正好相反：用户要求"失败就停"，
+     * 实际变成"失败也照常执行"。这比 {@code changeTitle} 那类"拒绝执行"更危险——
+     * 它会**错误地继续执行**。
+     */
+    private static OnFailure parseOnFailureOrNull(String raw) {
         if (raw == null || raw.isBlank()) {
             return OnFailure.CONTINUE;
         }
         try {
             return OnFailure.valueOf(raw.trim().toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            return OnFailure.CONTINUE;
+            return null;
         }
     }
 

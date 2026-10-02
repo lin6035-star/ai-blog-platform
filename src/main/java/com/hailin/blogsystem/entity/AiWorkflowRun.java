@@ -31,6 +31,21 @@ public class AiWorkflowRun {
      * 可为空。用于把 Workflow 和某次聊天上下文关联起来，方便刷新后恢复。
      */
     private Long conversationId;
+
+    /**
+     * 外层任务 run id（5b，2026-10-01）——**由 {@code WORKFLOW_HANDOFF} 创建时才有值**，
+     * 普通独立 Workflow 为 null。
+     *
+     * <p>它和 {@link #taskStepId} 组成唯一键 {@code uk_workflow_task_step}：
+     * 同一个外层步骤被重试时不会创建出第二条 Workflow，恢复时也能直接从 Workflow 找回外层任务，
+     * 不用去解析 {@code context_json}。
+     */
+    private Long taskRunId;
+
+    /**
+     * 外层 TaskStep 标识（5b）——与 {@code ai_agent_steps.task_step_id} 对齐。
+     */
+    private String taskStepId;
     /**
      * Workflow 类型。
      * 第一版固定为 CREATE_ARTICLE，表示文章创作工作流。

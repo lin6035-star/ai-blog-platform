@@ -3,6 +3,7 @@ package com.hailin.blogsystem.entity.vo;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * Agent Run 步骤（V2.2 inspection 层，只读）。
@@ -41,4 +42,10 @@ public class AgentStepVO {
      * 数据来源是任务步骤 {@code outputJson} 的 {@code data.agentRunId}。
      */
     private String childRunId;
+
+    /** 外层任务步骤类型；仅 TASK_STEP 有值，用于刷新后恢复用户可读标签。 */
+    private String type;
+
+    /** 用户原话中的目标证据；仅 TASK_STEP 有值，不暴露完整 inputJson。 */
+    private List<String> goalEvidence;
 }

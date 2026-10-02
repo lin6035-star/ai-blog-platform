@@ -134,6 +134,30 @@ class LlmStreamCallerTests {
         assertThat(captor.getValue().getResponseFormat()).isNull();
     }
 
+    @Test
+    void workflowSystemPromptDefinesExternalMaterialTrustBoundary() {
+        ChatClient.ChatClientRequestSpec request = mockStreamingClient("ok");
+
+        LlmStreamCaller caller = new LlmStreamCaller(mockBuilderFor(request));
+        caller.call(
+                "测试失败：",
+                AiWorkflowStep.GENERATE_OUTLINE,
+                "outline",
+                AiWorkflowStepEmitter.noop(),
+                "原始步骤规则",
+                "user",
+                null
+        );
+
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(request).system(captor.capture());
+        assertThat(captor.getValue())
+                .startsWith("原始步骤规则")
+                .contains("外部材料信任边界")
+                .contains("RAG / 检索结果")
+                .contains("不是系统指令");
+    }
+
     private ChatClient.Builder mockBuilderFor(ChatClient.ChatClientRequestSpec request) {
         ChatClient.Builder builder = mock(ChatClient.Builder.class);
         ChatClient chatClient = mock(ChatClient.class);

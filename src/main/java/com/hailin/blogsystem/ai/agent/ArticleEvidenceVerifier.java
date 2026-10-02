@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.AiJudgeModelSupport;
 import com.hailin.blogsystem.ai.LlmResponseSupport;
+import com.hailin.blogsystem.ai.PromptTrustBoundary;
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.dto.AgentStepActionType;
@@ -136,7 +137,7 @@ public class ArticleEvidenceVerifier {
         try {
             ChatResponse response = chatClientBuilder.build()
                     .prompt()
-                    .system(buildSystemPrompt(repair))
+                    .system(PromptTrustBoundary.append(buildSystemPrompt(repair)))
                     .user(buildUserPrompt(goal, context, answer))
                     //判断链：收敛门判定"证据够不够"，判错会让回答空转或放水——配了 judge-model 就用强模型
                     .options(aiJudgeModelSupport.applyTo(OpenAiChatOptions.builder()

@@ -109,6 +109,14 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
     private final ArticleSessionAnchorService articleSessionAnchorService;
     private final ArticleInteractionBatchService articleInteractionBatchService;
     private final com.hailin.blogsystem.ai.task.plan.TaskPlanningFacade taskPlanningFacade;
+
+    /**
+     * 5b：{@code WORKFLOW_HANDOFF} 的**执行前事实校验**。
+     *
+     * <p>放在这里调用，是因为它需要 pageContext（可信锚点）+ userId（归属）+ sessionId（会话绑定），
+     * 而这三样恰好都在这个装配点上；编排服务只负责持久化，不该做业务事实校验。
+     */
+    private final com.hailin.blogsystem.ai.task.WorkflowHandoffPreflight workflowHandoffPreflight;
     private final com.hailin.blogsystem.ai.task.TaskOrchestrationService taskOrchestrationService;
     private final com.hailin.blogsystem.ai.task.TaskResultRenderer taskResultRenderer;
     private final LearningPlanAnchorService learningPlanAnchorService;
@@ -318,6 +326,19 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
          */
         TaskRoute taskRoute = taskPlanningFacade.decide(message, intent, userId);
         if (taskRoute.isOrchestrate()) {
+            /*
+             * 5b：可提前知道的事实必须在**任何低风险写步骤执行之前**校验（设计稿 §7.1）。
+             *
+             * 放进 handoff 执行器就晚了——执行器按步骤顺序调用，轮到它时排在前面的
+             * 点赞 / 收藏已经执行过，"点赞这篇文章，再帮我优化一下"会先点赞、
+             * 再发现文章不是自己的或会话已有活跃 Workflow，留下一次本可避免的部分执行。
+             */
+            String preflightReject = workflowHandoffPreflight.reject(
+                    userId, sessionId, pageContext, taskRoute.plan());
+            if (preflightReject != null) {
+                return streamTaskCta(preflightReject, message, sessionId, userId, session,
+                        rawPageContextJson, routeUsage);
+            }
             return streamTaskOrchestration(
                     taskRoute.plan(), message, sessionId, userId, session,
                     pageContext, rawPageContextJson, requestId, routeUsage, mdcSnapshot);
@@ -670,7 +691,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         "goal", plan.goal(),
                         "steps", plan.steps().stream().map(s -> Map.of(
                                 "stepId", s.stepId(),
-                                "type", s.type().name()
+                                "type", s.type().name(),
+                                "goalEvidence", s.goalEvidence()
                         )).toList()
                 ))
                 .build());
@@ -684,25 +706,53 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                                 "state", result.state().name(),
                                 "code", result.code() == null ? "" : result.code().name(),
                                 "summary", result.summary() == null ? "" : result.summary(),
+                                "goalEvidence", step.goalEvidence(),
                                 "output", result.output() == null ? Map.of() : result.output()
                         ))
                         .build());
 
         // 内部过程事件出口（第四步）：子 run 的 AGENT_STEP **显式带 taskStepId**，
         // 前端据此把它挂到对应 TaskStep 之下——它是内层明细，不能和 TASK_STEP 混成同一层。
-        TaskStepEventSink stepEventSink =
-                (taskStepId, stepNo, actionType, status, message, thoughtSummary) ->
-                        emitIfOpen(sink, AiChatEventVO.builder()
-                                .eventType(AiChatEventType.AGENT_STEP.getValue())
-                                .eventData(Map.of(
-                                        "taskStepId", taskStepId,
-                                        "stepNo", stepNo,
-                                        "actionType", actionType,
-                                        "status", status,
-                                        "message", message == null ? "" : message,
-                                        "thoughtSummary", thoughtSummary == null ? "" : thoughtSummary
-                                ))
-                                .build());
+        TaskStepEventSink stepEventSink = new TaskStepEventSink() {
+            @Override
+            public void emit(String taskStepId, int stepNo, String actionType, String status,
+                             String message, String thoughtSummary) {
+                emitIfOpen(sink, AiChatEventVO.builder()
+                        .eventType(AiChatEventType.AGENT_STEP.getValue())
+                        .eventData(Map.of(
+                                "taskStepId", taskStepId,
+                                "stepNo", stepNo,
+                                "actionType", actionType,
+                                "status", status,
+                                "message", message == null ? "" : message,
+                                "thoughtSummary", thoughtSummary == null ? "" : thoughtSummary
+                        ))
+                        .build());
+            }
+
+            /**
+             * 5b：handoff 创建的 Workflow 也要**实时出卡**。
+             *
+             * <p>与旧链 Workflow 路径同一个形态（workflowRunId / workflowType / step / status /
+             * message），前端已有的 Workflow 卡逻辑直接复用。原先这里用 noop，
+             * 结果是"流程已经启动了几十秒，界面上什么都没有"，要等优化方案生成完才冒出卡片。
+             */
+            @Override
+            public void emitWorkflowStep(Long workflowRunId, String workflowType, String step,
+                                         String stepStatus, String stepMessage, String taskStepId) {
+                Map<String, Object> eventData = new HashMap<>();
+                eventData.put("workflowRunId", String.valueOf(workflowRunId));
+                eventData.put("workflowType", workflowType);
+                eventData.put("step", step);
+                eventData.put("status", stepStatus);
+                eventData.put("message", stepMessage == null ? "" : stepMessage);
+                eventData.put("taskStepId", taskStepId);
+                emitIfOpen(sink, AiChatEventVO.builder()
+                        .eventType(AiChatEventType.WORKFLOW_STEP.getValue())
+                        .eventData(eventData)
+                        .build());
+            }
+        };
 
         try {
             OrchestrationOutcome outcome = taskOrchestrationService.run(
@@ -741,6 +791,16 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             }
             if (needUpdate) {
                 updateById(assistantMessage);
+            }
+            if (outcome.paused() && outcome.agentRunId() != null) {
+                try {
+                    taskOrchestrationService.recordMessageRoutingTokens(
+                            outcome.agentRunId(), plan,
+                            routeUsage == null ? 0L : routeUsage.getTotalTokens());
+                } catch (RuntimeException e) {
+                    // 续跑仍可从历史消息与子树反推；这里不能因此制造第二条失败回复。
+                    log.error("任务编排路由 Token 基线落库失败: runId={}", outcome.agentRunId(), e);
+                }
             }
 
             Map<String, Object> eventData = new HashMap<>();
@@ -824,6 +884,10 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             }
             AiMessages assistantMessage = saveStreamAssistantMessage(
                     sessionId, userId, rawPageContextJson, reply);
+            if (routeUsage != null && routeUsage.getTotalTokens() > 0) {
+                assistantMessage.setTokenCount((long) routeUsage.getTotalTokens());
+                updateById(assistantMessage);
+            }
             Map<String, Object> eventData = new HashMap<>();
             eventData.put("session", AiSessionVO.from(getOwnedSession(sessionId, userId)));
             eventData.put("assistantMessage", AiMessageVO.from(assistantMessage));

@@ -75,6 +75,16 @@ public class AiAgentRun {
     private String planJson;
 
     /**
+     * **外层 TaskPlan 的可恢复快照**（5b，2026-10-01）。
+     *
+     * <p>与 {@link #planJson} 不是一回事，别混：{@code plan_json} 是 V3.13 Plan Preview 的
+     * {@code List<String>} 展示计划（内层 Agent 写）；这一列是**外层编排的正式执行快照**
+     * （带 {@code schemaVersion} 的 envelope：计划步骤 + 可信页面锚点），
+     * 跨请求恢复时靠它重建 {@code TaskPlan}——锚点只存后端校验过的 {@code PageContext}。
+     */
+    private String taskPlanJson;
+
+    /**
      * 最终回答文本（COMPLETED 时落库）。
      */
     private String finalAnswer;

@@ -102,6 +102,13 @@ public class AiRunStartupRecoveryRunner implements ApplicationRunner {
         return aiAgentRunMapper.update(null,
                 new LambdaUpdateWrapper<AiAgentRun>()
                         .eq(AiAgentRun::getStatus, AiAgentRunStatus.RUNNING.name())
+                        // 5b（设计稿 §8.3）：**外层 Task run 不在这里判死**——它的步骤快照
+                        // （task_plan_json）已经落盘，恢复依据还在，直接标 FAILED 会把一个
+                        // 能续跑的任务变成"必须重来"。它们由 TaskHandoffReconciliationTask
+                        // 按关联 Workflow 的实际情况接手（终态→续跑 / 未终态→复位等待态 /
+                        // 无关联→如实失败）。
+                        // WAITING_WORKFLOW 本来就不匹配 RUNNING，天然不会被清掉。
+                        .isNull(AiAgentRun::getTaskPlanJson)
                         .set(AiAgentRun::getStatus, AiAgentRunStatus.FAILED.name())
                         .set(AiAgentRun::getErrorMessage, INTERRUPTED_MESSAGE)
                         .set(AiAgentRun::getUpdatedAt, LocalDateTime.now()));

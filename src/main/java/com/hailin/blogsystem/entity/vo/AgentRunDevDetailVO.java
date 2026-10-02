@@ -29,4 +29,8 @@ public class AgentRunDevDetailVO {
     private Integer inputTokens;
     private Integer outputTokens;
     private Integer totalTokens;
+    /** 当前 run 自己的 Token；与历史 totalTokens 同值，但语义显式。 */
+    private Long localTokens;
+    /** 当前 run 加直接子 run 的 Token；第一版父子树只有一层。 */
+    private Long subtreeTokens;
 }

@@ -221,6 +221,40 @@ class ArticleAnalysisExecutorTests {
                 .contains("分析一下它写得怎么样");
     }
 
+    @Test
+    @DisplayName("搜索后比较会把受限的文章证据注入分析 goal")
+    void comparisonGoalCarriesStructuredSearchEvidence() {
+        List<String> capturedGoals = new ArrayList<>();
+        when(runtime.runAnalysisOnly(any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    capturedGoals.add(invocation.getArgument(2));
+                    return completed(AgentCompletionKind.ANSWER, "答案");
+                });
+
+        TaskStep search = new TaskStep("s0", StepType.ARTICLE_SEARCH, Map.of("query", "Redis"),
+                StepDependency.none(), List.of("搜一下 Redis 相关文章"));
+        TaskStep comparison = new TaskStep("s1", StepType.ARTICLE_ANALYSIS, Map.of(),
+                StepDependency.requires("s0"), List.of("比较各篇文章"));
+        TaskPlan plan = new TaskPlan("搜一下 Redis 相关文章，并比较各篇文章",
+                List.of(search, comparison), List.of(), List.of());
+        TaskExecutionContext context = new TaskExecutionContext(100L, 200L, null, plan, 999L, null);
+        context.record(StepResult.applied("s0", "找到 1 篇 Redis 文章", Map.of(
+                "query", "Redis",
+                "articles", List.of(Map.of(
+                        "articleId", "12",
+                        "title", "Redis 缓存工程化实践",
+                        "summary", "介绍缓存一致性与延迟双删")))));
+
+        executor.execute(context, comparison);
+
+        assertThat(capturedGoals).hasSize(1);
+        assertThat(capturedGoals.get(0))
+                .contains("【搜索结果证据】")
+                .contains("《Redis 缓存工程化实践》(12)")
+                .contains("介绍缓存一致性与延迟双删")
+                .contains("只基于以上证据比较");
+    }
+
     // ==================== helpers ====================
 
     private TaskStep step() {

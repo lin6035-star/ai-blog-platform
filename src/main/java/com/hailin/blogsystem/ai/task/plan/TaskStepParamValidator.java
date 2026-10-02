@@ -2,6 +2,7 @@ package com.hailin.blogsystem.ai.task.plan;
 
 import com.hailin.blogsystem.ai.LogValues;
 import com.hailin.blogsystem.ai.task.StepType;
+import com.hailin.blogsystem.ai.task.WorkflowHandoffTypes;
 import com.hailin.blogsystem.ai.task.executor.NavigateExecutor;
 import com.hailin.blogsystem.entity.dto.ArticleInteractionAction;
 
@@ -40,9 +41,31 @@ final class TaskStepParamValidator {
             case ARTICLE_WRITE -> validateArticleWrite(safe);
             case ARTICLE_SEARCH -> validateArticleSearch(safe);
             case NAVIGATE -> validateNavigate(safe);
+            case WORKFLOW_HANDOFF -> validateWorkflowHandoff(safe);
             // 只读 / 分析类没有必填参数；未接入的类型由 registry.supports 拦在前面
-            case ARTICLE_QUERY, ARTICLE_ANALYSIS, WORKFLOW_HANDOFF -> null;
+            case ARTICLE_QUERY, ARTICLE_ANALYSIS -> null;
         };
+    }
+
+    /**
+     * 5b：{@code WORKFLOW_HANDOFF} 的**最小参数形态**（fail-closed）。
+     *
+     * <p>5a 冻结的协议是"params 只能有一个已登记的 workflowType"。这条必须在**规划期**
+     * 确定性校验，不能只靠 prompt：模型夹带 {@code articleId / topic / planRef} 时若放行，
+     * 等执行器开始消费这些字段，"今天的脏候选"就成了"明天的执行输入"。
+     *
+     * <p>这里**不校验** {@code goalEvidence}——"逐字出现在原话里"由 Planner 统一负责，
+     * 在本类里再做一遍只会多出一处可能漂移的判断。
+     */
+    private static String validateWorkflowHandoff(Map<String, Object> params) {
+        if (params.size() != 1 || !params.containsKey("workflowType")) {
+            return "params 只能含 workflowType（实际键 " + params.keySet() + "）";
+        }
+        String workflowType = text(params, "workflowType");
+        if (!WorkflowHandoffTypes.isSupported(workflowType)) {
+            return "workflowType 不在 5b 开放的白名单内（原值 " + safeForLog(workflowType) + "）";
+        }
+        return null;
     }
 
     private static String validateArticleWrite(Map<String, Object> params) {

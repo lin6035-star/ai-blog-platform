@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.AiJudgeModelSupport;
 import com.hailin.blogsystem.ai.LlmResponseSupport;
+import com.hailin.blogsystem.ai.PromptTrustBoundary;
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
 import com.hailin.blogsystem.entity.dto.AgentStepActionType;
 import lombok.RequiredArgsConstructor;
@@ -72,7 +73,7 @@ public class LlmAgentStepDecider implements AgentStepDecider {
         try {
             ChatResponse response = chatClientBuilder.build()
                     .prompt()
-                    .system(buildSummarizeSystemPrompt())
+                    .system(PromptTrustBoundary.append(buildSummarizeSystemPrompt()))
                     .user(buildSummarizeUserPrompt(goal, clippedContext))
                     .options(OpenAiChatOptions.builder()
                             .temperature(TEMPERATURE)
@@ -99,7 +100,7 @@ public class LlmAgentStepDecider implements AgentStepDecider {
         try {
             ChatResponse response = chatClientBuilder.build()
                     .prompt()
-                    .system(buildSystemPrompt(repair))
+                    .system(PromptTrustBoundary.append(buildSystemPrompt(repair)))
                     .user(buildUserPrompt(goal, clippedContext, stepNo, maxSteps, repair))
                     //判断链：决策器决定"下一步走哪条路"，判错整条路都偏——配了 judge-model 就用强模型
                     .options(aiJudgeModelSupport.applyTo(OpenAiChatOptions.builder()

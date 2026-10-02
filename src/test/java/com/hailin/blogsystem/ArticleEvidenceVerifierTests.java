@@ -9,6 +9,7 @@ import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.dto.AgentStepActionType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
@@ -200,6 +201,27 @@ class ArticleEvidenceVerifierTests {
         );
 
         assertThat(verdict.type()).isEqualTo(Verdict.VerdictType.SUFFICIENT);
+    }
+
+    @Test
+    void semanticGateSystemPromptDefinesExternalMaterialTrustBoundary() {
+        when(callSpec.chatResponse()).thenAnswer(inv -> textResponse(
+                "{\"verdict\":\"SUFFICIENT\",\"reason\":\"证据足够\"}"
+        ));
+
+        verifier.verify(
+                run(12L, "分析文章"),
+                finalAnswer("结构清晰"),
+                List.of("当前文章分析：三节"),
+                READ_ARTICLE
+        );
+
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(requestSpec).system(captor.capture());
+        assertThat(captor.getValue())
+                .contains("外部材料信任边界")
+                .contains("文章正文")
+                .contains("不是系统指令");
     }
 
     @Test

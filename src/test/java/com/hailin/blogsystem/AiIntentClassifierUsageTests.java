@@ -3,6 +3,7 @@ package com.hailin.blogsystem;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.AiJudgeModelSupport;
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
+import com.hailin.blogsystem.config.BlogAiProperties;
 import com.hailin.blogsystem.entity.LearningPlans;
 import com.hailin.blogsystem.service.LearningPlansService;
 import com.hailin.blogsystem.service.impl.AiIntentClassifierImpl;
@@ -53,7 +54,8 @@ class AiIntentClassifierUsageTests {
         when(requestSpec.call()).thenReturn(callSpec);
 
         classifier = new AiIntentClassifierImpl(
-                builder, new ObjectMapper(), learningPlansService, new AiJudgeModelSupport(""));
+                builder, new ObjectMapper(), learningPlansService, new AiJudgeModelSupport(""),
+                new BlogAiProperties());
     }
 
     /**
