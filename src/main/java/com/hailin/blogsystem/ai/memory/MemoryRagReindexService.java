@@ -1,0 +1,158 @@
+package com.hailin.blogsystem.ai.memory;
+
+import co.elastic.clients.elasticsearch.ElasticsearchClient;
+import co.elastic.clients.elasticsearch._types.FieldValue;
+import co.elastic.clients.elasticsearch.core.SearchResponse;
+import co.elastic.clients.json.JsonData;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.hailin.blogsystem.config.BlogAiProperties;
+import com.hailin.blogsystem.entity.AiEpisodicMemories;
+import com.hailin.blogsystem.entity.AiUserMemories;
+import com.hailin.blogsystem.mapper.AiEpisodicMemoryMapper;
+import com.hailin.blogsystem.mapper.AiUserMemoryMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+
+import jakarta.json.JsonObject;
+import java.io.IOException;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+/**
+ * 按 MySQL 权威数据重刷 Memory 的存量向量，并对齐两侧的文档集合。
+ *
+ * <p><b>为什么需要它</b>：正式记忆与情景记忆仍写在早期共享索引
+ * （{@code blog.ai.rag.corpus.memory-index-name} 指回 {@code spring-ai-document-index}），
+ * 其**存量向量与当前 embedding 空间不同源**（2026-10-03 实测 cosine ≈ 0），
+ * 在返回阈值下恒空召回；而新产生的记忆写的是当前模型向量 ——
+ * 同一个索引因此变成“混源 corpus”：老记忆召不回、新记忆正常。
+ *
+ * <p><b>为什么不做索引迁移</b>：这里的问题不是索引结构或 mapping，而是**存量向量陈旧**。
+ * MySQL 是记忆的权威数据源，逐条重新 {@code indexMemory} 即可让存量与当前模型同源；
+ * 该过程内部先按 memoryId 删除旧文档再写入，**幂等、可重复执行**，且不影响文章 corpus。
+ * 两个 corpus 在结构上的统一（版本化 alias）留待后续，不在本次收尾范围内。
+ *
+ * <p><b>为什么要清幽灵文档</b>：2026-10-03 实测 ES 有 8 条 {@code episodic_memory}，而 MySQL 只有 2 条——
+ * 说明历史上存在“记忆已删除、索引文档没删”的漏删。这类文档本身是漂移向量（暂时召不回），
+ * 但一旦嵌入空间变化就可能被召回成“已删除的记忆”。重刷的语义既然是“以 MySQL 为准”，
+ * 顺手对齐文档集合才是完整动作。**读索引失败时一律不清理**，宁可留幽灵也不误删正常记忆。
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class MemoryRagReindexService {
+
+    private static final String USER_MEMORY_SOURCE = "memory";
+    private static final String EPISODIC_MEMORY_SOURCE = "episodic_memory";
+    private static final int MAX_SCAN = 1000;
+
+    private final AiUserMemoryMapper aiUserMemoryMapper;
+    private final AiEpisodicMemoryMapper aiEpisodicMemoryMapper;
+    private final AiMemoryIndexService aiMemoryIndexService;
+    private final AiEpisodicMemoryIndexService aiEpisodicMemoryIndexService;
+    private final ElasticsearchClient elasticsearchClient;
+    private final BlogAiProperties properties;
+
+    public ReindexOutcome reindex() {
+        // 只重刷启用中的正式记忆：已停用的记忆本来就不该被召回
+        List<AiUserMemories> userMemories = aiUserMemoryMapper.selectList(
+                Wrappers.<AiUserMemories>lambdaQuery()
+                        .eq(AiUserMemories::getEnabled, 1));
+        List<AiEpisodicMemories> episodicMemories = aiEpisodicMemoryMapper.selectList(null);
+
+        for (AiUserMemories memory : userMemories) {
+            aiMemoryIndexService.indexMemory(memory);
+        }
+        for (AiEpisodicMemories memory : episodicMemories) {
+            aiEpisodicMemoryIndexService.indexMemory(memory);
+        }
+
+        int purged = purgeOrphans(USER_MEMORY_SOURCE, idsOfUserMemories(userMemories))
+                + purgeOrphans(EPISODIC_MEMORY_SOURCE, idsOfEpisodicMemories(episodicMemories));
+
+        log.info("[MEMORY-REINDEX] 记忆向量重刷完成：userMemories={}, episodicMemories={}, purgedOrphans={}",
+                userMemories.size(), episodicMemories.size(), purged);
+        return new ReindexOutcome(userMemories.size(), episodicMemories.size(), purged);
+    }
+
+    private int purgeOrphans(String source, Set<Long> liveIds) {
+        Set<Long> indexedIds = loadIndexedMemoryIds(source);
+        List<Long> orphans = findOrphanIds(indexedIds, liveIds);
+
+        for (Long orphan : orphans) {
+            if (EPISODIC_MEMORY_SOURCE.equals(source)) {
+                aiEpisodicMemoryIndexService.deleteMemoryIndex(orphan);
+            } else {
+                aiMemoryIndexService.deleteMemoryIndex(orphan);
+            }
+            log.warn("[MEMORY-REINDEX] 清理幽灵记忆文档：source={}, memoryId={}", source, orphan);
+        }
+        return orphans.size();
+    }
+
+    /** 索引里有、MySQL 里没有的记忆 ID。纯函数，便于单测。 */
+    public static List<Long> findOrphanIds(Set<Long> indexedIds, Set<Long> liveIds) {
+        if (indexedIds == null || indexedIds.isEmpty()) {
+            return List.of();
+        }
+        Set<Long> live = liveIds == null ? Set.of() : liveIds;
+        return indexedIds.stream()
+                .filter(Objects::nonNull)
+                .filter(id -> !live.contains(id))
+                .sorted()
+                .toList();
+    }
+
+    /** 读取失败返回空集——调用方据此跳过清理，避免误删。 */
+    private Set<Long> loadIndexedMemoryIds(String source) {
+        try {
+            SearchResponse<JsonData> response = elasticsearchClient.search(s -> s
+                            .index(properties.getRag().getCorpus().getMemoryIndexName())
+                            .size(MAX_SCAN)
+                            .source(src -> src.filter(f -> f.includes("metadata.memoryId")))
+                            .query(q -> q.term(t -> t
+                                    .field("metadata.source.keyword")
+                                    .value(FieldValue.of(source)))),
+                    JsonData.class);
+
+            Set<Long> ids = new LinkedHashSet<>();
+            response.hits().hits().forEach(hit -> {
+                JsonData document = hit.source();
+                if (document == null) {
+                    return;
+                }
+                JsonObject metadata = document.toJson().asJsonObject().getJsonObject("metadata");
+                if (metadata == null || !metadata.containsKey("memoryId")) {
+                    return;
+                }
+                ids.add(metadata.getJsonNumber("memoryId").longValue());
+            });
+            return ids;
+        } catch (IOException | RuntimeException e) {
+            log.warn("[MEMORY-REINDEX] 读取 {} 索引文档失败，本次跳过幽灵文档清理：{}", source, e.getMessage());
+            return Set.of();
+        }
+    }
+
+    private Set<Long> idsOfUserMemories(List<AiUserMemories> memories) {
+        return memories.stream()
+                .map(AiUserMemories::getId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    private Set<Long> idsOfEpisodicMemories(List<AiEpisodicMemories> memories) {
+        return memories.stream()
+                .map(AiEpisodicMemories::getId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    /** 重刷统计；接口返回体不引入新的前端协议。 */
+    public record ReindexOutcome(int userMemories, int episodicMemories, int purgedOrphans) {
+    }
+}

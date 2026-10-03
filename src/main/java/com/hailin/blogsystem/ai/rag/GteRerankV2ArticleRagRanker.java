@@ -29,23 +29,24 @@ public class GteRerankV2ArticleRagRanker implements ArticleRagRanker{
 
     @Override
     public List<ArticleRagContext> rank(String question, List<ArticleRagContext> contexts) {
+        return rankWithEvidence(question, contexts).contexts();
+    }
+
+    @Override
+    public ArticleRagRankResult rankWithEvidence(String question, List<ArticleRagContext> contexts) {
         if (contexts == null || contexts.isEmpty()) {
             log.info("gte-rerank-v2 skip: empty contexts");
-            return List.of();
-        }
-        if (contexts.size() == 1) {
-            log.info("gte-rerank-v2 skip: only one candidate");
-            return contexts;
+            return ArticleRagRankResult.empty();
         }
 
         BlogAiProperties.Rerank rerank = blogAiProperties.getRag().getRerank();
         if (rerank == null || !rerank.isEnabled()) {
             log.info("gte-rerank-v2 disabled, fallback to default");
-            return defaultArticleRagRanker.rank(question, contexts);
+            return defaultArticleRagRanker.rankWithEvidence(question, contexts);
         }
         if (rerank.getWorkspaceId() == null || rerank.getWorkspaceId().isBlank()) {
             log.info("gte-rerank-v2 workspaceId missing, fallback to default");
-            return defaultArticleRagRanker.rank(question, contexts);
+            return defaultArticleRagRanker.rankWithEvidence(question, contexts);
         }
 
         try {
@@ -91,31 +92,31 @@ public class GteRerankV2ArticleRagRanker implements ArticleRagRanker{
                     response != null && response.has("output"),
                     response != null && response.path("output").has("results"));
 
-            List<ArticleRagContext> ranked = parseRanked(response, limited, rerank.getTopN());
-            if (ranked.isEmpty()) {
+            List<ArticleRagRankResult.Candidate> ranked = parseRanked(response, limited, rerank.getTopN());
+            if (ranked.isEmpty() || ranked.stream().anyMatch(candidate -> candidate.relevanceScore() == null)) {
                 log.info("gte-rerank-v2 empty results, fallback to default");
-                return defaultArticleRagRanker.rank(question, contexts);
+                return defaultArticleRagRanker.rankWithEvidence(question, contexts);
             }
 
             log.info("gte-rerank-v2 排序成功，question={}, candidate={}, ranked={}",
                     question, limited.size(), ranked.size());
 
-            return ranked;
+            return new ArticleRagRankResult(ArticleRagRankResult.Status.MODEL_APPLIED, ranked);
         } catch (Exception e) {
             log.warn("gte-rerank-v2 失败，回退规则 rerank: {}", e.getMessage());
-            return defaultArticleRagRanker.rank(question, contexts);
+            return defaultArticleRagRanker.rankWithEvidence(question, contexts);
         }
     }
 
-    private List<ArticleRagContext> parseRanked(JsonNode response,
-                                                List<ArticleRagContext> contexts,
-                                                int topN) {
+    private List<ArticleRagRankResult.Candidate> parseRanked(JsonNode response,
+                                                            List<ArticleRagContext> contexts,
+                                                            int topN) {
         JsonNode results = response == null ? null : response.path("output").path("results");
         if (results == null || !results.isArray()) {
             return List.of();
         }
 
-        List<ArticleRagContext> ranked = new ArrayList<>();
+        List<ArticleRagRankResult.Candidate> ranked = new ArrayList<>();
         Set<Long> seenArticleIds = new LinkedHashSet<>();
 
         for (JsonNode item : results) {
@@ -127,7 +128,13 @@ public class GteRerankV2ArticleRagRanker implements ArticleRagRanker{
             ArticleRagContext context = contexts.get(index);
             Long articleId = context.articleId();
             if (articleId != null && seenArticleIds.add(articleId)) {
-                ranked.add(context);
+                ranked.add(new ArticleRagRankResult.Candidate(
+                        context,
+                        item.path("relevance_score").isNumber()
+                                ? item.path("relevance_score").asDouble()
+                                : null,
+                        ranked.size() + 1
+                ));
             }
 
             if (ranked.size() >= Math.max(1, topN)) {
@@ -144,4 +151,5 @@ public class GteRerankV2ArticleRagRanker implements ArticleRagRanker{
         String text = "标题：" + title + "\n片段：" + content;
         return text.length() > 1200 ? text.substring(0, 1200) : text;
     }
+
 }

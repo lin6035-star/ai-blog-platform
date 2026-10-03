@@ -4,10 +4,10 @@ import com.hailin.blogsystem.entity.dto.AiIntent;
 import com.hailin.blogsystem.entity.dto.ArticleRagContext;
 import com.hailin.blogsystem.entity.dto.ArticleRagSearchResult;
 import com.hailin.blogsystem.entity.dto.ArticleRagSearchStrategy;
+import com.hailin.blogsystem.entity.Articles;
 import com.hailin.blogsystem.entity.vo.ArticleDetailVO;
 import com.hailin.blogsystem.entity.vo.PageVO;
 import com.hailin.blogsystem.service.ArticlesService;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -15,10 +15,11 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Service
 @Slf4j
-@RequiredArgsConstructor
 // 统一封装文章 RAG 搜索策略：向量 + keyword 混合检索 → rerank → MySQL 兜底。
 public class ArticleRagSearchService {
 
@@ -34,61 +35,156 @@ public class ArticleRagSearchService {
     private final ArticleRagRanker articleRagRanker;
     private final ArticlesService articlesService;
     private final ArticleRagKeywordRetriever articleRagKeywordRetriever;
+    private final ArticleRagTraceRecorder traceRecorder;
+    private final ArticleRagRelevanceGate relevanceGate;
+
+    public ArticleRagSearchService(
+            ArticleRagRetrieveService articleRagRetrieveService,
+            ArticleRagRanker articleRagRanker,
+            ArticlesService articlesService,
+            ArticleRagKeywordRetriever articleRagKeywordRetriever,
+            ArticleRagTraceRecorder traceRecorder,
+            ArticleRagRelevanceGate relevanceGate
+    ) {
+        this.articleRagRetrieveService = articleRagRetrieveService;
+        this.articleRagRanker = articleRagRanker;
+        this.articlesService = articlesService;
+        this.articleRagKeywordRetriever = articleRagKeywordRetriever;
+        this.traceRecorder = traceRecorder;
+        this.relevanceGate = relevanceGate;
+    }
 
     public ArticleRagSearchResult search(String question, AiIntent intent){
+        long totalStartedAt = System.nanoTime();
+        String intentName = intent == null ? null : intent.getIntent();
+
         if (!shouldSearchArticleRag(intent)) {
             log.info(
                     "RAG 跳过文章检索，intent={}",
                     intent == null ? null : intent.getIntent()
             );
-            return new ArticleRagSearchResult(ArticleRagSearchStrategy.EMPTY, List.of());
+            ArticleRagSearchResult result =
+                    new ArticleRagSearchResult(ArticleRagSearchStrategy.EMPTY, List.of());
+            recordTrace(new ArticleRagRetrievalTrace(
+                    question,
+                    intentName,
+                    null,
+                    false,
+                    "INTENT_NOT_ARTICLE_SEARCH",
+                    List.of(),
+                    List.of(),
+                    List.of(),
+                    List.of(),
+                    List.of(),
+                    result.strategy(),
+                    false,
+                    0L,
+                    0L,
+                    0L,
+                    elapsedMs(totalStartedAt)
+            ));
+            return result;
         }
 
         // 1. ARTICLE_SEARCH：向量 + keyword
+        long vectorStartedAt = System.nanoTime();
         List<ArticleRagContext> vectorContexts = articleRagRetrieveService.retrieve(question);
+        long vectorElapsedMs = elapsedMs(vectorStartedAt);
 
-        List<ArticleRagContext> contexts;
+        String lexicalQuery = null;
+        List<ArticleRagContext> keywordContexts = List.of();
+        List<ArticleRagContext> contexts = vectorContexts;
+        boolean keywordFallbackTriggered = false;
+        long keywordElapsedMs = 0L;
         if (isArticleSearch(intent)) {
-            String keyword = getArticleSearchKeyword(question, intent);
-            List<ArticleRagContext> keywordContexts = articleRagKeywordRetriever.retrieve(keyword);
+            lexicalQuery = getArticleSearchKeyword(question, intent);
+            long keywordStartedAt = System.nanoTime();
+            keywordContexts = articleRagKeywordRetriever.retrieve(lexicalQuery);
+            keywordElapsedMs = elapsedMs(keywordStartedAt);
             contexts = mergeContexts(vectorContexts, keywordContexts);
 
             log.info(
-                    "ARTICLE_SEARCH 使用混合检索，keyword={}, vector={}, keywordHit={}, merged={}",
-                    keyword,
+                    "ARTICLE_SEARCH 使用混合检索，keyword={}, keywordFallback={}, vector={}, keywordHit={}, merged={}",
+                    lexicalQuery,
+                    keywordFallbackTriggered,
                     vectorContexts.size(),
                     keywordContexts.size(),
                     contexts.size()
             );
-        } else {
-            contexts = vectorContexts;
         }
 
-        String rankQuestion = isArticleSearch(intent) ? getArticleSearchKeyword(question, intent) : question;
-        List<ArticleRagContext> rankedContexts = articleRagRanker.rank(rankQuestion, contexts);
+        String rankQuestion = isArticleSearch(intent) ? lexicalQuery : question;
+        long rankStartedAt = System.nanoTime();
+        ArticleRagRankResult rankResult = articleRagRanker.rankWithEvidence(rankQuestion, contexts);
+        ArticleRagRelevanceGate.Result gateResult = relevanceGate.apply(lexicalQuery, rankResult);
+        List<ArticleRagContext> rankedContexts = rankResult.contexts();
+        List<ArticleRagContext> acceptedContexts = gateResult.acceptedContexts();
+
+        if (isArticleSearch(intent) && acceptedContexts.isEmpty() && keywordContexts.isEmpty()) {
+            keywordFallbackTriggered = true;
+            long fallbackStartedAt = System.nanoTime();
+            keywordContexts = articleRagKeywordRetriever.retrieveFallback(lexicalQuery);
+            keywordElapsedMs += elapsedMs(fallbackStartedAt);
+            contexts = mergeContexts(vectorContexts, keywordContexts);
+            rankResult = articleRagRanker.rankWithEvidence(rankQuestion, contexts);
+            gateResult = relevanceGate.apply(lexicalQuery, rankResult);
+            rankedContexts = rankResult.contexts();
+            acceptedContexts = gateResult.acceptedContexts();
+        }
+        acceptedContexts = retainCurrentlyPublished(acceptedContexts);
+        long rankElapsedMs = elapsedMs(rankStartedAt);
 
 
         log.info(
-                "RAG {}检索完成，vector={}, ranked={}",
+                "RAG {}检索完成，vector={}, ranked={}, accepted={}, keywordFallback={}",
                 isArticleSearch(intent) ? "混合" : "向量",
                 vectorContexts.size(),
-                rankedContexts.size()
+                rankedContexts.size(),
+                acceptedContexts.size(),
+                keywordFallbackTriggered
         );
 
-        if (!rankedContexts.isEmpty()) {
+        ArticleRagSearchResult result;
+        if (!acceptedContexts.isEmpty()) {
             ArticleRagSearchStrategy strategy = isArticleSearch(intent) ? ArticleRagSearchStrategy.HYBRID : ArticleRagSearchStrategy.VECTOR;
-            return new ArticleRagSearchResult(strategy, rankedContexts);
-        }
-
-        if(isArticleSearch(intent)){
+            result = new ArticleRagSearchResult(strategy, acceptedContexts);
+        } else if(isArticleSearch(intent)){
             //MySQL兜底
             List<ArticleRagContext> fallbackContexts = buildMysqlFallbackContexts(intent);
-            if (!fallbackContexts.isEmpty()) {
-                return new ArticleRagSearchResult(ArticleRagSearchStrategy.MYSQL_FALLBACK, fallbackContexts);
+            List<ArticleRagContext> acceptedFallbackContexts = relevanceGate.apply(
+                    lexicalQuery,
+                    ArticleRagRankResult.unavailable(fallbackContexts)
+            ).acceptedContexts();
+            acceptedFallbackContexts = retainCurrentlyPublished(acceptedFallbackContexts);
+            if (!acceptedFallbackContexts.isEmpty()) {
+                result = new ArticleRagSearchResult(ArticleRagSearchStrategy.MYSQL_FALLBACK, acceptedFallbackContexts);
+            } else {
+                result = new ArticleRagSearchResult(ArticleRagSearchStrategy.EMPTY, List.of());
             }
+        } else {
+            result = new ArticleRagSearchResult(ArticleRagSearchStrategy.EMPTY, List.of());
         }
 
-        return new ArticleRagSearchResult(ArticleRagSearchStrategy.EMPTY, List.of());
+        recordTrace(new ArticleRagRetrievalTrace(
+                question,
+                intentName,
+                lexicalQuery,
+                true,
+                null,
+                ArticleRagRetrievalTrace.candidatesOf(vectorContexts),
+                ArticleRagRetrievalTrace.candidatesOf(keywordContexts),
+                ArticleRagRetrievalTrace.candidatesOf(contexts),
+                ArticleRagRetrievalTrace.candidatesOf(rankedContexts),
+                ArticleRagRetrievalTrace.candidatesOf(result.contexts()),
+                result.strategy(),
+                true,
+                vectorElapsedMs,
+                keywordElapsedMs,
+                rankElapsedMs,
+                elapsedMs(totalStartedAt)
+        ));
+
+        return result;
     }
 
     private boolean isArticleSearch(AiIntent intent) {
@@ -126,6 +222,9 @@ public class ArticleRagSearchService {
         }
 
         PageVO<ArticleDetailVO> pageResult = articlesService.getArticles(1L, 3L, keyword, null, "lasted");
+        if (pageResult == null) {
+            return List.of();
+        }
         List<ArticleDetailVO> list = pageResult.getList();
 
         if (list == null || list.isEmpty()) {
@@ -157,6 +256,34 @@ public class ArticleRagSearchService {
         return article.getTitle() == null ? "" : article.getTitle();
     }
 
+    private List<ArticleRagContext> retainCurrentlyPublished(List<ArticleRagContext> contexts) {
+        if (contexts == null || contexts.isEmpty()) {
+            return List.of();
+        }
+        List<Long> articleIds = contexts.stream()
+                .map(ArticleRagContext::articleId)
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .toList();
+        if (articleIds.isEmpty()) {
+            return List.of();
+        }
+
+        try {
+            List<Articles> articles = articlesService.listByIds(articleIds);
+            Set<Long> publishedIds = (articles == null ? List.<Articles>of() : articles).stream()
+                    .filter(article -> Integer.valueOf(1).equals(article.getStatus()))
+                    .map(Articles::getId)
+                    .collect(Collectors.toSet());
+            return contexts.stream()
+                    .filter(context -> publishedIds.contains(context.articleId()))
+                    .toList();
+        } catch (RuntimeException e) {
+            log.warn("RAG Gate 后复核文章可见性失败，按 fail-closed 拒绝候选: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
     private List<ArticleRagContext> mergeContexts(
             List<ArticleRagContext> vectorContexts,
             List<ArticleRagContext> keywordContexts
@@ -177,5 +304,17 @@ public class ArticleRagSearchService {
 
     private String contextKey(ArticleRagContext context) {
         return context.articleId() + ":" + context.chunkIndex();
+    }
+
+    private long elapsedMs(long startedAt) {
+        return (System.nanoTime() - startedAt) / 1_000_000L;
+    }
+
+    private void recordTrace(ArticleRagRetrievalTrace trace) {
+        try {
+            traceRecorder.record(trace);
+        } catch (RuntimeException e) {
+            log.warn("RAG retrieval trace 记录失败，不影响检索结果: {}", e.getMessage());
+        }
     }
 }

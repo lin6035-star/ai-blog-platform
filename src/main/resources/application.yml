@@ -299,14 +299,29 @@ blog:
         queue-capacity: 30
         thread-name-prefix: memory-extract-
     rag:
+      # 文章 corpus 已完成隔离重建和 alias 原子切换；Memory 迁移仍保留旧共享索引。
+      # initialize-schema 必须关闭：Spring AI 不支持把 alias 当作待建物理索引处理。
+      corpus:
+        article-index-name: article_rag_active
+        memory-index-name: ${spring.ai.vectorstore.elasticsearch.index-name:spring-ai-document-index}
+        embedding-model: ${spring.ai.embedding.options.model:qwen3.7-text-embedding}
+        dimensions: ${spring.ai.vectorstore.elasticsearch.dimensions:1024}
+        initialize-schema: false
       rerank:
         enabled: true
         model: qwen3.7-text-rerank
         workspace-id: ${ALIYUN_WORKSPACE_ID:}
         top-n: 5
         max-documents: 30
-      top-k: 3
-      similarity-threshold: 0.65
+      gate:
+        enabled: true
+        rerank-threshold: 0.75
+      health:
+        canary-threshold: 0.9
+        initial-delay-ms: 10000
+        interval-ms: 300000
+      top-k: 10
+      similarity-threshold: 0.55
       enabled: true
       rebuild:
         enabled: true

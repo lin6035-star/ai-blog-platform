@@ -5,13 +5,14 @@ import co.elastic.clients.elasticsearch._types.FieldValue;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.json.JsonData;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.hailin.blogsystem.config.BlogAiProperties;
+import com.hailin.blogsystem.ai.rag.index.ArticleRagIndexHealthService;
 import com.hailin.blogsystem.constants.BlogConstants;
 import com.hailin.blogsystem.entity.Articles;
 import com.hailin.blogsystem.entity.dto.ArticleRagRepairResult;
 import com.hailin.blogsystem.entity.vo.ArticleRagConsistencyReportVO;
 import com.hailin.blogsystem.mapper.ArticlesMapper;
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
+import com.hailin.blogsystem.exception.BusinessException;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -21,16 +22,27 @@ import java.util.List;
 import java.util.Set;
 
 @Service
-@RequiredArgsConstructor
-
 public class ArticleRagConsistencyService {
-
-    @Value("${spring.ai.vectorstore.elasticsearch.index-name:spring-ai-document-index}")
-    private String indexName;
 
     private final ArticlesMapper articlesMapper;
     private final ElasticsearchClient elasticsearchClient;
     private final ArticleRagIndexService articleRagIndexService;
+    private final BlogAiProperties blogAiProperties;
+    private final ArticleRagIndexHealthService healthService;
+
+    public ArticleRagConsistencyService(
+            ArticlesMapper articlesMapper,
+            ElasticsearchClient elasticsearchClient,
+            ArticleRagIndexService articleRagIndexService,
+            BlogAiProperties blogAiProperties,
+            ArticleRagIndexHealthService healthService
+    ) {
+        this.articlesMapper = articlesMapper;
+        this.elasticsearchClient = elasticsearchClient;
+        this.articleRagIndexService = articleRagIndexService;
+        this.blogAiProperties = blogAiProperties;
+        this.healthService = healthService;
+    }
 
     public ArticleRagConsistencyReportVO check(){
         Set<Long> publishedArticleIds = loadPublishedArticleIds();
@@ -73,7 +85,7 @@ public class ArticleRagConsistencyService {
     private Set<Long> loadIndexedArticleIds() {
         try {
             SearchResponse<JsonData> response = elasticsearchClient.search(s -> s
-                            .index(indexName)
+                            .index(articleIndexName())
                             .size(1000)
                             .source(source -> source
                                     .filter(filter -> filter
@@ -116,6 +128,13 @@ public class ArticleRagConsistencyService {
     }
 
     public ArticleRagRepairResult repair() {
+        if (!healthService.incrementalWritesAllowed()) {
+            ArticleRagIndexHealthService.Snapshot snapshot = healthService.current();
+            throw new BusinessException(
+                    BlogConstants.ErrorCode.CONFLICT,
+                    "文章 RAG 索引不健康，禁止局部修复，请执行隔离全量重建: " + snapshot.reason()
+            );
+        }
         ArticleRagConsistencyReportVO report = check();
 
         int missingFixed = 0;
@@ -136,5 +155,9 @@ public class ArticleRagConsistencyService {
         }
 
         return new ArticleRagRepairResult(missingFixed, extraDeleted, chunkReindexed);
+    }
+
+    private String articleIndexName() {
+        return blogAiProperties.getRag().getCorpus().getArticleIndexName();
     }
 }

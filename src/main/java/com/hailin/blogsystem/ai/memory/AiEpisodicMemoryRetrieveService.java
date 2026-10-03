@@ -1,13 +1,14 @@
 package com.hailin.blogsystem.ai.memory;
 
+import com.hailin.blogsystem.config.AiVectorStoreConfig;
 import com.hailin.blogsystem.entity.dto.EpisodicMemoryExtractResult;
 import com.hailin.blogsystem.entity.dto.EpisodicMemoryRagContext;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.Filter;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -17,7 +18,6 @@ import java.util.List;
 import java.util.Map;
 
 @Slf4j
-@RequiredArgsConstructor
 @Service
 public class AiEpisodicMemoryRetrieveService {
 
@@ -28,6 +28,12 @@ public class AiEpisodicMemoryRetrieveService {
     private static final double DEDUPE_SIMILARITY_THRESHOLD = 0.85;
 
     private final VectorStore vectorStore;
+
+    public AiEpisodicMemoryRetrieveService(
+            @Qualifier(AiVectorStoreConfig.MEMORY_VECTOR_STORE) VectorStore vectorStore
+    ) {
+        this.vectorStore = vectorStore;
+    }
 
     public List<EpisodicMemoryRagContext> retrieveForPrompt(Long userId,
                                                                                         String projectKey, String question){

@@ -1,12 +1,14 @@
 package com.hailin.blogsystem.ai.rag;
 
+import com.hailin.blogsystem.config.AiVectorStoreConfig;
 import com.hailin.blogsystem.config.BlogAiProperties;
+import com.hailin.blogsystem.ai.rag.index.ArticleRagIndexHealthService;
 import com.hailin.blogsystem.entity.dto.ArticleRagContext;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.Filter;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import org.springframework.ai.document.Document;
@@ -14,7 +16,6 @@ import java.util.List;
 import java.util.Map;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 //检索服务
 public class ArticleRagRetrieveService {
@@ -22,9 +23,25 @@ public class ArticleRagRetrieveService {
     private final BlogAiProperties blogAiProperties;
 
     private final VectorStore vectorStore;
+    private final ArticleRagIndexHealthService healthService;
+
+    public ArticleRagRetrieveService(
+            BlogAiProperties blogAiProperties,
+            @Qualifier(AiVectorStoreConfig.ARTICLE_RAG_VECTOR_STORE) VectorStore vectorStore,
+            ArticleRagIndexHealthService healthService
+    ) {
+        this.blogAiProperties = blogAiProperties;
+        this.vectorStore = vectorStore;
+        this.healthService = healthService;
+    }
 
     public List<ArticleRagContext> retrieve(String question){
         if (question == null || question.isBlank()) {
+            return List.of();
+        }
+        if (!healthService.denseSearchAllowed()) {
+            ArticleRagIndexHealthService.Snapshot snapshot = healthService.current();
+            log.warn("RAG dense 检索降级，indexState={}，reason={}", snapshot.state(), snapshot.reason());
             return List.of();
         }
 
@@ -78,9 +95,17 @@ public class ArticleRagRetrieveService {
 
     private Filter.Expression articleSourceFilter() {
         return new Filter.Expression(
-                Filter.ExpressionType.EQ,
-                new Filter.Key("source"),
-                new Filter.Value("article")
+                Filter.ExpressionType.AND,
+                new Filter.Expression(
+                        Filter.ExpressionType.EQ,
+                        new Filter.Key("source"),
+                        new Filter.Value("article")
+                ),
+                new Filter.Expression(
+                        Filter.ExpressionType.EQ,
+                        new Filter.Key("articleStatus"),
+                        new Filter.Value(1)
+                )
         );
     }
 
@@ -96,7 +121,9 @@ public class ArticleRagRetrieveService {
                 toLong(metadata.get("articleId")),
                 toStringValue(metadata.get("title")),
                 toInteger(metadata.get("chunkIndex")),
-                document.getText()
+                metadata.get("rawContent") == null
+                        ? document.getText()
+                        : toStringValue(metadata.get("rawContent"))
         );
     }
 

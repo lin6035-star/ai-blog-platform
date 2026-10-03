@@ -1,6 +1,7 @@
 package com.hailin.blogsystem;
 
 import com.hailin.blogsystem.ai.rag.DefaultArticleRagRanker;
+import com.hailin.blogsystem.ai.rag.ArticleRagRankResult;
 import com.hailin.blogsystem.entity.dto.ArticleRagContext;
 import org.junit.jupiter.api.Test;
 
@@ -64,5 +65,19 @@ class DefaultArticleRagRankerTests {
         assertThat(ranked)
                 .extracting(ArticleRagContext::articleId)
                 .containsExactly(22L);
+    }
+
+    @Test
+    void detailedResultMarksRuleFallbackAsRerankUnavailable() {
+        ArticleRagContext context = new ArticleRagContext(1L, "Redis", 0, "缓存");
+
+        ArticleRagRankResult result = ranker.rankWithEvidence("Redis", List.of(context));
+
+        assertThat(result.status()).isEqualTo(ArticleRagRankResult.Status.RERANK_UNAVAILABLE);
+        assertThat(result.candidates()).singleElement().satisfies(candidate -> {
+            assertThat(candidate.context()).isEqualTo(context);
+            assertThat(candidate.relevanceScore()).isNull();
+            assertThat(candidate.rank()).isEqualTo(1);
+        });
     }
 }

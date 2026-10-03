@@ -1,0 +1,23 @@
+{
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "id": { "type": "keyword" },
+      "content": { "type": "text", "analyzer": "standard" },
+      "metadata": {
+        "type": "object",
+        "dynamic": "strict",
+        "properties": {
+          "title": { "type": "text", "analyzer": "standard", "fields": { "keyword": { "type": "keyword", "ignore_above": 512 } } },
+          "headingPath": { "type": "text", "analyzer": "standard", "fields": { "keyword": { "type": "keyword", "ignore_above": 512 } } },
+          "rawContent": { "type": "text", "analyzer": "standard" },
+          "source": { "type": "text", "analyzer": "standard", "fields": { "keyword": { "type": "keyword" } } },
+          "articleId": { "type": "long" },
+          "articleStatus": { "type": "integer" },
+          "chunkIndex": { "type": "integer" }
+        }
+      },
+      "embedding": { "type": "dense_vector", "dims": 1024, "index": true, "similarity": "cosine" }
+    }
+  }
+}

@@ -1,12 +1,13 @@
 package com.hailin.blogsystem.ai.memory;
 
+import com.hailin.blogsystem.config.AiVectorStoreConfig;
 import com.hailin.blogsystem.entity.dto.MemoryRagContext;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.Filter;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -14,7 +15,6 @@ import java.util.List;
 import java.util.Map;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 //用户问问题时，不靠关键词，而是用当前问题去向量库里召回“语义相关”的记忆。并且必须带 userId 过滤，不能串用户
 public class AiMemoryRetrieveService {
@@ -24,6 +24,12 @@ public class AiMemoryRetrieveService {
     private static final double SIMILARITY_THRESHOLD = 0.50;
 
     private final VectorStore vectorStore;
+
+    public AiMemoryRetrieveService(
+            @Qualifier(AiVectorStoreConfig.MEMORY_VECTOR_STORE) VectorStore vectorStore
+    ) {
+        this.vectorStore = vectorStore;
+    }
 
     public List<MemoryRagContext> retrieve(Long userId, String question) {
         if (userId == null || question == null || question.isBlank()) {

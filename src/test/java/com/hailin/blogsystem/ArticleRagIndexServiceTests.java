@@ -14,6 +14,7 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.never;
@@ -29,8 +30,14 @@ class ArticleRagIndexServiceTests {
     private VectorStore vectorStore;
 
     @Test
+    void doesNotExposeDestructiveActiveAliasRebuildMethod() {
+        assertThatThrownBy(() -> ArticleRagIndexService.class.getDeclaredMethod("indexPublishedArticles"))
+                .isInstanceOf(NoSuchMethodException.class);
+    }
+
+    @Test
     void assignsStableDocumentIdsForArticleChunks() {
-        int indexedCount = articleRagIndexService.indexPublishedArticles();
+        int indexedCount = articleRagIndexService.indexPublishedArticles(vectorStore);
 
         assertThat(indexedCount).isGreaterThan(0);
 
@@ -98,16 +105,9 @@ class ArticleRagIndexServiceTests {
     }
 
     @Test
-    void rebuildDeletesOnlyArticleIndexesBeforeIndexingPublishedArticles() {
-        articleRagIndexService.indexPublishedArticles();
+    void isolatedCorpusWriterNeverDeletesTargetIndex() {
+        articleRagIndexService.indexPublishedArticles(vectorStore);
 
-        ArgumentCaptor<Filter.Expression> deleteCaptor = ArgumentCaptor.forClass(Filter.Expression.class);
-        verify(vectorStore).delete(deleteCaptor.capture());
-
-        Filter.Expression expression = deleteCaptor.getValue();
-
-        assertThat(expression.type()).isEqualTo(Filter.ExpressionType.EQ);
-        assertThat(expression.left()).isEqualTo(new Filter.Key("source"));
-        assertThat(expression.right()).isEqualTo(new Filter.Value("article"));
+        verify(vectorStore, never()).delete(any(Filter.Expression.class));
     }
 }

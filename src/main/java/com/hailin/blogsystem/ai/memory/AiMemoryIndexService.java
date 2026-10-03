@@ -1,20 +1,26 @@
 package com.hailin.blogsystem.ai.memory;
 
+import com.hailin.blogsystem.config.AiVectorStoreConfig;
 import com.hailin.blogsystem.entity.AiUserMemories;
-import lombok.RequiredArgsConstructor;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.Filter;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 
 @Service
-@RequiredArgsConstructor
 //MySQL 还是正式记忆主库，但每条正式记忆会同步写一份到 VectorStore，用来做语义召回
 public class AiMemoryIndexService {
 
     private final VectorStore vectorStore;
+
+    public AiMemoryIndexService(
+            @Qualifier(AiVectorStoreConfig.MEMORY_VECTOR_STORE) VectorStore vectorStore
+    ) {
+        this.vectorStore = vectorStore;
+    }
 
     public void indexMemory(AiUserMemories memory){
         if (memory == null || memory.getId() == null || memory.getUserId() == null) {

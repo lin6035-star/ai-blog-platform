@@ -74,11 +74,23 @@ public class BlogAiProperties {
 
     @Data
     public static class Rag {
-        private int topK = 3;
-        private double similarityThreshold = 0.65;
+        private int topK = 10;
+        private double similarityThreshold = 0.55;
+        private Corpus corpus = new Corpus();
         private Async async = new Async();
         private Rebuild rebuild = new Rebuild();
         private Rerank rerank = new Rerank();
+        private Gate gate = new Gate();
+        private Health health = new Health();
+    }
+
+    @Data
+    public static class Corpus {
+        private String articleIndexName = "spring-ai-document-index";
+        private String memoryIndexName = "spring-ai-document-index";
+        private String embeddingModel = "qwen3.7-text-embedding";
+        private int dimensions = 1024;
+        private boolean initializeSchema = true;
     }
 
     @Data
@@ -88,6 +100,19 @@ public class BlogAiProperties {
         private String workspaceId;
         private int topN = 5;
         private int maxDocuments = 30;
+    }
+
+    @Data
+    public static class Gate {
+        private boolean enabled = true;
+        private double rerankThreshold = 0.75D;
+    }
+
+    @Data
+    public static class Health {
+        private double canaryThreshold = 0.9D;
+        private long initialDelayMs = 10_000L;
+        private long intervalMs = 300_000L;
     }
 
     @Data

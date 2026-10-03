@@ -1,21 +1,27 @@
 package com.hailin.blogsystem.ai.memory;
 
+import com.hailin.blogsystem.config.AiVectorStoreConfig;
 import com.hailin.blogsystem.entity.AiEpisodicMemories;
-import lombok.RequiredArgsConstructor;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.Filter;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 
 @Service
-@RequiredArgsConstructor
 public class AiEpisodicMemoryIndexService {
 
     public static final String SOURCE_EPISODIC_MEMORY = "episodic_memory";
 
     private final VectorStore vectorStore;
+
+    public AiEpisodicMemoryIndexService(
+            @Qualifier(AiVectorStoreConfig.MEMORY_VECTOR_STORE) VectorStore vectorStore
+    ) {
+        this.vectorStore = vectorStore;
+    }
 
     public void indexMemory(AiEpisodicMemories memory){
         if (memory == null || memory.getId() == null || memory.getUserId() == null) {

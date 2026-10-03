@@ -28,7 +28,7 @@ class ArticleRagIndexIntegrationTests {
     @Test
     @Disabled("手动冒烟测试：连接真实 ES，会清除开发环境 source=article 的所有索引并写入 H2 测试数据。仅手动运行时取消注释。")
     void indexesPublishedArticlesAndSearchesThemFromVectorStore() {
-        int indexedCount = articleRagIndexService.indexPublishedArticles();
+        int indexedCount = articleRagIndexService.indexPublishedArticles(vectorStore);
 
         assertThat(indexedCount).isGreaterThan(0);
 

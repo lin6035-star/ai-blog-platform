@@ -2,12 +2,13 @@ package com.hailin.blogsystem.ai.rag;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.hailin.blogsystem.constants.BlogConstants;
+import com.hailin.blogsystem.config.AiVectorStoreConfig;
 import com.hailin.blogsystem.entity.Articles;
 import com.hailin.blogsystem.mapper.ArticlesMapper;
-import lombok.RequiredArgsConstructor;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.Filter;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -21,7 +22,6 @@ import java.util.List;
 * */
 
 @Service
-@RequiredArgsConstructor
 //索引服务
 //ArticleRagIndexService = 真正干活：切片、embedding、写 ES
 //ArticleRagSyncService = 调度入口：现在用 @Async，以后换 MQ
@@ -36,42 +36,42 @@ public class ArticleRagIndexService {
     private final ArticleRagChunker articleRagChunker;
     private final VectorStore vectorStore;
 
-    public int indexPublishedArticles(){
+    public ArticleRagIndexService(
+            ArticlesMapper articlesMapper,
+            ArticleRagChunker articleRagChunker,
+            @Qualifier(AiVectorStoreConfig.ARTICLE_RAG_VECTOR_STORE) VectorStore vectorStore
+    ) {
+        this.articlesMapper = articlesMapper;
+        this.articleRagChunker = articleRagChunker;
+        this.vectorStore = vectorStore;
+    }
 
-        //让全量 rebuild 变成真正的“重建”。
-        //如果某篇文章以前进过 ES
-        //后来被删除 / 隐藏
-        //或者文章变短，chunk 数减少
-        //全量 rebuild 不一定清掉旧 chunk
-        //所以 POST /api/ai/rag/articles/rebuild 更合理的语义应该是：
-        //先删除 ES 里所有 source=article 的旧文档
-        //再把当前 MySQL 里已发布文章重新写进去
-        deleteAllArticleIndexes();
+    /**
+     * 将当前已发布文章写入指定 corpus，不执行删除操作。
+     * 供隔离重建使用，调用方负责在校验通过后切换 alias。
+     */
+    public int indexPublishedArticles(VectorStore targetVectorStore) {
+        if (targetVectorStore == null) {
+            throw new IllegalArgumentException("targetVectorStore 不能为空");
+        }
 
-        //查出已发布文章
         List<Articles> articles = articlesMapper.selectList(
                 Wrappers.lambdaQuery(Articles.class)
                         .select(
                                 Articles::getId,
                                 Articles::getTitle,
                                 Articles::getSummary,
-                                Articles::getContent
+                                Articles::getContent,
+                                Articles::getStatus
                         )
                         .eq(Articles::getStatus, BlogConstants.ArticlesStatus.PUBLISHED)
         );
 
         List<Document> documents = new ArrayList<>();
-
-        //每篇文章切块
-        for(Articles article : articles){
+        for (Articles article : articles) {
             documents.addAll(buildArticleDocuments(article));
         }
-
-        //批量写入向量数据库
-        //vectorStore.add(documents) 会自动调 Embedding 模型把文本转成向量，然后存进 ES
-        //注意：DashScope Embedding 单次请求上限 10 条，需分批
-        addDocumentsInBatches(documents);
-
+        addDocumentsInBatches(targetVectorStore, documents);
         return documents.size();
     }
 
@@ -124,24 +124,19 @@ public class ArticleRagIndexService {
     }
 
     private void addDocumentsInBatches(List<Document> documents) {
+        addDocumentsInBatches(vectorStore, documents);
+    }
+
+    private void addDocumentsInBatches(VectorStore targetVectorStore, List<Document> documents) {
         if (documents.isEmpty()) {
             return;
         }
 
         for (int i = 0; i < documents.size(); i += EMBEDDING_BATCH_SIZE) {
             int end = Math.min(i + EMBEDDING_BATCH_SIZE, documents.size());
-            vectorStore.add(documents.subList(i, end));
+            targetVectorStore.add(documents.subList(i, end));
         }
     }
-
-    public void deleteAllArticleIndexes(){
-        vectorStore.delete(new Filter.Expression(
-                Filter.ExpressionType.EQ,
-                new Filter.Key("source"),
-                new Filter.Value("article")
-        ));
-    }
-
 
     private List<Document> buildArticleDocuments(Articles article){
         //给每个文章切块
@@ -161,6 +156,9 @@ public class ArticleRagIndexService {
                     .metadata("source","article")  //来源标记
                     .metadata("articleId",article.getId())
                     .metadata("title",article.getTitle())
+                    .metadata("headingPath", "")
+                    .metadata("rawContent", chunks.get(i))
+                    .metadata("articleStatus", BlogConstants.ArticlesStatus.PUBLISHED)
                     .metadata("chunkIndex",i)  //第几个片段
                     .build();
 

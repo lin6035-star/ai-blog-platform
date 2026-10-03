@@ -1,6 +1,8 @@
 package com.hailin.blogsystem.ai.rag;
 
 import com.hailin.blogsystem.constants.RedisConstants;
+import com.hailin.blogsystem.ai.rag.index.ArticleRagIndexHealthService;
+import com.hailin.blogsystem.ai.rag.index.ArticleRagRebuildService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import com.hailin.blogsystem.component.RedisKeyScanner;
@@ -8,6 +10,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.function.Supplier;
 
 @Slf4j
@@ -47,11 +50,17 @@ public class ArticleRagSyncService {
     private final StringRedisTemplate stringRedisTemplate;
     private final RedisKeyScanner redisKeyScanner;
     private final RagRetryQueue ragRetryQueue;
+    private final ArticleRagRebuildService articleRagRebuildService;
+    private final ArticleRagIndexHealthService healthService;
 
     @Async("articleRagTaskExecutor")
     public void indexArticle(Long articleId){
 
         log.info("文章 RAG 异步索引开始，articleId={}", articleId);
+
+        if (deferIncrementalWriteWhenUnhealthy("index", articleId, 0)) {
+            return;
+        }
 
         try{
             int indexedChunkCount = executeWithRetry("索引", "index", articleId, 0,
@@ -68,6 +77,8 @@ public class ArticleRagSyncService {
     public void deleteArticleIndex(Long articleId){
 
         log.info("文章 RAG 异步索引删除开始，articleId={}", articleId);
+        ArticleRagIndexHealthService.Snapshot healthBeforeDelete = healthService.current();
+        boolean rebuilding = healthBeforeDelete.state() == ArticleRagIndexHealthService.State.REBUILDING;
 
         try{
             executeWithRetry("删除", "delete", articleId, 0,
@@ -75,7 +86,11 @@ public class ArticleRagSyncService {
                         articleRagIndexService.deleteArticleIndex(articleId);
                         return 0;
                     });
-            clearFailureMark("delete", articleId);
+            if (rebuilding) {
+                deferAction("delete", articleId, 0, healthBeforeDelete);
+            } else {
+                clearFailureMark("delete", articleId);
+            }
             log.info("文章 RAG 异步索引删除成功，articleId={}", articleId);
         }
         catch (Exception e) {
@@ -87,11 +102,12 @@ public class ArticleRagSyncService {
     public void rebuildPublishedArticles(){
 
         log.info("文章 RAG 全量重建开始");
+        List<String> coveredFailureKeys = snapshotFailureMarks();
 
         try{
             int indexedChunkCount = executeWithRetry("全量重建", "rebuild", null, 0,
-                    articleRagIndexService::indexPublishedArticles);
-            clearAllFailureMarks();
+                    this::rebuildInIsolation);
+            clearFailureMarks(coveredFailureKeys);
             log.info("文章 RAG 全量重建成功，indexedChunkCount={}", indexedChunkCount);
         }
         catch (Exception e) {
@@ -111,8 +127,22 @@ public class ArticleRagSyncService {
     public void retryFromQueue(RagRetryQueue.Task task) {
         String actionKey = task.actionKey();
         Long articleId = task.articleId();
+        List<String> coveredFailureKeys = "rebuild".equals(actionKey)
+                ? snapshotFailureMarks()
+                : List.of();
 
         log.info("RAG 队列重试第 {} 次开始: action={} articleId={}", task.attempt(), actionKey, articleId);
+
+        if ("index".equals(actionKey)
+                && deferIncrementalWriteWhenUnhealthy(actionKey, articleId, task.attempt())) {
+            return;
+        }
+        ArticleRagIndexHealthService.Snapshot currentHealth = healthService.current();
+        if ("delete".equals(actionKey)
+                && currentHealth.state() == ArticleRagIndexHealthService.State.REBUILDING) {
+            deferAction(actionKey, articleId, task.attempt(), currentHealth);
+            return;
+        }
 
         try {
             switch (actionKey) {
@@ -124,7 +154,7 @@ public class ArticleRagSyncService {
                             return 0;
                         });
                 case "rebuild" -> executeWithRetry("全量重建", "rebuild", null, task.attempt(),
-                        articleRagIndexService::indexPublishedArticles);
+                        this::rebuildInIsolation);
                 default -> {
                     log.warn("未知的 RAG 重试动作，跳过: {}", actionKey);
                     return;
@@ -133,7 +163,7 @@ public class ArticleRagSyncService {
 
             // 成功：清掉墓碑标记（重建已覆盖全量，清所有标记）
             if ("rebuild".equals(actionKey)) {
-                clearAllFailureMarks();
+                clearFailureMarks(coveredFailureKeys);
             } else {
                 clearFailureMark(actionKey, articleId);
             }
@@ -167,6 +197,38 @@ public class ArticleRagSyncService {
                 sleepBackoff(attempt);
             }
         }
+    }
+
+    private int rebuildInIsolation() {
+        try {
+            return articleRagRebuildService.rebuild().chunkCount();
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException("隔离重建文章 RAG 索引失败", e);
+        }
+    }
+
+    private boolean deferIncrementalWriteWhenUnhealthy(String actionKey, Long articleId, int queueAttempt) {
+        if (healthService.incrementalWritesAllowed()) {
+            return false;
+        }
+
+        ArticleRagIndexHealthService.Snapshot snapshot = healthService.current();
+        deferAction(actionKey, articleId, queueAttempt, snapshot);
+        return true;
+    }
+
+    private void deferAction(
+            String actionKey,
+            Long articleId,
+            int queueAttempt,
+            ArticleRagIndexHealthService.Snapshot snapshot
+    ) {
+        IllegalStateException rejected = new IllegalStateException(
+                "索引健康状态=" + snapshot.state() + "，拒绝局部写入: " + snapshot.reason()
+        );
+        markFailure(actionKey, articleId, queueAttempt, rejected);
+        log.error("文章 RAG 局部写入已延期，action={} articleId={} state={} reason={}",
+                actionKey, articleId, snapshot.state(), snapshot.reason());
     }
 
     private void sleepBackoff(int attempt) {
@@ -236,10 +298,16 @@ public class ArticleRagSyncService {
         stringRedisTemplate.delete(buildFailureKey(actionKey, articleId));
     }
 
-    /** 全量重建成功后清空所有失败标记（重建已覆盖旧的失败同步结果） */
-    private void clearAllFailureMarks() {
-        // SCAN 游标迭代 + UNLINK：原 KEYS 会阻塞 Redis 服务端单线程
-        redisKeyScanner.scanAndDelete(RedisConstants.RAG_INDEX_FAILURE_KEY_PREFIX + "*");
+    private List<String> snapshotFailureMarks() {
+        return redisKeyScanner.scan(RedisConstants.RAG_INDEX_FAILURE_KEY_PREFIX + "*");
+    }
+
+    /** 只清理重建开始前已存在的失败标记，保留重建期间新产生的待补记录。 */
+    private void clearFailureMarks(List<String> coveredFailureKeys) {
+        if (coveredFailureKeys == null || coveredFailureKeys.isEmpty()) {
+            return;
+        }
+        stringRedisTemplate.unlink(coveredFailureKeys);
     }
 
     private String buildFailureKey(String actionKey, Long articleId) {
