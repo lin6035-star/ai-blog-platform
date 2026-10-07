@@ -21,6 +21,14 @@ public class ArticleRagIndexHealthService {
             new Snapshot(State.SUSPECT, "尚未完成首次 canary 巡检", null, Instant.now(), null)
     );
 
+    /**
+     * 重建开始前的读取许可。
+     *
+     * <p>{@code REBUILDING} 必须**继承**它，不能无条件放行：从 {@code UNHEALTHY} 发起重建时，
+     * active alias 在切换前仍指向那个已确认漂移的索引，此时放开读取等于把漂移向量重新当作证据。
+     */
+    private final AtomicReference<Boolean> readAllowedBeforeRebuild = new AtomicReference<>(false);
+
     public ArticleRagIndexHealthService(
             @Qualifier(AiVectorStoreConfig.ARTICLE_RAG_VECTOR_STORE) VectorStore vectorStore,
             ArticleRagCanary canary
@@ -30,7 +38,10 @@ public class ArticleRagIndexHealthService {
     }
 
     @Scheduled(
-            initialDelayString = "${blog.ai.rag.health.initial-delay-ms:10000}",
+            // 首次巡检尽量早：SUSPECT 期间 dense 不放行，延迟直接等于"启动后语义召回不可用"的窗口。
+            // 取 1s 而不是 0：给 ES / embedding 客户端一点预热余量——首次探测若因瞬时未就绪而失败，
+            // 会被判成 UNHEALTHY 并熔断整整一个 interval（5 分钟），代价远大于多等 1 秒。
+            initialDelayString = "${blog.ai.rag.health.initial-delay-ms:1000}",
             fixedDelayString = "${blog.ai.rag.health.interval-ms:300000}"
     )
     public void inspect() {
@@ -59,23 +70,31 @@ public class ArticleRagIndexHealthService {
     }
 
     /**
-     * 检索放行判定。**与写入判定不是同一个问题**，因此分开：
+     * 检索放行判定。**与写入判定不是同一个问题**，因此分开；策略是「只有已知健康才放行」：
      *
      * <ul>
-     *   <li>{@code UNHEALTHY}：canary 已判定 embedding 空间漂移 → dense 结果不可作为证据，熔断；</li>
-     *   <li>{@code SUSPECT}：只是"尚未完成首次巡检"，不等于索引坏了 → **放行**。
-     *       若这里也熔断，每次启动都会在 {@code blog.ai.rag.health.initial-delay-ms}
-     *       窗口内出现"站内语义召回全空"，表现为 RAG 突然失效；</li>
-     *   <li>{@code REBUILDING}：新索引在旁路构建，active alias 仍指向可用索引 → **放行**；</li>
-     *   <li>{@code HEALTHY}：放行。</li>
+     *   <li>{@code HEALTHY}：放行；</li>
+     *   <li>{@code SUSPECT}（尚未完成首次巡检）：**不放行**。停机期间 embedding 服务可能已变化，
+     *       "还没巡检"不等于"索引健康"，不能拿未经验证的向量当回答证据；</li>
+     *   <li>{@code UNHEALTHY}（canary 已判定空间漂移）：不放行；</li>
+     *   <li>{@code REBUILDING}：**继承重建前的许可**——重建前健康才放行，
+     *       从 {@code UNHEALTHY} 起步的重建全程保持熔断，直到新索引通过 canary 切换完成。</li>
      * </ul>
+     *
+     * <p>为把 {@code SUSPECT} 的代价压到最小，首次巡检延迟已从 10s 降到 1s
+     * （{@code blog.ai.rag.health.initial-delay-ms}），启动窗口只剩一次 canary 探测的时间。
      */
     public boolean denseSearchAllowed() {
-        return current.get().state() != State.UNHEALTHY;
+        State state = current.get().state();
+        if (state == State.REBUILDING) {
+            return Boolean.TRUE.equals(readAllowedBeforeRebuild.get());
+        }
+        return state == State.HEALTHY;
     }
 
     public Snapshot beginRebuild() {
         Snapshot previous = current.get();
+        readAllowedBeforeRebuild.set(previous.state() == State.HEALTHY);
         current.set(new Snapshot(State.REBUILDING, "隔离索引正在构建", null, Instant.now(), null));
         return previous;
     }

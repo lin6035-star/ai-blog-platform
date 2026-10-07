@@ -4,6 +4,7 @@ import com.hailin.blogsystem.ai.agent.AgentCompletionKind;
 import com.hailin.blogsystem.ai.agent.AgentRunResult;
 import com.hailin.blogsystem.ai.agent.AgentStepEmitter;
 import com.hailin.blogsystem.ai.agent.ArticleAgentRuntime;
+import com.hailin.blogsystem.ai.rag.ArticleRagPromptBuilder;
 import com.hailin.blogsystem.ai.task.executor.ArticleAnalysisExecutor;
 import com.hailin.blogsystem.entity.dto.AiAgentRunStatus;
 import org.junit.jupiter.api.BeforeEach;
@@ -44,7 +45,7 @@ class ArticleAnalysisExecutorTests {
     @BeforeEach
     void setUp() {
         runtime = mock(ArticleAgentRuntime.class);
-        executor = new ArticleAnalysisExecutor(runtime);
+        executor = new ArticleAnalysisExecutor(runtime, new ArticleRagPromptBuilder());
     }
 
     // ==================== §13.4 映射表 ====================
@@ -181,15 +182,19 @@ class ArticleAnalysisExecutorTests {
                 .thenAnswer(invocation -> {
                     AgentStepEmitter emitter = invocation.getArgument(4);
                     emitter.emit(1, "QUERY_ARTICLE", "SUCCESS", "已读文章", null);
+                    assertThat(emitter.emitAnswerChunk("内部正文"))
+                            .as("任务编排子 run 必须缓冲正文，不能直接混入外层 DATA")
+                            .isFalse();
                     emitter.emit(2, "FINAL_ANSWER", "SUCCESS", "已作答", "想想");
                     return completed(AgentCompletionKind.ANSWER, "答案");
                 });
 
-        executor.execute(context(sink), step());
+        StepResult result = executor.execute(context(sink), step());
 
         assertThat(emitted).containsExactly(
                 "s1|1|QUERY_ARTICLE|SUCCESS",
                 "s1|2|FINAL_ANSWER|SUCCESS");
+        assertThat(result.summary()).isEqualTo("答案");
     }
 
     @Test
@@ -243,16 +248,62 @@ class ArticleAnalysisExecutorTests {
                 "articles", List.of(Map.of(
                         "articleId", "12",
                         "title", "Redis 缓存工程化实践",
-                        "summary", "介绍缓存一致性与延迟双删")))));
+                        "summary", "旧摘要不应覆盖正文证据")),
+                "ragContexts", List.of(
+                        Map.of(
+                                "articleId", "12",
+                                "title", "Redis 缓存工程化实践",
+                                "chunkIndex", 2,
+                                "content", "缓存一致性部分比较旁路缓存、延迟双删和订阅 Binlog 三种方案。"),
+                        Map.of(
+                                "articleId", "12",
+                                "title", "Redis 缓存工程化实践",
+                                "chunkIndex", 4,
+                                "content", "缓存击穿部分比较互斥锁、逻辑过期和热点预热的适用边界。")))));
 
         executor.execute(context, comparison);
 
         assertThat(capturedGoals).hasSize(1);
         assertThat(capturedGoals.get(0))
+                .contains("## 站内文章知识库检索结果")
+                .contains("检索命中片段数：2")
+                .contains("### 来源 [1]")
+                .contains("片段序号：2")
+                .contains("缓存一致性部分比较旁路缓存、延迟双删和订阅 Binlog 三种方案。")
+                .contains("### 来源 [2]")
+                .contains("片段序号：4")
+                .contains("缓存击穿部分比较互斥锁、逻辑过期和热点预热的适用边界。")
+                .doesNotContain("旧摘要不应覆盖正文证据");
+    }
+
+    @Test
+    @DisplayName("历史 Task 没有 ragContexts 时仍能使用旧 articles 摘要")
+    void comparisonFallsBackToLegacyArticleSummary() {
+        List<String> capturedGoals = new ArrayList<>();
+        when(runtime.runAnalysisOnly(any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    capturedGoals.add(invocation.getArgument(2));
+                    return completed(AgentCompletionKind.ANSWER, "答案");
+                });
+
+        TaskStep search = new TaskStep("s0", StepType.ARTICLE_SEARCH, Map.of("query", "Redis"),
+                StepDependency.none(), List.of("搜一下 Redis 相关文章"));
+        TaskStep comparison = new TaskStep("s1", StepType.ARTICLE_ANALYSIS, Map.of(),
+                StepDependency.requires("s0"), List.of("比较各篇文章"));
+        TaskPlan plan = new TaskPlan("搜一下 Redis 相关文章，并比较各篇文章",
+                List.of(search, comparison), List.of(), List.of());
+        TaskExecutionContext context = new TaskExecutionContext(100L, 200L, null, plan, 999L, null);
+        context.record(StepResult.applied("s0", "找到 1 篇 Redis 文章", Map.of(
+                "articles", List.of(Map.of(
+                        "articleId", "12",
+                        "title", "Redis 缓存工程化实践",
+                        "summary", "历史任务保存的文章摘要")))));
+
+        executor.execute(context, comparison);
+
+        assertThat(capturedGoals).singleElement().asString()
                 .contains("【搜索结果证据】")
-                .contains("《Redis 缓存工程化实践》(12)")
-                .contains("介绍缓存一致性与延迟双删")
-                .contains("只基于以上证据比较");
+                .contains("历史任务保存的文章摘要");
     }
 
     // ==================== helpers ====================

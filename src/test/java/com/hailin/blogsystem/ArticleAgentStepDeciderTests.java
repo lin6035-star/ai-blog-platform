@@ -11,11 +11,16 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.openai.api.ResponseFormat;
+import org.mockito.ArgumentCaptor;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -76,6 +81,21 @@ class ArticleAgentStepDeciderTests {
     }
 
     @Test
+    void decisionCallsUseJsonObjectResponseFormat() {
+        when(callSpec.chatResponse()).thenAnswer(inv -> textResponse(
+                "{\"actionType\":\"FINAL_ANSWER\",\"input\":{\"answerPlan\":\"结论\"}}"
+        ));
+
+        decider.decide("分析文章", "正文证据", 1, 5, null);
+
+        ArgumentCaptor<OpenAiChatOptions> options = ArgumentCaptor.forClass(OpenAiChatOptions.class);
+        verify(requestSpec).options(options.capture());
+        assertThat(options.getValue().getResponseFormat()).isNotNull();
+        assertThat(options.getValue().getResponseFormat().getType())
+                .isEqualTo(ResponseFormat.Type.JSON_OBJECT);
+    }
+
+    @Test
     void parsesSuggestWorkflowDecisionWithOptimizeArticle() {
         when(callSpec.chatResponse()).thenAnswer(inv -> textResponse(
                 "{\"actionType\":\"SUGGEST_WORKFLOW\",\"input\":{\"workflowType\":\"OPTIMIZE_ARTICLE\",\"reason\":\"缺少小标题\"}}"
@@ -106,12 +126,39 @@ class ArticleAgentStepDeciderTests {
     void repairsOnceWhenFirstOutputIsInvalidJson() {
         when(callSpec.chatResponse())
                 .thenAnswer(inv -> textResponse("我不是 JSON"))
-                .thenAnswer(inv -> textResponse("{\"actionType\":\"FINAL_ANSWER\",\"input\":{\"answer\":\"建议补充小标题\"}}"));
+                .thenAnswer(inv -> textResponse("{\"actionType\":\"FINAL_ANSWER\",\"input\":{\"answerPlan\":\"建议补充小标题\"}}"));
 
         AgentStepDecision decision = decider.decide("帮我看看这篇文章", "", 1, 5, null);
 
         assertThat(decision).isNotNull();
         assertThat(decision.actionType()).isEqualTo(AgentStepActionType.FINAL_ANSWER);
+    }
+
+    @Test
+    void repairsOnceWhenFinalAnswerMissesAnswerPlan() {
+        when(callSpec.chatResponse())
+                .thenAnswer(inv -> textResponse("{\"actionType\":\"FINAL_ANSWER\",\"input\":{\"answer\":\"旧协议正文\"}}"))
+                .thenAnswer(inv -> textResponse("{\"actionType\":\"FINAL_ANSWER\",\"input\":{\"answerPlan\":\"结论：结构清晰\"}}"));
+
+        AgentStepDecision decision = decider.decide("分析文章", "当前文章分析：三节", 2, 6, null);
+
+        assertThat(decision).isNotNull();
+        assertThat(decision.input()).containsEntry("answerPlan", "结论：结构清晰");
+        verify(callSpec, times(2)).chatResponse();
+    }
+
+    @Test
+    void trimsAnswerPlanToHardLimit() {
+        String oversized = "要".repeat(1300);
+        when(callSpec.chatResponse()).thenAnswer(inv -> textResponse(
+                "{\"actionType\":\"FINAL_ANSWER\",\"input\":{\"answerPlan\":\"" + oversized + "\"}}"
+        ));
+
+        AgentStepDecision decision = decider.decide("分析文章", "当前文章分析：三节", 2, 6, null);
+
+        assertThat(decision).isNotNull();
+        assertThat(String.valueOf(decision.input().get("answerPlan"))).hasSize(1200);
+        verify(callSpec, times(1)).chatResponse();
     }
 
     @Test

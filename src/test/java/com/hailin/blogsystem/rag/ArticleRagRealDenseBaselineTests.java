@@ -28,10 +28,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 同源文章索引的无 Gate dense 基线。默认跳过，显式传
- * -DrunRealRagBaseline=true 才会调用真实 embedding 和 ES。
+ * -DrunRealRagBaseline=true 才会调用真实 embedding 和 ES；
+ * -Drag.eval.index=物理索引名 可用于旁路候选 A/B。
  */
 @SpringBootTest(properties = {
-        "blog.ai.rag.corpus.article-index-name=article_rag_active",
+        "blog.ai.rag.corpus.article-index-name=${rag.eval.index:article_rag_active}",
         "blog.ai.rag.corpus.memory-index-name=spring-ai-document-index",
         "blog.ai.rag.corpus.initialize-schema=false"
 })

@@ -9,11 +9,13 @@ import com.hailin.blogsystem.ai.agent.AgentStepDecision;
 import com.hailin.blogsystem.ai.agent.AgentStepEmitter;
 import com.hailin.blogsystem.ai.agent.AgentStepLabelSupport;
 import com.hailin.blogsystem.ai.agent.ArticleAgentActionExecutor;
+import com.hailin.blogsystem.ai.agent.ArticleAnswerGenerator;
 import com.hailin.blogsystem.ai.agent.ArticleAgentRuntime;
 import com.hailin.blogsystem.ai.agent.ArticleAnalysisStepDecider;
 import com.hailin.blogsystem.ai.agent.ArticleAgentStepDecider;
 import com.hailin.blogsystem.ai.agent.ArticleEvidenceVerifier;
 import com.hailin.blogsystem.ai.agent.ArticleSessionAnchorService;
+import com.hailin.blogsystem.ai.agent.GeneratedAnswer;
 import com.hailin.blogsystem.ai.agent.AgentWriteProposal;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.AiAgentStep;
@@ -37,6 +39,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -56,6 +59,7 @@ class ArticleAgentRuntimeTests {
     private AiAgentStepMapper stepMapper;
     private ArticlesService articlesService;
     private ArticleSessionAnchorService anchorService;
+    private ArticleAnswerGenerator answerGenerator;
     private ArticleAgentRuntime runtime;
 
     private static PageContextDTO articleContext(String articleId) {
@@ -87,6 +91,7 @@ class ArticleAgentRuntimeTests {
         stepMapper = mock(AiAgentStepMapper.class);
         articlesService = mock(ArticlesService.class);
         anchorService = mock(ArticleSessionAnchorService.class);
+        answerGenerator = mock(ArticleAnswerGenerator.class);
 
         // MyBatis-Plus ASSIGN_ID 在 mock 下不生效，insert 时手动赋 id
         when(runMapper.insert(any(AiAgentRun.class))).thenAnswer(inv -> {
@@ -97,11 +102,17 @@ class ArticleAgentRuntimeTests {
 
         // V3.13：计划落库按影响行数=1 判定成功，默认按命中
         when(runMapper.update(any(), any())).thenReturn(1);
+        when(answerGenerator.generate(any(), any(), any(), any())).thenAnswer(inv -> {
+            AgentStepDecision decision = inv.getArgument(1);
+            Object text = decision.input().getOrDefault("answerPlan",
+                    decision.input().getOrDefault("answer", decision.input().getOrDefault("message", "")));
+            return new GeneratedAnswer(String.valueOf(text), new TokenUsageAccumulator(), false);
+        });
 
         // V3.11：mock 验证器默认返回 null = 不走收敛门（锁「默认不验证 = 原路径」回归）
         runtime = new ArticleAgentRuntime(
                 decider, analysisDecider, executor, runMapper, stepMapper, new ObjectMapper(),
-                articlesService, anchorService, mock(ArticleEvidenceVerifier.class)
+                articlesService, anchorService, mock(ArticleEvidenceVerifier.class), answerGenerator
         );
     }
 
@@ -429,14 +440,16 @@ class ArticleAgentRuntimeTests {
                 articleContext("12"), (stepNo, actionType, status, message, thoughtSummary) ->
                         events.add(new String[]{String.valueOf(stepNo), actionType, status, message}));
 
-        assertThat(events).hasSize(3);
+        assertThat(events).hasSize(4);
         assertThat(events.get(0)[1]).isEqualTo("QUERY_ARTICLE");
         assertThat(events.get(0)[2]).isEqualTo("RUNNING");
         assertThat(events.get(1)[2]).isEqualTo("SUCCESS");
         assertThat(events.get(2)[1]).isEqualTo("FINAL_ANSWER");
-        assertThat(events.get(2)[2]).isEqualTo("SUCCESS");
+        assertThat(events.get(2)[2]).isEqualTo("RUNNING");
+        assertThat(events.get(3)[1]).isEqualTo("FINAL_ANSWER");
+        assertThat(events.get(3)[2]).isEqualTo("SUCCESS");
         // 文章域 FINAL_ANSWER 文案
-        assertThat(events.get(2)[3]).isEqualTo("已生成最终回答");
+        assertThat(events.get(3)[3]).isEqualTo("已生成最终回答");
     }
 
     @Test
@@ -896,6 +909,10 @@ class ArticleAgentRuntimeTests {
     void tokensAreAccumulatedIntoRunAndStep() {
         Usage firstStepUsage = mockUsage(100, 10, 110);
         Usage secondStepUsage = mockUsage(200, 20, 220);
+        TokenUsageAccumulator generatorUsage = new TokenUsageAccumulator();
+        generatorUsage.add(mockUsage(30, 20, 50));
+        doReturn(new GeneratedAnswer("看完了", generatorUsage, false))
+                .when(answerGenerator).generate(any(), any(), any(), any());
 
         when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
                 .thenAnswer(inv -> {
@@ -915,21 +932,21 @@ class ArticleAgentRuntimeTests {
 
         assertThat(result.totalTokens())
                 .as("AgentRunResult 要带回 run 的 token——聊天链路拿它写 ai_messages.token_count")
-                .isEqualTo(330);
+                .isEqualTo(380);
 
         // run 级 = 各步之和
         AiAgentRun saved = captureRun();
-        assertThat(saved.getTotalTokens()).isEqualTo(330);
-        assertThat(saved.getInputTokens()).isEqualTo(300);
-        assertThat(saved.getOutputTokens()).isEqualTo(30);
+        assertThat(saved.getTotalTokens()).isEqualTo(380);
+        assertThat(saved.getInputTokens()).isEqualTo(330);
+        assertThat(saved.getOutputTokens()).isEqualTo(50);
 
         // step 级 = 各步自己的用量
         List<AiAgentStep> steps = captureSteps();
         assertThat(steps).hasSize(2);
         assertThat(steps.get(0).getInputTokens()).isEqualTo(100);
         assertThat(steps.get(0).getOutputTokens()).isEqualTo(10);
-        assertThat(steps.get(1).getInputTokens()).isEqualTo(200);
-        assertThat(steps.get(1).getOutputTokens()).isEqualTo(20);
+        assertThat(steps.get(1).getInputTokens()).isEqualTo(230);
+        assertThat(steps.get(1).getOutputTokens()).isEqualTo(40);
     }
 
     /**

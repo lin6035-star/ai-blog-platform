@@ -99,7 +99,7 @@ final class ArticleDeciderPrompts {
 
     private static final String ACT_FINAL_ANSWER = """
             - FINAL_ANSWER：给出最终分析结论或优化建议（终态）。
-              input.answer = 完整的回答文本（中文）
+              input.answerPlan = 单个字符串，写 1-5 条简短的拟回答要点（用分号分隔，总计不超过 500 字，禁止展开成完整正文）
             """;
 
     /** 仅 FULL */
@@ -312,6 +312,7 @@ final class ArticleDeciderPrompts {
                 如仍是首次决策且用户请求包含多个子目标，保留合法的 "plan"（2-4 条用户可读的目标描述）；否则省略该字段。
                 actionType 只能是：%s。
                 如需定位文章可带顶层 "anchorMode"："CURRENT_PAGE"（当前页这篇，缺省值）或 "SESSION_LAST"（本会话最近聊过的那篇）。
+                FINAL_ANSWER 必须带非空 input.answerPlan（单个字符串，1-5 条简短要点，总计不超过 500 字），禁止使用 input.answer。
                 禁止输出 markdown、代码块或任何解释文字。
                 """.formatted(actions);
     }

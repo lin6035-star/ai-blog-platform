@@ -12,6 +12,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.openai.api.ResponseFormat;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -51,21 +52,36 @@ public class LlmAgentStepDecider implements AgentStepDecider {
     ) {
         // 主调用
         String json = callDecide(goal, clippedContext, stepNo, maxSteps, false, usage);
-        AgentStepDecision decision = parseDecision(json);
+        AgentStepDecision decision = normalizeAndValidate(parseDecision(json));
         if (decision != null) {
             return decision;
         }
 
         // 修复一次
         String repaired = callDecide(goal, clippedContext, stepNo, maxSteps, true, usage);
-        decision = parseDecision(repaired);
+        decision = normalizeAndValidate(parseDecision(repaired));
         if (decision != null) {
             log.info("Agent 决策 JSON 修复成功");
             return decision;
         }
 
-        log.warn("Agent 决策 JSON 两次解析均失败，goal={}", truncate(goal, 100));
+        log.warn("Agent 决策 JSON 两次解析均失败");
         return null;
+    }
+
+    private AgentStepDecision normalizeAndValidate(AgentStepDecision decision) {
+        AgentStepDecision normalized = normalizeDecision(decision);
+        return normalized != null && isDecisionShapeValid(normalized) ? normalized : null;
+    }
+
+    /** 领域可覆写的规范化钩子；默认透传，保持现有领域协议不变。 */
+    protected AgentStepDecision normalizeDecision(AgentStepDecision decision) {
+        return decision;
+    }
+
+    /** 领域可覆写的结构校验钩子；返回 false 会复用现有一次 repair。 */
+    protected boolean isDecisionShapeValid(AgentStepDecision decision) {
+        return true;
     }
 
     @Override
@@ -84,7 +100,7 @@ public class LlmAgentStepDecider implements AgentStepDecider {
             String content = LlmResponseSupport.textOf(response);
             return content == null ? null : content.trim();
         } catch (Exception e) {
-            log.warn("Agent 收尾总结失败，降级拼接。goal={}", truncate(goal, 100), e);
+            log.warn("Agent 收尾总结失败，降级拼接", e);
             return null;
         }
     }
@@ -104,7 +120,10 @@ public class LlmAgentStepDecider implements AgentStepDecider {
                     .user(buildUserPrompt(goal, clippedContext, stepNo, maxSteps, repair))
                     //判断链：决策器决定"下一步走哪条路"，判错整条路都偏——配了 judge-model 就用强模型
                     .options(aiJudgeModelSupport.applyTo(OpenAiChatOptions.builder()
-                            .temperature(TEMPERATURE))
+                            .temperature(TEMPERATURE)
+                            .responseFormat(ResponseFormat.builder()
+                                    .type(ResponseFormat.Type.JSON_OBJECT)
+                                    .build()))
                             .build())
                     .call()
                     .chatResponse();
@@ -112,7 +131,7 @@ public class LlmAgentStepDecider implements AgentStepDecider {
             TokenUsageAccumulator.addTo(usage, LlmResponseSupport.usageOf(response));
             return LlmResponseSupport.textOf(response);
         } catch (Exception e) {
-            log.warn("Agent 决策调用失败，goal={}", truncate(goal, 100), e);
+            log.warn("Agent 决策调用失败", e);
             return null;
         }
     }
@@ -125,6 +144,8 @@ public class LlmAgentStepDecider implements AgentStepDecider {
             JsonNode root = objectMapper.readTree(cleanJson(json));
             String actionText = root.path("actionType").asText("").trim();
             if (actionText.isBlank()) {
+                log.warn("[AGENT-DECISION] shape_invalid reason=missing_action responseChars={} completeObject={}",
+                        json.length(), looksLikeCompleteObject(json));
                 return null;
             }
 
@@ -157,9 +178,18 @@ public class LlmAgentStepDecider implements AgentStepDecider {
             List<String> plan = parsePlan(root.path("plan"));
             return new AgentStepDecision(actionType, input, thoughtSummary, plan);
         } catch (Exception e) {
-            log.warn("Agent 决策 JSON 解析失败: {}", truncate(json, 200));
+            log.warn("[AGENT-DECISION] parse_failed errorType={} responseChars={} completeObject={}",
+                    e.getClass().getSimpleName(), json.length(), looksLikeCompleteObject(json));
             return null;
         }
+    }
+
+    private boolean looksLikeCompleteObject(String raw) {
+        if (raw == null) {
+            return false;
+        }
+        String cleaned = cleanJson(raw);
+        return cleaned.startsWith("{") && cleaned.endsWith("}");
     }
 
     /**
@@ -304,10 +334,4 @@ public class LlmAgentStepDecider implements AgentStepDecider {
                 + (clippedContext.isBlank() ? "（无）" : clippedContext);
     }
 
-    private String truncate(String text, int max) {
-        if (text == null) {
-            return null;
-        }
-        return text.length() <= max ? text : text.substring(0, max);
-    }
 }

@@ -12,7 +12,9 @@ import java.util.Map;
 public class BlogAiProperties {
     private String systemPrompt;
     private String projectKey = "global";
+    private ClassifierEngine classifierEngine = ClassifierEngine.JEV_FAST_PATH;
     private ClassifierMode classifierMode = ClassifierMode.ON_DEMAND;
+    private Jev jev = new Jev();
     private Memory memory = new Memory();
     private Rag rag = new Rag();
     private Agent agent = new Agent();
@@ -20,6 +22,7 @@ public class BlogAiProperties {
     private Inspection inspection = new Inspection();
     private Billing billing = new Billing();
     private Task task = new Task();
+    private Thinking thinking = new Thinking();
 
     /**
      * AI 长任务（Agent / Workflow 编排）的准入与专用线程池。
@@ -55,6 +58,31 @@ public class BlogAiProperties {
         FULL,
         /** 候选 A 的按需装载：三级装载 + fail-open，复合目标信号直接 FULL（见 CandidateA） */
         ON_DEMAND
+    }
+
+    /** 分类引擎总开关；与 plus 内部的 Prompt 裁剪模式相互独立。 */
+    public enum ClassifierEngine {
+        /** 完全沿用 plus 分类器，不发起 Jev 请求。 */
+        PLUS_ONLY,
+        /** Jev 只处理白名单只读意图，其他情况回退 plus。 */
+        JEV_FAST_PATH
+    }
+
+    @Data
+    public static class Jev {
+        private String apiKey;
+        private String endpoint = "https://openrouter.ai/api/alpha/decisions";
+        /*
+         * 超时预算（2026-10-07 调整）：原值 500 / 1200 比实测延迟还紧。
+         *
+         * 同日线上 12 次成功调用的延迟是 457~1005ms（P50≈600ms），max 离 1200 只差 200ms，
+         * 于是三次失败全部是**超时**而非服务端报错：503ms 撞连接超时、1207/1208ms 撞请求超时。
+         * 每次超时的代价不是"少一次优化"——是白等一次再回退 plus（plus 单次 7.8~12s）。
+         *
+         * 放宽到实测 max 的三倍：最坏多等 1.8s，换掉一次 8s 量级的回退。
+         */
+        private long connectTimeoutMs = 1500;
+        private long requestTimeoutMs = 3000;
     }
 
     @Data
@@ -100,6 +128,7 @@ public class BlogAiProperties {
         private String workspaceId;
         private int topN = 5;
         private int maxDocuments = 30;
+        private int maxChunksPerArticle = 2;
     }
 
     @Data
@@ -229,6 +258,40 @@ public class BlogAiProperties {
          * 正常路径永远走不到它。晚到的结算因状态不再是 RESERVED 必须失败，不能二次扣款。
          */
         private long reserveExpireMinutes = 30;
+    }
+
+    /**
+     * 思考模式统一策略（2026-10-04）。
+     *
+     * <p><b>默认全关</b>：对所有走 Spring AI 的 chat 调用注入 {@code enable_thinking=false}。
+     * 实测（2026-10-04，qwen3.7-flash）首个可见正文从 <b>13189ms → 1502ms</b>。
+     *
+     * <p><b>为什么不再用「前缀白名单」</b>：老实现只对 {@code qwen3} / {@code deepseek} 前缀注入，
+     * 即<b>默认不关</b>——新接一个模型就悄悄开着思考，而且没人会发现；再加上一层
+     * {@code qwen3.7-max} 豁免前缀，把整个 max 系列都放过了，但实测 05-20 / 06-08 两个版本
+     * 其实都接受该参数。白名单是人工维护的，会过时，代价是用户白等十几秒。
+     *
+     * <p>现在反过来：<b>默认注入，确证不接受的才登记豁免</b>。
+     */
+    @Data
+    public static class Thinking {
+
+        /**
+         * 总开关。{@code false} = 完全不注入，一键回退（与 {@code classifier-mode} 同一套路）。
+         */
+        private boolean disable = true;
+
+        /**
+         * 确证<b>不接受</b> {@code enable_thinking=false} 的模型前缀，默认空 = 不豁免任何模型。
+         *
+         * <p>命中后按「<b>省略参数</b>」处理，而不是发 {@code true}——省略即用模型默认，
+         * 将来该模型支持关闭时删掉前缀即可回归，不需要改代码逻辑。
+         *
+         * <p>登记前必须实测：早期 {@code qwen3.7-max-2026-05-17} 确实会返回
+         * {@code InvalidParameter: enable_thinking is restricted to True}，但 05-20 / 06-08 已支持。
+         * <b>按前缀登记会误伤同系列的其它版本</b>，能用具体版本号就别用系列名。
+         */
+        private List<String> exemptModels = List.of();
     }
 
 }

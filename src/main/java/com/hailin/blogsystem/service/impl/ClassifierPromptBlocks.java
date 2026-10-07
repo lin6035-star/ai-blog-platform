@@ -99,6 +99,8 @@ final class ClassifierPromptBlocks {
     
                      当用户要求跳转页面、打开页面、进入页面、回到某页时，输出 NAVIGATE。
                      当 pageType 是 article-detail，且用户要求查看该作者或者进入该作者的主页时，输出 NAVIGATE。
+                     当用户给出文章标题并要求打开该文章时，输出 NAVIGATE；taskGoals 使用
+                     params.target=article、params.articleTitle=用户原话中的文章标题，禁止猜测文章 ID。
     
                       target 可选：
                       - home：首页
@@ -106,7 +108,7 @@ final class ClassifierPromptBlocks {
                       - editor：写文章/新建文章/编辑器
                       - drafts：草稿箱/我的草稿
                       - hotRank：热门排行/排行榜
-                      - article：文章详情页，需要 param=文章ID
+                      - article：文章详情页；已有可信文章 ID 时使用 param，用户只给标题时使用 articleTitle，由后端查询真实文章 ID
                       - userProfile：用户主页/作者主页，需要 param=用户ID/authorId
     
     """;
@@ -133,7 +135,7 @@ final class ClassifierPromptBlocks {
                      keyword 只能提取用户原话中的核心技术词，
                      不能猜测用户没有提到的主题。
     
-                     如果用户说”打开第 X 篇文章”，但没有明确文章ID，不要猜ID，输出 GENERAL_CHAT。
+                     如果用户只说“打开第 X 篇文章”，既没有标题也没有明确文章 ID，不要猜，输出 GENERAL_CHAT。
     
     """;
 
@@ -501,7 +503,7 @@ final class ClassifierPromptBlocks {
                        {"type":"...","params":{...},"goalEvidence":"原话连续片段","after":[],"requires":[],"onFailure":"CONTINUE"}
                        type 取值：ARTICLE_WRITE（点赞/取消点赞/收藏/取消收藏/关注/取消关注，动作放 params.action）
                                   ARTICLE_SEARCH（站内找文章，关键词放 params.query）
-                                  NAVIGATE（跳转，目标放 params.target，如 userProfile）
+                                  NAVIGATE（跳转，目标放 params.target；打开指定标题文章时 target=article、标题放 params.articleTitle，由后端查询真实文章 ID）
                                   ARTICLE_ANALYSIS（对当前文章做分析 / 评价，params 留空即可）
                                   WORKFLOW_HANDOFF（用户要去跑一条固定的多步流程，类型放 params.workflowType）。
                        goalEvidence 必须逐字摘录用户原话中的连续片段，不能改写、总结或补充；后端会验证它真在原文里。
@@ -523,6 +525,8 @@ final class ClassifierPromptBlocks {
                        常见组合：
                          "点赞这篇文章，再跳转到该作者的个人主页"
                            -> [ARTICLE_WRITE(action=likeArticle), NAVIGATE(target=userProfile)]
+                     "带我跳转去这篇《Redis 缓存：从入门到高并发场景的实践》"
+                       -> [NAVIGATE(target=article, articleTitle=Redis 缓存：从入门到高并发场景的实践)]
                          "点赞这篇文章，再帮我找找还有没有关于Redis的文章"
                            -> [ARTICLE_WRITE(action=likeArticle), ARTICLE_SEARCH(query=Redis)]
                          "搜一下 Redis 相关文章，并比较各篇文章"

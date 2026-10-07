@@ -2,8 +2,12 @@ package com.hailin.blogsystem.ai.agent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.AiJudgeModelSupport;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
+
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * 文章域 Agent 决策器（V2.5 / V3.4）。
@@ -18,7 +22,10 @@ import org.springframework.stereotype.Component;
  * 拼接结果由 {@code ArticleDeciderPromptTests} 锁定为**逐字相同**。
  */
 @Component
+@Slf4j
 public class ArticleAgentStepDecider extends LlmAgentStepDecider {
+
+    private static final int MAX_ANSWER_PLAN_CHARS = 1200;
 
     public ArticleAgentStepDecider(ChatClient.Builder chatClientBuilder, ObjectMapper objectMapper,
                                    AiJudgeModelSupport aiJudgeModelSupport) {
@@ -28,6 +35,41 @@ public class ArticleAgentStepDecider extends LlmAgentStepDecider {
     @Override
     protected String buildSystemPrompt(boolean repair) {
         return ArticleDeciderPrompts.systemPrompt(ArticleDeciderPrompts.Mode.FULL, repair);
+    }
+
+    @Override
+    protected AgentStepDecision normalizeDecision(AgentStepDecision decision) {
+        if (decision == null || decision.actionType() != com.hailin.blogsystem.entity.dto.AgentStepActionType.FINAL_ANSWER) {
+            return decision;
+        }
+        Map<String, Object> input = decision.input() == null
+                ? new HashMap<>() : new HashMap<>(decision.input());
+        input.remove("answer");
+        input.remove("message");
+        Object rawPlan = input.get("answerPlan");
+        if (rawPlan != null) {
+            String answerPlan = String.valueOf(rawPlan).trim();
+            if (answerPlan.length() > MAX_ANSWER_PLAN_CHARS) {
+                log.info("Article Agent answerPlan 超限，已裁剪: originalChars={} maxChars={}",
+                        answerPlan.length(), MAX_ANSWER_PLAN_CHARS);
+                answerPlan = answerPlan.substring(0, MAX_ANSWER_PLAN_CHARS);
+            }
+            input.put("answerPlan", answerPlan);
+        }
+        return decision.withInput(input);
+    }
+
+    @Override
+    protected boolean isDecisionShapeValid(AgentStepDecision decision) {
+        if (decision == null || decision.actionType() != com.hailin.blogsystem.entity.dto.AgentStepActionType.FINAL_ANSWER) {
+            return true;
+        }
+        Object answerPlan = decision.input() == null ? null : decision.input().get("answerPlan");
+        boolean valid = answerPlan != null && !String.valueOf(answerPlan).isBlank();
+        if (!valid) {
+            log.warn("[AGENT-DECISION] shape_invalid reason=missing_answer_plan action=FINAL_ANSWER");
+        }
+        return valid;
     }
 
     /**

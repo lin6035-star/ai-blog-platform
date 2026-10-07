@@ -81,7 +81,7 @@ spring:
       read-timeout: 60s
       chat:
         options:
-          model: ${AI_CHAT_MODEL:qwen3.7-flash}
+          model: ${AI_CHAT_MODEL:qwen3.7-flash-2026-07-15}
       embedding:
         options:
           model: qwen3.7-text-embedding
@@ -259,6 +259,18 @@ blog:
 
   ai:
     project-key: global
+    # 分类引擎总开关：JEV_FAST_PATH 只直通三类只读意图，其余自动回退 plus；
+    # 线上异常时设 BLOG_AI_CLASSIFIER_ENGINE=PLUS_ONLY 并重启即可完全关闭 Jev。
+    classifier-engine: ${BLOG_AI_CLASSIFIER_ENGINE:JEV_FAST_PATH}
+    jev:
+      api-key: ${JEV_API_KEY:}
+      endpoint: ${JEV_ENDPOINT:https://openrouter.ai/api/alpha/decisions}
+      # 超时预算（2026-10-07 调整）：原 500 / 1200 比实测延迟还紧——
+      # 同日线上成功调用延迟 457~1005ms（P50≈600ms），1200ms 阈值被撞 3 次
+      # （503ms 撞连接超时、1207/1208ms 撞请求超时），每次都要白等一次再回退 plus。
+      # 放宽到实测 max 的三倍：最坏多等 1.8s，换掉一次 7.8~12s 的回退。
+      connect-timeout-ms: ${JEV_CONNECT_TIMEOUT_MS:1500}
+      request-timeout-ms: ${JEV_REQUEST_TIMEOUT_MS:3000}
     # 分类器 system prompt 模式（P3 分类器收缩，2026-10-01）：
     #   FULL      = 19 块全装（原行为，安全兜底）
     #   ON_DEMAND = 按需装载（三级装载 + fail-open；含"再/然后/顺便"等复合信号时保守回退 FULL）
@@ -271,7 +283,19 @@ blog:
       handoff-recovery-stale-minutes: 15
     # 判断链模型（分类器 / Agent 决策器 / 证据验证器）：这些环节判错会让整条路走偏，
     # 建议绑一个稳的模型；留空则跟随 spring.ai.openai.chat.options.model（生成链模型）。
-    judge-model: ${AI_JUDGE_MODEL:qwen3.7-max-2026-05-20}
+    judge-model: ${AI_JUDGE_MODEL:qwen3.7-plus}
+    # 思考模式（enable_thinking）统一策略（2026-10-04）。设计说明见 BlogAiProperties.Thinking。
+    #   disable=true（默认）：对**所有**模型的 chat 调用注入 enable_thinking=false，
+    #     RestClient（非流式）与 WebClient（流式）两条管线都注入。
+    #     实测首个可见正文 13189ms → 1502ms；旧实现只接了 RestClient，流式一直没关。
+    #   exempt-models：命中的模型前缀**跳过注入**（省略参数，保持模型默认=思考开启）。
+    #     默认空 = 不豁免任何模型。登记前必须实测，早期 qwen3.7-max-2026-05-17 会返回
+    #     InvalidParameter: enable_thinking is restricted to True，但 05-20 / 06-08 已支持；
+    #     按前缀登记会误伤同系列其它版本，能用具体版本号就别用系列名。
+    # 一键回退：BLOG_AI_DISABLE_THINKING=false 并重启（启动日志会打印生效策略）。
+    thinking:
+      disable: ${BLOG_AI_DISABLE_THINKING:true}
+      exempt-models: []
     # AI 计费（预扣 / 结算 / 退款）：docs/redis/钱包与秒杀计划.md §5
     billing:
       enabled: true
@@ -309,16 +333,26 @@ blog:
         initialize-schema: false
       rerank:
         enabled: true
-        model: qwen3.7-text-rerank
+        model: qwen3-vl-rerank
         workspace-id: ${ALIYUN_WORKSPACE_ID:}
         top-n: 5
         max-documents: 30
+        max-chunks-per-article: 2
       gate:
         enabled: true
+        # 阈值按 rerank 模型的实测分数标定，不是拍出来的——**换 rerank 模型必须重新标定**，
+        # 否则 Gate 会静默变成"过度保守"（正例被误拒）或"形同虚设"（负例被放行）。
+        #   qwen3.7-text-rerank：正例 min 0.8196 / 负例 max 0.7202 → 0.75 落在干净间隔内（+0.0994）
+        #   qwen3-vl-rerank（2026-10-03 代表性 12 例）：正例 min 0.8377 / 负例 max 0.7043。
+        #     · 0.75 在当前小样本上保留 10/10 正例，并拒绝 2/2 硬负例；
+        #     · 该结论只用于当前模型和候选策略，换模型或切块后必须重新标定。
         rerank-threshold: 0.75
       health:
         canary-threshold: 0.9
-        initial-delay-ms: 10000
+        # 首次巡检延迟：SUSPECT 期间 dense 不放行，所以这个值直接等于"启动后语义召回不可用"的时长。
+        # 压到 1s（原 10s）以缩小窗口；不取 0 是为了避免首次探测撞上客户端未预热而误判 UNHEALTHY
+        # —— 那会被熔断整整一个 interval（5 分钟），代价远大于多等 1 秒。
+        initial-delay-ms: 1000
         interval-ms: 300000
       top-k: 10
       similarity-threshold: 0.55

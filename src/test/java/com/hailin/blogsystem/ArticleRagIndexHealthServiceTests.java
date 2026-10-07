@@ -17,13 +17,13 @@ class ArticleRagIndexHealthServiceTests {
             new ArticleRagIndexHealthService(vectorStore, canary);
 
     @Test
-    void startsSuspectAndBlocksWritesButStillAllowsDenseSearch() {
+    void startsSuspectAndBlocksBothWritesAndDenseSearch() {
         assertThat(healthService.current().state())
                 .isEqualTo(ArticleRagIndexHealthService.State.SUSPECT);
         assertThat(healthService.incrementalWritesAllowed()).isFalse();
-        // SUSPECT 只是"尚未完成首次巡检"，不等于索引坏了；读取必须放行。
-        // 若这里也熔断，每次启动都会在 initial-delay 窗口内出现"语义召回全空"。
-        assertThat(healthService.denseSearchAllowed()).isTrue();
+        // "尚未巡检"不等于"索引健康"：应用停机期间 embedding 可能已经变化，
+        // 启动期不能拿未经验证的向量当回答证据。
+        assertThat(healthService.denseSearchAllowed()).isFalse();
     }
 
     @Test
@@ -42,8 +42,39 @@ class ArticleRagIndexHealthServiceTests {
         assertThat(healthService.current().state())
                 .isEqualTo(ArticleRagIndexHealthService.State.UNHEALTHY);
         assertThat(healthService.incrementalWritesAllowed()).isFalse();
-        // 只有 canary 判定"空间漂移"时才熔断读取
         assertThat(healthService.denseSearchAllowed()).isFalse();
+    }
+
+    @Test
+    void rebuildStartedFromUnhealthyKeepsDenseSearchBlocked() {
+        when(canary.probe(vectorStore))
+                .thenReturn(new ArticleRagCanary.ProbeResult(false, 0.31D, "空间漂移"));
+        healthService.inspect();
+        assertThat(healthService.denseSearchAllowed()).isFalse();
+
+        // 从 UNHEALTHY 发起重建：alias 切换前 active 仍指向那个已确认漂移的索引，
+        // 所以 REBUILDING 期间必须继续熔断——否则"开始重建"反而把漂移向量放回检索。
+        healthService.beginRebuild();
+
+        assertThat(healthService.current().state())
+                .isEqualTo(ArticleRagIndexHealthService.State.REBUILDING);
+        assertThat(healthService.denseSearchAllowed()).isFalse();
+        assertThat(healthService.incrementalWritesAllowed()).isFalse();
+    }
+
+    @Test
+    void rebuildStartedFromHealthyKeepsDenseSearchAllowed() {
+        when(canary.probe(vectorStore))
+                .thenReturn(new ArticleRagCanary.ProbeResult(true, 0.99D, "OK"));
+        healthService.inspect();
+
+        healthService.beginRebuild();
+
+        assertThat(healthService.current().state())
+                .isEqualTo(ArticleRagIndexHealthService.State.REBUILDING);
+        // 重建前健康：旧索引仍在线可用，读取继续放行，避免重建期间检索整体不可用
+        assertThat(healthService.denseSearchAllowed()).isTrue();
+        assertThat(healthService.incrementalWritesAllowed()).isFalse();
     }
 
     @Test
@@ -53,11 +84,12 @@ class ArticleRagIndexHealthServiceTests {
         assertThat(healthService.current().state())
                 .isEqualTo(ArticleRagIndexHealthService.State.REBUILDING);
         assertThat(healthService.incrementalWritesAllowed()).isFalse();
-        // 重建在旁路物理索引上进行，active alias 仍指向可用索引 → 读取放行
-        assertThat(healthService.denseSearchAllowed()).isTrue();
+        // 初始 SUSPECT 起步 → REBUILDING 继承"不放行"
+        assertThat(healthService.denseSearchAllowed()).isFalse();
 
         healthService.restoreAfterFailedRebuild(previous, "embedding unavailable");
         assertThat(healthService.current().state())
                 .isEqualTo(ArticleRagIndexHealthService.State.SUSPECT);
+        assertThat(healthService.denseSearchAllowed()).isFalse();
     }
 }

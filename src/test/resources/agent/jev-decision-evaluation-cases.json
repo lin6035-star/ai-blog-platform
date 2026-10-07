@@ -1,0 +1,115 @@
+[
+  {
+    "name": "闲聊：纯概念问答",
+    "message": "什么是缓存穿透",
+    "expectedPrimary": "general_chat",
+    "expectedGoals": [],
+    "expectedNeedsThinking": false
+  },
+  {
+    "name": "闲聊：状态依赖建议",
+    "message": "结合我最近的情况，给个建议",
+    "expectedPrimary": "general_chat",
+    "expectedGoals": [],
+    "expectedNeedsThinking": true
+  },
+  {
+    "name": "文章：详情页近指问答",
+    "message": "总结一下刚刚那篇",
+    "pageType": "article-detail",
+    "articleId": "12",
+    "expectedPrimary": "article_qa",
+    "expectedGoals": ["article_qa"]
+  },
+  {
+    "name": "文章：单动作",
+    "message": "点赞这篇文章",
+    "pageType": "article-detail",
+    "articleId": "12",
+    "expectedPrimary": "article_write",
+    "expectedGoals": ["article_write"]
+  },
+  {
+    "name": "复合：动作加分析",
+    "message": "点赞这篇文章，再分析一下它写得怎么样",
+    "pageType": "article-detail",
+    "articleId": "12",
+    "expectedPrimary": "article_write",
+    "expectedGoals": ["article_write", "article_analysis"]
+  },
+  {
+    "name": "复合：搜索加优化",
+    "message": "搜索一下 Redis 相关文章，再优化当前这篇",
+    "pageType": "article-detail",
+    "articleId": "12",
+    "expectedPrimary": "article_search",
+    "expectedGoals": ["article_search", "workflow_optimize"]
+  },
+  {
+    "name": "Workflow：创建文章",
+    "message": "帮我写一篇 Redis 缓存设计的文章",
+    "expectedPrimary": "workflow_create",
+    "expectedGoals": ["workflow_create"]
+  },
+  {
+    "name": "Workflow：优化文章",
+    "message": "帮我优化这篇文章",
+    "pageType": "article-detail",
+    "articleId": "12",
+    "expectedPrimary": "workflow_optimize",
+    "expectedGoals": ["workflow_optimize"]
+  },
+  {
+    "name": "Workflow：制定学习计划",
+    "message": "帮我制定一个 Redis 学习计划",
+    "expectedPrimary": "workflow_learning_plan",
+    "expectedGoals": ["workflow_learning_plan"]
+  },
+  {
+    "name": "Workflow：调整计划阶段",
+    "message": "帮我把 Redis 计划的第二阶段调整一下",
+    "expectedPrimary": "workflow_learning_progress",
+    "expectedGoals": ["workflow_learning_progress"]
+  },
+  {
+    "name": "Workflow：学习难点攻坚",
+    "message": "Redis 缓存击穿我不懂，帮我拆几个练习",
+    "expectedPrimary": "workflow_learning_assist",
+    "expectedGoals": ["workflow_learning_assist"]
+  },
+  {
+    "name": "学习：查询计划进度",
+    "message": "我的MySQL学习计划学到哪了",
+    "expectedPrimary": "learning_plan_query",
+    "expectedGoals": ["learning_plan_query"]
+  },
+  {
+    "name": "钱包：充值",
+    "message": "帮我充10块钱",
+    "expectedPrimary": "wallet",
+    "expectedGoals": ["wallet"]
+  },
+  {
+    "name": "编辑器：保存草稿",
+    "message": "保存草稿",
+    "pageType": "editor-new",
+    "expectedPrimary": "editor_action",
+    "expectedGoals": ["editor_action"]
+  },
+  {
+    "name": "复合：动作加导航",
+    "message": "点赞这篇文章，再跳转到该作者的个人主页",
+    "pageType": "article-detail",
+    "articleId": "12",
+    "expectedPrimary": "article_write",
+    "expectedGoals": ["article_write", "navigate"]
+  },
+  {
+    "name": "复合：动作加优化",
+    "message": "点赞这篇文章，再帮我优化一下",
+    "pageType": "article-detail",
+    "articleId": "12",
+    "expectedPrimary": "article_write",
+    "expectedGoals": ["article_write", "workflow_optimize"]
+  }
+]

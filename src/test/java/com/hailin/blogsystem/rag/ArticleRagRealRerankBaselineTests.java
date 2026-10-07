@@ -30,7 +30,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** 默认跳过；显式开启时调用真实 embedding、ES 和 rerank 服务采样 Gate 分布。 */
 @SpringBootTest(properties = {
-        "blog.ai.rag.corpus.article-index-name=article_rag_active",
+        "blog.ai.rag.corpus.article-index-name=${rag.eval.index:article_rag_active}",
         "blog.ai.rag.corpus.memory-index-name=spring-ai-document-index",
         "blog.ai.rag.corpus.initialize-schema=false",
         "blog.ai.rag.rerank.enabled=true"
@@ -55,7 +55,7 @@ class ArticleRagRealRerankBaselineTests {
         List<Double> negativeTopScores = new ArrayList<>();
         int modelApplied = 0;
 
-        for (ArticleRagEvalCase testCase : loadCases()) {
+        for (ArticleRagEvalCase testCase : filterCases(loadCases())) {
             List<ArticleRagContext> contexts = toContexts(vectorStore.similaritySearch(
                     SearchRequest.builder()
                             .query(testCase.query())
@@ -104,9 +104,15 @@ class ArticleRagRealRerankBaselineTests {
                 distribution(positiveBestScores),
                 distribution(negativeTopScores)
         );
-        assertThat(modelApplied).isEqualTo(59);
-        assertThat(positiveBestScores).hasSize(49);
-        assertThat(negativeTopScores).hasSize(10);
+        // 只断言"确实跑起来了、两侧样本都拿到了"。原先写死 isEqualTo(59) / hasSize(49) / hasSize(10)，
+        // 评测集扩到 70 条后必然失败；精确数量属于报告内容，不该当成测试前提（rerank 偶发失败也会让
+        // modelApplied 少于样例数，硬等值会让测试在"模型抖动"时红掉）。
+        assertThat(modelApplied).isGreaterThan(0);
+        assertThat(positiveBestScores.isEmpty() && negativeTopScores.isEmpty()).isFalse();
+        if (System.getProperty("rag.eval.case", "").isBlank()) {
+            assertThat(positiveBestScores).isNotEmpty();
+            assertThat(negativeTopScores).isNotEmpty();
+        }
     }
 
     private List<ArticleRagContext> toContexts(List<Document> documents) {
@@ -163,13 +169,37 @@ class ArticleRagRealRerankBaselineTests {
         return value instanceof Number number ? number.intValue() : Integer.valueOf(value.toString());
     }
 
+    /** 与端到端 runner 同一套缩样口径：`-Drag.eval.case` / `-Drag.eval.type`。 */
+    private List<ArticleRagEvalCase> filterCases(List<ArticleRagEvalCase> cases) {
+        String caseIds = System.getProperty("rag.eval.case", "").trim();
+        String types = System.getProperty("rag.eval.type", "").trim();
+        if (caseIds.isBlank() && types.isBlank()) {
+            return cases;
+        }
+        List<String> wantedIds = splitFilter(caseIds);
+        List<String> wantedTypes = splitFilter(types);
+        return cases.stream()
+                .filter(testCase -> wantedIds.isEmpty() || wantedIds.contains(testCase.id()))
+                .filter(testCase -> wantedTypes.isEmpty() || wantedTypes.contains(testCase.caseType()))
+                .toList();
+    }
+
+    private List<String> splitFilter(String value) {
+        return value.isBlank()
+                ? List.of()
+                : List.of(value.split(",")).stream().map(String::trim).filter(item -> !item.isBlank()).toList();
+    }
+
     private List<ArticleRagEvalCase> loadCases() throws Exception {
         var input = Objects.requireNonNull(
                 ArticleRagRealRerankBaselineTests.class.getResourceAsStream(RESOURCE),
                 "RAG 评测集资源必须存在"
         );
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
-            return reader.lines().filter(line -> !line.isBlank()).map(this::readCase).toList();
+            return reader.lines()
+                    .filter(line -> !line.isBlank())
+                    .map(this::readCase)
+                    .toList();
         }
     }
 

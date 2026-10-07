@@ -114,4 +114,17 @@ class ClassifierPromptBlocksTests {
                 .as("字段契约+示例是最大块，B 方案按需装载的收益就来自它")
                 .isGreaterThan(20.0);
     }
+
+    @Test
+    void taskNavigationContractUsesArticleTitleInsteadOfModelSuppliedId() {
+        assertThat(ClassifierPromptBlocks.NAVIGATE)
+                .contains("给出文章标题")
+                .contains("由后端查询真实文章 ID")
+                .doesNotContain("- article：文章详情页，需要 param=文章ID");
+        assertThat(ClassifierPromptBlocks.EXAMPLES_AND_SCHEMA)
+                .contains("NAVIGATE（跳转")
+                .contains("articleTitle")
+                .contains("后端查询真实文章 ID")
+                .doesNotContain("NAVIGATE（跳转，目标放 params.target，如 userProfile）");
+    }
 }

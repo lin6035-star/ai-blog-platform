@@ -108,4 +108,21 @@ public interface AgentRunState {
     default boolean lastStepHadNewEvidence() {
         return true;
     }
+
+    /** 当前某类证据的单调版本；OTHER 表示所有证据类型的合计版本。 */
+    default long evidenceRevision(Verdict.MissingEvidence type) {
+        return 0L;
+    }
+
+    /** 记录一次 Verifier 拒绝时对应证据类型的版本快照。 */
+    default void noteVerifierRejection(Verdict.MissingEvidence type) {
+    }
+
+    /**
+     * 从未被拒绝，或拒绝后对应证据已有增量时返回 true。
+     * 默认 true 让未启用结构化状态的领域保持原行为。
+     */
+    default boolean hasEvidenceProgressSinceRejection() {
+        return true;
+    }
 }

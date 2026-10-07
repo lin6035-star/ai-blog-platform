@@ -2,10 +2,15 @@ package com.hailin.blogsystem.service.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.AiJudgeModelSupport;
+import com.hailin.blogsystem.ai.AiStageTimer;
 import com.hailin.blogsystem.ai.LlmErrorClassifier;
 import com.hailin.blogsystem.ai.LlmResponseSupport;
 import com.hailin.blogsystem.ai.ClassifierProbe;
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
+import com.hailin.blogsystem.ai.classifier.jev.JevDecisionGateway;
+import com.hailin.blogsystem.ai.classifier.jev.JevDecisionResult;
+import com.hailin.blogsystem.ai.classifier.jev.JevFastPathDecision;
+import com.hailin.blogsystem.ai.classifier.jev.JevFastPathMapper;
 import com.hailin.blogsystem.config.BlogAiProperties;
 import com.hailin.blogsystem.entity.LearningPlans;
 import com.hailin.blogsystem.entity.dto.AiIntent;
@@ -13,8 +18,8 @@ import com.hailin.blogsystem.entity.dto.PageContextDTO;
 import com.hailin.blogsystem.service.AiIntentClassifier;
 import com.hailin.blogsystem.service.LearningPlansService;
 import jakarta.annotation.PostConstruct;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.openai.OpenAiChatOptions;
@@ -24,7 +29,6 @@ import java.util.List;
 import java.util.Map;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class AiIntentClassifierImpl implements AiIntentClassifier
 {
@@ -33,6 +37,35 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
     private final LearningPlansService learningPlansService;
     private final AiJudgeModelSupport aiJudgeModelSupport;
     private final BlogAiProperties blogAiProperties;
+    private final JevDecisionGateway jevDecisionGateway;
+    private final JevFastPathMapper jevFastPathMapper;
+
+    @Autowired
+    public AiIntentClassifierImpl(ChatClient.Builder chatClientBuilder,
+                                  ObjectMapper objectMapper,
+                                  LearningPlansService learningPlansService,
+                                  AiJudgeModelSupport aiJudgeModelSupport,
+                                  BlogAiProperties blogAiProperties,
+                                  JevDecisionGateway jevDecisionGateway,
+                                  JevFastPathMapper jevFastPathMapper) {
+        this.chatClientBuilder = chatClientBuilder;
+        this.objectMapper = objectMapper;
+        this.learningPlansService = learningPlansService;
+        this.aiJudgeModelSupport = aiJudgeModelSupport;
+        this.blogAiProperties = blogAiProperties;
+        this.jevDecisionGateway = jevDecisionGateway;
+        this.jevFastPathMapper = jevFastPathMapper;
+    }
+
+    /** 保留既有单元测试构造方式；未注入 Gateway 时直接走 plus。 */
+    public AiIntentClassifierImpl(ChatClient.Builder chatClientBuilder,
+                                  ObjectMapper objectMapper,
+                                  LearningPlansService learningPlansService,
+                                  AiJudgeModelSupport aiJudgeModelSupport,
+                                  BlogAiProperties blogAiProperties) {
+        this(chatClientBuilder, objectMapper, learningPlansService, aiJudgeModelSupport,
+                blogAiProperties, null, new JevFastPathMapper());
+    }
 
     /**
      * 启动时把生效的 prompt 模式打出来。
@@ -44,6 +77,10 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
     void logClassifierMode() {
         log.info("[P3] 分类器 prompt 模式 = {}（FULL = 19 块全装 / ON_DEMAND = 按需装载 + 复合目标回退）",
                 blogAiProperties.getClassifierMode());
+        BlogAiProperties.Jev jev = blogAiProperties.getJev();
+        log.info("[JEV] classifierEngine={} endpoint={} connectTimeoutMs={} requestTimeoutMs={} apiKeyConfigured={}",
+                blogAiProperties.getClassifierEngine(), jev.getEndpoint(), jev.getConnectTimeoutMs(),
+                jev.getRequestTimeoutMs(), jev.getApiKey() != null && !jev.getApiKey().isBlank());
     }
 
     @Override  //判断分类，用户想要干什么，如果是要生成文章，单独拆一个实现类专门实现
@@ -56,19 +93,28 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
     @Override
     public AiIntent classify(String message, PageContextDTO pageContextDTO, Long userId,
                              TokenUsageAccumulator usage, ClassifierProbe probe){
-        /*
-         * 第一段：不带计划列表。
-         *
-         * 绝大多数消息（闲聊、文章问答、概念问答、创建计划）到此为止——
-         * 不查库、user prompt 里也没有计划列表（普通聊天不该背这个包袱）。
-         */
-        AiIntent aiIntent = callOnce(message, pageContextDTO, List.of(), usage,
-                probe, ClassifierProbe.CallRole.FIRST_PASS);
-        if (aiIntent == null || aiIntent.getIntent() == null || aiIntent.getIntent().isBlank()) {
-            log.warn("AI意图识别失败，降级为普通聊天");
-            markDegraded(probe);
-            return generalChat();
-        }
+        AiStageTimer timer = AiStageTimer.start();
+        ClassifierTiming timing = new ClassifierTiming();
+        try {
+            AiIntent fastPathIntent = tryJevFastPath(message, pageContextDTO, usage, timing);
+            if (fastPathIntent != null) {
+                timing.outcome = "success";
+                return fastPathIntent;
+            }
+            /*
+             * 第一段：不带计划列表。
+             *
+             * 绝大多数消息（闲聊、文章问答、概念问答、创建计划）到此为止——
+             * 不查库、user prompt 里也没有计划列表（普通聊天不该背这个包袱）。
+             */
+            AiIntent aiIntent = callOnce(message, pageContextDTO, List.of(), usage,
+                    probe, ClassifierProbe.CallRole.FIRST_PASS, timing);
+            if (aiIntent == null || aiIntent.getIntent() == null || aiIntent.getIntent().isBlank()) {
+                log.warn("AI意图识别失败，降级为普通聊天");
+                markDegraded(probe);
+                timing.outcome = "degraded";
+                return generalChat();
+            }
 
         /*
          * 第二段：只有「意图是调整/攻坚已有计划」且「用户原话点了计划名」才查列表 + 重新调用。
@@ -78,57 +124,112 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
          * 结果弹卡让用户重选——实测踩过）。宁可让这一小撮消息多等一次调用，
          * 也不让每条消息都带上计划列表（后者是"普通聊天也塞进 prompt"）。
          */
-        List<LearningPlans> plans = List.of();
-        if (needsPlanLocating(aiIntent)) {
-            plans = loadActivePlans(userId);
-            if (!plans.isEmpty()) {
-                log.info("意图命中计划定位，二次分类带列表：planRef={}", aiIntent.getLearningPlanRef());
-                AiIntent located = callOnce(message, pageContextDTO, plans, usage,
-                        probe, ClassifierProbe.CallRole.PLAN_LOCATOR);
-                if (located != null && located.getIntent() != null && !located.getIntent().isBlank()) {
-                    aiIntent = located;
-                } else if (probe != null) {
-                    // 定位失败但首轮结果可用 → 生产落点是**成功**。
-                    // 不改标记的话，报告会把这条样例算成"最终失败"，掩盖真实可用性。
-                    probe.markOutcome(ClassifierProbe.Outcome.SUCCESS_WITH_PLAN_LOCATOR_FALLBACK,
-                            "计划定位未命中，沿用首轮结果（" + probe.getDetail() + "）");
+            List<LearningPlans> plans = List.of();
+            if (needsPlanLocating(aiIntent)) {
+                plans = loadActivePlans(userId);
+                if (!plans.isEmpty()) {
+                    log.info("意图命中计划定位，二次分类带列表：planRef={}", aiIntent.getLearningPlanRef());
+                    AiIntent located = callOnce(message, pageContextDTO, plans, usage,
+                            probe, ClassifierProbe.CallRole.PLAN_LOCATOR, timing);
+                    if (located != null && located.getIntent() != null && !located.getIntent().isBlank()) {
+                        aiIntent = located;
+                    } else if (probe != null) {
+                        // 定位失败但首轮结果可用 → 生产落点是**成功**。
+                        // 不改标记的话，报告会把这条样例算成"最终失败"，掩盖真实可用性。
+                        probe.markOutcome(ClassifierProbe.Outcome.SUCCESS_WITH_PLAN_LOCATOR_FALLBACK,
+                                "计划定位未命中，沿用首轮结果（" + probe.getDetail() + "）");
+                    }
                 }
             }
+
+            resolveLearningPlanId(aiIntent, plans);
+            backfillWorkflowFields(aiIntent);
+            log.info(
+                    "AI意图识别结果: intent={}, confidence={}, "
+                            + "suggestedAction={}, suggestedWorkflowType={}, "
+                            + "risk={}, reason={}, planRef={}, stageRef={}, "
+                            + "planIndex={}, planId={}, "
+                            + "actionType={}, articleId={}, authorId={}, userId={}, "
+                            + "needsThinking={}, needsThinkingReason={}",
+                    aiIntent.getIntent(),
+                    aiIntent.getConfidence(),
+                    aiIntent.getSuggestedAction(),
+                    aiIntent.getSuggestedWorkflowType(),
+                    aiIntent.getRisk(),
+                    aiIntent.getReason(),
+                    aiIntent.getLearningPlanRef(),
+                    aiIntent.getLearningStageRef(),
+                    aiIntent.getLearningPlanIndex(),
+                    aiIntent.getLearningPlanId(),
+                    aiIntent.getActionType(),
+                    aiIntent.getArticleId(),
+                    aiIntent.getAuthorId(),
+                    aiIntent.getUserId(),
+                    aiIntent.getNeedsThinking(),
+                    aiIntent.getNeedsThinkingReason()
+            );
+
+            timing.outcome = "success";
+            return aiIntent;
+        } finally {
+            log.info("[PERF-AI] stage=classifier durationMs={} outcome={} calls={} engine={} "
+                            + "jevOutcome={} fallbackReason={} jevDurationMs={}",
+                    timer.elapsedMillis(), timing.outcome, timing.calls, timing.engine,
+                    timing.jevOutcome, timing.fallbackReason, timing.jevDurationMs);
+        }
+    }
+
+    private AiIntent tryJevFastPath(String message, PageContextDTO pageContext,
+                                    TokenUsageAccumulator usage, ClassifierTiming timing) {
+        if (blogAiProperties.getClassifierEngine() != BlogAiProperties.ClassifierEngine.JEV_FAST_PATH
+                || jevDecisionGateway == null) {
+            timing.engine = "PLUS";
+            return null;
+        }
+        BlogAiProperties.Jev config = blogAiProperties.getJev();
+        if (config.getApiKey() == null || config.getApiKey().isBlank()) {
+            timing.engine = "PLUS";
+            timing.jevOutcome = "fallback";
+            timing.fallbackReason = "API_KEY_MISSING";
+            return null;
         }
 
-        resolveLearningPlanId(aiIntent, plans);
-        backfillWorkflowFields(aiIntent);
-        log.info(
-                "AI意图识别结果: intent={}, confidence={}, "
-                        + "suggestedAction={}, suggestedWorkflowType={}, "
-                        + "risk={}, reason={}, planRef={}, stageRef={}, "
-                        + "planIndex={}, planId={}, "
-                        + "actionType={}, articleId={}, authorId={}, userId={}, "
-                        + "needsThinking={}, needsThinkingReason={}",
-                aiIntent.getIntent(),
-                aiIntent.getConfidence(),
-                aiIntent.getSuggestedAction(),
-                aiIntent.getSuggestedWorkflowType(),
-                aiIntent.getRisk(),
-                aiIntent.getReason(),
-                aiIntent.getLearningPlanRef(),
-                aiIntent.getLearningStageRef(),
-                aiIntent.getLearningPlanIndex(),
-                aiIntent.getLearningPlanId(),
-                aiIntent.getActionType(),
-                aiIntent.getArticleId(),
-                aiIntent.getAuthorId(),
-                aiIntent.getUserId(),
-                aiIntent.getNeedsThinking(),
-                aiIntent.getNeedsThinkingReason()
-        );
-
-        return aiIntent;
+        long startedAt = System.nanoTime();
+        timing.calls++;
+        try {
+            JevDecisionResult result = jevDecisionGateway.decide(message, pageContext);
+            timing.jevDurationMs = (System.nanoTime() - startedAt) / 1_000_000;
+            TokenUsageAccumulator.addTo(usage, result.inputTokens(), result.outputTokens());
+            JevFastPathDecision decision = jevFastPathMapper.map(result, pageContext);
+            if (decision.accepted()) {
+                timing.engine = "JEV";
+                timing.jevOutcome = "accepted";
+                log.info("[JEV] accepted intent={} goals={} durationMs={}",
+                        decision.intent().getIntent(), result.acceptedGoals(), timing.jevDurationMs);
+                return decision.intent();
+            }
+            timing.engine = "PLUS";
+            timing.jevOutcome = "fallback";
+            timing.fallbackReason = decision.fallbackReason();
+            log.info("[JEV] fallback reason={} goals={} durationMs={}",
+                    decision.fallbackReason(), result.acceptedGoals(), timing.jevDurationMs);
+            return null;
+        } catch (Exception e) {
+            timing.jevDurationMs = (System.nanoTime() - startedAt) / 1_000_000;
+            timing.engine = "PLUS";
+            timing.jevOutcome = "error";
+            timing.fallbackReason = e.getClass().getSimpleName();
+            log.warn("[JEV] 调用失败，回退 plus: type={} durationMs={}",
+                    e.getClass().getSimpleName(), timing.jevDurationMs);
+            return null;
+        }
     }
 
     private String callClassifier(String message, PageContextDTO pageContextDTO,
                                   List<LearningPlans> plans, boolean repair,
-                                  TokenUsageAccumulator usage) {
+                                  TokenUsageAccumulator usage,
+                                  ClassifierTiming timing) {
+        timing.calls++;
         try {
             ChatResponse response = chatClientBuilder.build()
                     .prompt()
@@ -165,11 +266,12 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
      */
     private AiIntent callOnce(String message, PageContextDTO pageContextDTO,
                               List<LearningPlans> plans, TokenUsageAccumulator usage,
-                              ClassifierProbe probe, ClassifierProbe.CallRole role) {
+                              ClassifierProbe probe, ClassifierProbe.CallRole role,
+                              ClassifierTiming timing) {
         if (probe != null) {
             probe.recordRole(role);
         }
-        String json = callClassifier(message, pageContextDTO, plans, false, usage);
+        String json = callClassifier(message, pageContextDTO, plans, false, usage, timing);
         if (probe != null && json != null) {
             probe.recordResponseChars(json.length());
         }
@@ -184,7 +286,7 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
         if (probe != null) {
             probe.recordRole(ClassifierProbe.CallRole.REPAIR);
         }
-        String repaired = callClassifier(message, pageContextDTO, plans, true, usage);
+        String repaired = callClassifier(message, pageContextDTO, plans, true, usage, timing);
         if (probe != null && repaired != null) {
             probe.recordResponseChars(repaired.length());
         }
@@ -199,6 +301,15 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
             markFailure(probe, ClassifierProbe.Outcome.PARSE_FAILED, "首轮与 repair 均解析失败");
         }
         return repairedIntent;
+    }
+
+    private static final class ClassifierTiming {
+        private int calls;
+        private String outcome = "error";
+        private String engine = "PLUS";
+        private String jevOutcome = "skipped";
+        private String fallbackReason;
+        private long jevDurationMs;
     }
 
     /** 记一次失败原因（最终是否降级由"用户可见落点"覆盖，原因链保留在 detail 里） */

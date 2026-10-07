@@ -77,6 +77,13 @@ public class TokenUsageAccumulator {
         }
     }
 
+    /** 累加非 Spring AI 调用返回的整数 usage，例如 OpenRouter Decisions API。 */
+    public static void addTo(TokenUsageAccumulator accumulator, int promptTokens, int completionTokens) {
+        if (accumulator != null) {
+            accumulator.add(promptTokens, completionTokens);
+        }
+    }
+
     public void add(Usage usage) {
         if (usage == null || usage.getPromptTokens() == null) {
             return;
@@ -87,6 +94,16 @@ public class TokenUsageAccumulator {
         completionTokens += out;
         totalTokens += usage.getTotalTokens() == null ? usage.getPromptTokens() + out : usage.getTotalTokens();
         collectNativeDetails(usage);
+    }
+
+    public void add(int promptTokens, int completionTokens) {
+        if (promptTokens < 0 || completionTokens < 0) {
+            return;
+        }
+        callCount++;
+        this.promptTokens += promptTokens;
+        this.completionTokens += completionTokens;
+        this.totalTokens += promptTokens + completionTokens;
     }
 
     /**

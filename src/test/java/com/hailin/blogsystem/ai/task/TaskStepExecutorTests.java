@@ -1,14 +1,19 @@
 package com.hailin.blogsystem.ai.task;
 
+import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.hailin.blogsystem.ai.task.executor.ArticleSearchExecutor;
 import com.hailin.blogsystem.ai.task.executor.ArticleWriteExecutor;
 import com.hailin.blogsystem.ai.task.executor.NavigateExecutor;
+import com.hailin.blogsystem.ai.rag.ArticleRagSearchService;
 import com.hailin.blogsystem.entity.Articles;
+import com.hailin.blogsystem.entity.dto.AiIntent;
+import com.hailin.blogsystem.entity.dto.ArticleRagContext;
+import com.hailin.blogsystem.entity.dto.ArticleRagSearchResult;
+import com.hailin.blogsystem.entity.dto.ArticleRagSearchStrategy;
 import com.hailin.blogsystem.entity.dto.ArticleInteractionAction;
 import com.hailin.blogsystem.entity.dto.ArticleInteractionResult;
 import com.hailin.blogsystem.entity.dto.ArticleInteractionResultCode;
 import com.hailin.blogsystem.entity.dto.PageContextDTO;
-import com.hailin.blogsystem.search.ArticleSearchService;
 import com.hailin.blogsystem.service.ArticleFavoritesService;
 import com.hailin.blogsystem.service.ArticleLikesService;
 import com.hailin.blogsystem.service.ArticlesService;
@@ -21,7 +26,10 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -40,7 +48,7 @@ class TaskStepExecutorTests {
     private final ArticleFavoritesService favoritesService = mock(ArticleFavoritesService.class);
     private final FollowService followService = mock(FollowService.class);
     private final ArticlesService articlesService = mock(ArticlesService.class);
-    private final ArticleSearchService searchService = mock(ArticleSearchService.class);
+    private final ArticleRagSearchService ragSearchService = mock(ArticleRagSearchService.class);
 
     private TaskExecutionContext context(String articleId) {
         PageContextDTO pageContext = new PageContextDTO();
@@ -189,31 +197,58 @@ class TaskStepExecutorTests {
 
     @Test
     void searchReturnsTitles() {
-        when(searchService.search("Redis", null, null, 1, 5)).thenReturn(
-                new ArticleSearchService.SearchHits(List.of(ARTICLE_ID), 1L, Map.of()));
-        Articles matched = article();
-        matched.setSummary("介绍 Redis 缓存一致性、击穿与高并发治理");
-        when(articlesService.listByIds(any())).thenReturn(List.of(matched));
+        when(ragSearchService.search(eq("Redis"), any(AiIntent.class))).thenReturn(
+                new ArticleRagSearchResult(ArticleRagSearchStrategy.HYBRID, List.of(
+                        new ArticleRagContext(ARTICLE_ID, "Redis 缓存设计", 2,
+                                "介绍 Redis 缓存一致性、击穿与高并发治理"),
+                        new ArticleRagContext(ARTICLE_ID, "Redis 缓存设计", 4,
+                                "同一篇文章的另一个命中片段"),
+                        new ArticleRagContext(13L, "Redis 秒杀实践", 1,
+                                "库存预扣与异步削峰")
+                )));
 
-        ArticleSearchExecutor executor = new ArticleSearchExecutor(searchService, articlesService);
+        ArticleSearchExecutor executor = new ArticleSearchExecutor(ragSearchService);
         StepResult result = executor.execute(context("12"),
                 step(StepType.ARTICLE_SEARCH, Map.of("query", "Redis")));
 
         assertThat(result.state()).isEqualTo(StepState.SUCCEEDED);
         assertThat(result.summary()).contains("Redis 缓存设计");
-        assertThat(result.output()).containsEntry("total", 1L);
-        assertThat(result.output().get("articles")).isEqualTo(List.of(Map.of(
-                "articleId", String.valueOf(ARTICLE_ID),
-                "title", "Redis 缓存设计",
-                "summary", "介绍 Redis 缓存一致性、击穿与高并发治理")));
+        assertThat(result.output()).containsEntry("total", 2L);
+        assertThat(result.output().get("articles")).isEqualTo(List.of(
+                Map.of(
+                        "articleId", String.valueOf(ARTICLE_ID),
+                        "title", "Redis 缓存设计",
+                        "summary", "介绍 Redis 缓存一致性、击穿与高并发治理"),
+                Map.of(
+                        "articleId", "13",
+                        "title", "Redis 秒杀实践",
+                        "summary", "库存预扣与异步削峰")));
+        assertThat(result.output().get("ragContexts")).isEqualTo(List.of(
+                Map.of(
+                        "articleId", String.valueOf(ARTICLE_ID),
+                        "title", "Redis 缓存设计",
+                        "chunkIndex", 2,
+                        "content", "介绍 Redis 缓存一致性、击穿与高并发治理"),
+                Map.of(
+                        "articleId", String.valueOf(ARTICLE_ID),
+                        "title", "Redis 缓存设计",
+                        "chunkIndex", 4,
+                        "content", "同一篇文章的另一个命中片段"),
+                Map.of(
+                        "articleId", "13",
+                        "title", "Redis 秒杀实践",
+                        "chunkIndex", 1,
+                        "content", "库存预扣与异步削峰")));
+        verify(ragSearchService).search(eq("Redis"), argThat(intent ->
+                "ARTICLE_SEARCH".equals(intent.getIntent()) && "Redis".equals(intent.getKeyWord())));
     }
 
     @Test
     void emptyResultStillSucceeds() {
-        when(searchService.search("不存在的词", null, null, 1, 5)).thenReturn(
-                new ArticleSearchService.SearchHits(List.of(), 0L, Map.of()));
+        when(ragSearchService.search(eq("不存在的词"), any(AiIntent.class))).thenReturn(
+                new ArticleRagSearchResult(ArticleRagSearchStrategy.EMPTY, List.of()));
 
-        ArticleSearchExecutor executor = new ArticleSearchExecutor(searchService, articlesService);
+        ArticleSearchExecutor executor = new ArticleSearchExecutor(ragSearchService);
         StepResult result = executor.execute(context("12"),
                 step(StepType.ARTICLE_SEARCH, Map.of("query", "不存在的词")));
 
@@ -223,8 +258,32 @@ class TaskStepExecutorTests {
     }
 
     @Test
+    void searchCapsCurrentRunRagContextsAtFive() {
+        List<ArticleRagContext> contexts = java.util.stream.IntStream.rangeClosed(1, 6)
+                .mapToObj(index -> new ArticleRagContext(
+                        ARTICLE_ID,
+                        "Redis 缓存设计",
+                        index,
+                        "正文片段 " + index))
+                .toList();
+        when(ragSearchService.search(eq("Redis"), any(AiIntent.class))).thenReturn(
+                new ArticleRagSearchResult(ArticleRagSearchStrategy.HYBRID, contexts));
+
+        StepResult result = new ArticleSearchExecutor(ragSearchService).execute(
+                context("12"),
+                step(StepType.ARTICLE_SEARCH, Map.of("query", "Redis")));
+
+        List<?> ragContexts = (List<?>) result.output().get("ragContexts");
+        assertThat(ragContexts).hasSize(5);
+        assertThat(ragContexts.stream()
+                .map(item -> ((Map<?, ?>) item).get("chunkIndex"))
+                .toList()).isEqualTo(List.of(1, 2, 3, 4, 5));
+        assertThat((List<?>) result.output().get("articles")).hasSize(1);
+    }
+
+    @Test
     void blankQueryFails() {
-        ArticleSearchExecutor executor = new ArticleSearchExecutor(searchService, articlesService);
+        ArticleSearchExecutor executor = new ArticleSearchExecutor(ragSearchService);
         StepResult result = executor.execute(context("12"),
                 step(StepType.ARTICLE_SEARCH, Map.of()));
 
@@ -271,5 +330,86 @@ class TaskStepExecutorTests {
                 step(StepType.NAVIGATE, Map.of("target", "userProfile")));
 
         assertThat(result.state()).isEqualTo(StepState.SKIPPED);
+    }
+
+    @Test
+    void articleTitleNavigationResolvesPublishedArticleId() {
+        Articles matched = article();
+        matched.setTitle("Redis 缓存：从入门到高并发场景的实践");
+        when(articlesService.list(org.mockito.ArgumentMatchers.<Wrapper<Articles>>any()))
+                .thenReturn(List.of(matched));
+
+        NavigateExecutor executor = new NavigateExecutor(articlesService);
+        StepResult result = executor.execute(context(null),
+                step(StepType.NAVIGATE, Map.of(
+                        "target", "article",
+                        "articleTitle", "《Redis 缓存：从入门到高并发场景的实践》")));
+
+        assertThat(result.state()).isEqualTo(StepState.DISPATCHED);
+        assertThat(result.output())
+                .containsEntry("target", "article")
+                .containsEntry("param", String.valueOf(ARTICLE_ID))
+                .containsEntry("articleId", String.valueOf(ARTICLE_ID));
+    }
+
+    @Test
+    void articleIdNavigationRechecksPublishedArticleBeforeDispatch() {
+        Articles matched = article();
+        matched.setTitle("Redis 缓存：从入门到高并发场景的实践");
+        when(articlesService.getOne(org.mockito.ArgumentMatchers.<Wrapper<Articles>>any()))
+                .thenReturn(matched);
+
+        NavigateExecutor executor = new NavigateExecutor(articlesService);
+        StepResult result = executor.execute(context(null),
+                step(StepType.NAVIGATE, Map.of(
+                        "target", "article",
+                        "param", String.valueOf(ARTICLE_ID))));
+
+        assertThat(result.state()).isEqualTo(StepState.DISPATCHED);
+        assertThat(result.output())
+                .containsEntry("target", "article")
+                .containsEntry("param", String.valueOf(ARTICLE_ID))
+                .containsEntry("articleTitle", "Redis 缓存：从入门到高并发场景的实践");
+    }
+
+    @Test
+    void unknownArticleIdDoesNotDispatch() {
+        when(articlesService.getOne(org.mockito.ArgumentMatchers.<Wrapper<Articles>>any()))
+                .thenReturn(null);
+
+        NavigateExecutor executor = new NavigateExecutor(articlesService);
+        StepResult result = executor.execute(context(null),
+                step(StepType.NAVIGATE, Map.of(
+                        "target", "article",
+                        "param", String.valueOf(ARTICLE_ID))));
+
+        assertThat(result.state()).isEqualTo(StepState.SKIPPED);
+        assertThat(result.output()).doesNotContainKeys("param", "articleId");
+    }
+
+    @Test
+    void staticNavigationTargetDispatchesWithoutArticleContext() {
+        NavigateExecutor executor = new NavigateExecutor(articlesService);
+
+        StepResult result = executor.execute(context(null),
+                step(StepType.NAVIGATE, Map.of("target", "profile")));
+
+        assertThat(result.state()).isEqualTo(StepState.DISPATCHED);
+        assertThat(result.output()).containsEntry("target", "profile");
+    }
+
+    @Test
+    void unknownArticleTitleSkipsWithoutGuessingId() {
+        when(articlesService.list(org.mockito.ArgumentMatchers.<Wrapper<Articles>>any()))
+                .thenReturn(List.of());
+
+        NavigateExecutor executor = new NavigateExecutor(articlesService);
+        StepResult result = executor.execute(context(null),
+                step(StepType.NAVIGATE, Map.of(
+                        "target", "article",
+                        "articleTitle", "不存在的文章")));
+
+        assertThat(result.state()).isEqualTo(StepState.SKIPPED);
+        assertThat(result.output()).doesNotContainKeys("param", "articleId");
     }
 }

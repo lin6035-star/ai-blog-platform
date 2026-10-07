@@ -1,6 +1,10 @@
 package com.hailin.blogsystem;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
+import co.elastic.clients.elasticsearch.core.SearchResponse;
+import co.elastic.clients.elasticsearch.core.search.Hit;
+import co.elastic.clients.json.JsonData;
+import co.elastic.clients.transport.ElasticsearchTransport;
 import com.hailin.blogsystem.ai.memory.AiEpisodicMemoryIndexService;
 import com.hailin.blogsystem.ai.memory.AiMemoryIndexService;
 import com.hailin.blogsystem.ai.memory.MemoryRagReindexService;
@@ -12,12 +16,13 @@ import com.hailin.blogsystem.mapper.AiUserMemoryMapper;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Set;
+import java.util.function.LongPredicate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -71,13 +76,42 @@ class MemoryRagReindexServiceTests {
     }
 
     @Test
-    void findsOrphansAsIndexedMinusLive() {
-        assertThat(MemoryRagReindexService.findOrphanIds(Set.of(1L, 2L, 3L), Set.of(2L, 3L)))
-                .containsExactly(1L);
-        assertThat(MemoryRagReindexService.findOrphanIds(Set.of(1L), Set.of()))
-                .containsExactly(1L);
-        assertThat(MemoryRagReindexService.findOrphanIds(Set.of(), Set.of(1L))).isEmpty();
-        assertThat(MemoryRagReindexService.findOrphanIds(null, Set.of(1L))).isEmpty();
+    void purgeCandidatesRequireDatabaseReconfirmationBeforeDeletion() {
+        // ES 中存在只代表“待确认”：重刷期间可能发生新增或删除，
+        // 真正删除前必须以 MySQL 当前状态为准。
+        List<Long> candidates = List.of(1L, 2L, 3L);
+        LongPredicate stillPresent = id -> id == 2L;
+
+        assertThat(MemoryRagReindexService.confirmPurgeCandidates(candidates, stillPresent))
+                .containsExactly(1L, 3L);
+        assertThat(MemoryRagReindexService.confirmPurgeCandidates(List.of(), stillPresent)).isEmpty();
+        assertThat(MemoryRagReindexService.confirmPurgeCandidates(null, stillPresent)).isEmpty();
+    }
+
+    @Test
+    void purgesMemoryDeletedAfterSnapshotEvenWhenStaleSnapshotWasReindexed() throws Exception {
+        AiUserMemories staleMemory = userMemory(1L);
+        when(userMemoryMapper.selectList(any())).thenReturn(List.of(staleMemory));
+        when(episodicMemoryMapper.selectList(any())).thenReturn(List.of());
+        when(userMemoryMapper.selectById(1L)).thenReturn(null);
+        ElasticsearchTransport transport = mock(ElasticsearchTransport.class);
+        doAnswer(invocation -> searchResponse(1L))
+                .doAnswer(invocation -> searchResponse())
+                .when(transport).performRequest(any(), any(), any());
+        MemoryRagReindexService reindexService = new MemoryRagReindexService(
+                userMemoryMapper,
+                episodicMemoryMapper,
+                memoryIndexService,
+                episodicMemoryIndexService,
+                new ElasticsearchClient(transport),
+                properties
+        );
+
+        MemoryRagReindexService.ReindexOutcome outcome = reindexService.reindex();
+
+        verify(memoryIndexService).indexMemory(staleMemory);
+        verify(memoryIndexService).deleteMemoryIndex(1L);
+        assertThat(outcome.purgedOrphans()).isEqualTo(1);
     }
 
     @Test
@@ -105,5 +139,19 @@ class MemoryRagReindexServiceTests {
         memory.setId(id);
         memory.setUserId(100L);
         return memory;
+    }
+
+    private SearchResponse<JsonData> searchResponse(Long... memoryIds) {
+        List<Hit<JsonData>> hits = java.util.Arrays.stream(memoryIds)
+                .map(id -> Hit.<JsonData>of(hit -> hit
+                        .index("memory-test")
+                        .id("memory:" + id)
+                        .source(JsonData.fromJson("{\"metadata\":{\"memoryId\":" + id + "}}"))))
+                .toList();
+        return SearchResponse.of(response -> response
+                .took(0)
+                .timedOut(false)
+                .shards(shards -> shards.total(1).successful(1).failed(0))
+                .hits(searchHits -> searchHits.hits(hits)));
     }
 }

@@ -53,12 +53,22 @@ class TaskStepParamValidatorTests {
     }
 
     @Test
-    @DisplayName("NAVIGATE：第一版只认执行器实际支持的 userProfile（不复用前端七类导航白名单）")
-    void navigateOnlySupportsUserProfile() {
+    @DisplayName("NAVIGATE：静态页面、作者主页、按标题打开文章与执行器契约一致")
+    void navigateUsesExecutorContract() {
         assertThat(TaskStepParamValidator.validate(StepType.NAVIGATE, Map.of("target", "userProfile"))).isNull();
-        assertThat(TaskStepParamValidator.validate(StepType.NAVIGATE, Map.of("target", "home")))
-                .as("执行器不支持的导航目标要在规划期就拒掉，而不是执行期失败")
-                .isNotNull();
+        assertThat(TaskStepParamValidator.validate(StepType.NAVIGATE, Map.of("target", "home"))).isNull();
+        assertThat(TaskStepParamValidator.validate(StepType.NAVIGATE, Map.of("target", "profile"))).isNull();
+        assertThat(TaskStepParamValidator.validate(StepType.NAVIGATE, Map.of(
+                "target", "article", "articleTitle", "Redis 缓存"))).isNull();
+        assertThat(TaskStepParamValidator.validate(StepType.NAVIGATE, Map.of(
+                "target", "article", "param", "2085208555163787287"))).isNull();
+        assertThat(TaskStepParamValidator.validate(StepType.NAVIGATE, Map.of("target", "article")))
+                .contains("articleTitle 或 param");
+        assertThat(TaskStepParamValidator.validate(StepType.NAVIGATE, Map.of(
+                "target", "article", "param", "not-an-id")))
+                .contains("有效文章 ID");
+        assertThat(TaskStepParamValidator.validate(StepType.NAVIGATE, Map.of("target", "unknown")))
+                .contains("白名单");
         assertThat(TaskStepParamValidator.validate(StepType.NAVIGATE, Map.of())).contains("缺少 target");
     }
 

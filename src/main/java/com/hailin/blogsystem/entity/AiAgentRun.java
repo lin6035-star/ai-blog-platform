@@ -39,6 +39,15 @@ public class AiAgentRun {
     private String goal;
 
     /**
+     * 当前进程内使用的完整目标，不落库。
+     *
+     * <p>{@code goal} 列只有 500 字符，适合审计摘要；Task 的搜索后分析会在本轮携带
+     * 有界 RAG 正文，不能让 Generator 再从已截断的持久化字段取上下文。
+     */
+    @TableField(exist = false)
+    private String runtimeGoal;
+
+    /**
      * 运行状态：RUNNING / COMPLETED / FAILED / CANCELLED / WAITING_USER。
      */
     private String status;

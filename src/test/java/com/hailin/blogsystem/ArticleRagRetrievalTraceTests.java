@@ -137,6 +137,43 @@ class ArticleRagRetrievalTraceTests {
         assertThat(result.contexts()).containsExactly(context);
     }
 
+    @Test
+    void recordsGateDecisionsFromInitialAndFallbackRounds() {
+        AiIntent intent = new AiIntent();
+        intent.setIntent("ARTICLE_SEARCH");
+        intent.setKeyWord("库存超卖");
+
+        ArticleRagContext rejectedVector = new ArticleRagContext(1L, "消息队列", 0, "异步削峰");
+        ArticleRagContext acceptedFallback = new ArticleRagContext(2L, "秒杀系统", 1, "库存扣减与防超卖");
+
+        when(retrieveService.retrieve("怎么防止库存超卖")).thenReturn(List.of(rejectedVector));
+        when(keywordRetriever.retrieve("库存超卖")).thenReturn(List.of());
+        when(keywordRetriever.retrieveFallback("库存超卖")).thenReturn(List.of(acceptedFallback));
+        when(ranker.rankWithEvidence("库存超卖", List.of(rejectedVector)))
+                .thenReturn(modelResult(List.of(rejectedVector), 0.40D));
+        when(ranker.rankWithEvidence("库存超卖", List.of(rejectedVector, acceptedFallback)))
+                .thenReturn(modelResult(List.of(acceptedFallback), 0.90D));
+        when(articlesService.listByIds(List.of(2L))).thenReturn(publishedArticles(2L));
+
+        var result = searchService.search("怎么防止库存超卖", intent);
+
+        assertThat(result.contexts()).containsExactly(acceptedFallback);
+
+        ArgumentCaptor<ArticleRagRetrievalTrace> captor =
+                ArgumentCaptor.forClass(ArticleRagRetrievalTrace.class);
+        verify(traceRecorder).record(captor.capture());
+
+        assertThat(captor.getValue().gateDecisions())
+                .extracting(
+                        ArticleRagRetrievalTrace.GateDecision::articleId,
+                        ArticleRagRetrievalTrace.GateDecision::reason
+                )
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple(1L, "REJECT_LOW_RELEVANCE"),
+                        org.assertj.core.groups.Tuple.tuple(2L, "ACCEPT_RERANK")
+                );
+    }
+
     private ArticleRagRankResult modelResult(List<ArticleRagContext> contexts, double score) {
         return new ArticleRagRankResult(
                 ArticleRagRankResult.Status.MODEL_APPLIED,

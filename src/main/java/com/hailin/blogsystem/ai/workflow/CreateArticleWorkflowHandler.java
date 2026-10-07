@@ -1073,9 +1073,25 @@ public class CreateArticleWorkflowHandler extends AbstractWorkflowHandler {
             String requirement,
             String topicEvidence
     ) {
+        /*
+         * topicEvidence 缺失时用规则兜底（2026-10-04）。
+         *
+         * 分类器有两条路：plus 会输出 topicEvidence（prompt 要求逐字摘录原话），
+         * 而 Jev 是 decision 模型，只出各 goal 的概率、抽不出文本片段。不兜底的话，
+         * "帮我写一篇 Redis 缓存设计的文章"走 Jev 快速路径会被追问主题，
+         * 而同一句话走 plus 直接开跑——这是 Jev 扩到 Workflow 时引入的行为不一致。
+         *
+         * 兜底复用 extractTopic（旧入口 isRequirementUnclear(requirement) 同源）：
+         * 它循环剥掉"帮我 / 写一篇 / 文章"这类框架词，剥空即无主题，
+         * 所以"我想让你帮我写一篇文章"仍会被正确判为模糊，不会因为兜底而放行空主题。
+         */
+        String evidence = topicEvidence == null || topicEvidence.isBlank()
+                ? extractTopic(requirement)
+                : topicEvidence;
+
         String topic = validateTopicEvidence(
                 requirement,
-                topicEvidence
+                evidence
         );
 
         if (topic.isBlank()) {

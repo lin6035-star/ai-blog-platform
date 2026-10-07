@@ -40,4 +40,62 @@ class GteRerankV2ArticleRagRankerTests {
         assertThat(first.getClass().getMethod("rank").invoke(first)).isEqualTo(1);
         assertThat(first.getClass().getMethod("context").invoke(first)).isEqualTo(contexts.get(1));
     }
+
+    @Test
+    void selectRerankCandidatesCapsChunksPerArticleAndKeepsLaterArticles() {
+        GteRerankV2ArticleRagRanker ranker = new GteRerankV2ArticleRagRanker(
+                new BlogAiProperties(),
+                new DefaultArticleRagRanker()
+        );
+        List<ArticleRagContext> contexts = List.of(
+                context(1L, 0),
+                context(1L, 1),
+                context(1L, 2),
+                context(1L, 3),
+                context(2L, 0),
+                context(3L, 0)
+        );
+
+        Object selected = ReflectionTestUtils.invokeMethod(
+                ranker,
+                "selectRerankCandidates",
+                contexts,
+                5,
+                2
+        );
+
+        assertThat(selected).isEqualTo(List.of(
+                contexts.get(0),
+                contexts.get(1),
+                contexts.get(4),
+                contexts.get(5)
+        ));
+    }
+
+    @Test
+    void selectRerankCandidatesDoesNotCollapseContextsWithoutArticleId() {
+        GteRerankV2ArticleRagRanker ranker = new GteRerankV2ArticleRagRanker(
+                new BlogAiProperties(),
+                new DefaultArticleRagRanker()
+        );
+        List<ArticleRagContext> contexts = List.of(
+                context(null, 0),
+                context(null, 1),
+                context(1L, 0)
+        );
+
+        Object selected = ReflectionTestUtils.invokeMethod(
+                ranker,
+                "selectRerankCandidates",
+                contexts,
+                3,
+                1
+        );
+
+        assertThat(selected).isEqualTo(contexts);
+    }
+
+    private ArticleRagContext context(Long articleId, int chunkIndex) {
+        return new ArticleRagContext(articleId, "article-" + articleId, chunkIndex, "chunk-" + chunkIndex);
+    }
 }

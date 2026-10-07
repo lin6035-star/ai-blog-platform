@@ -3,8 +3,10 @@ package com.hailin.blogsystem.ai.task.plan;
 import com.hailin.blogsystem.ai.LogValues;
 import com.hailin.blogsystem.ai.task.StepType;
 import com.hailin.blogsystem.ai.task.TaskPlan;
+import com.hailin.blogsystem.ai.task.TaskStep;
 import com.hailin.blogsystem.entity.dto.AiIntent;
 import com.hailin.blogsystem.entity.dto.AiWorkflowType;
+import com.hailin.blogsystem.entity.dto.ArticleInteractionAction;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -14,6 +16,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 任务规划门面（第三刀·2c）——**聊天入口与编排层之间唯一的接口**。
@@ -71,6 +74,24 @@ public class TaskPlanningFacade {
         }
 
         /*
+         * 单独找文章继续走既有 RAG 问答链。
+         *
+         * ARTICLE_SEARCH 在 Task 中复用统一 RAG 检索，但只产出结构化证据，适合“搜索后再分析”这类复合计划；
+         * 单独找文章还会经过模型回答和 STOP.references。若也送进编排器，会退化成
+         * “已全部完成：找到 N 篇”的确定性汇总，并丢失推荐卡片。
+         *
+         * 同时校验旧 intent，避免 taskGoals 与旧分类字段冲突时误放进另一条能力链。
+         */
+        if (!plan.hasUncoveredGoals()
+                && plan.steps().size() == 1
+                && plan.steps().get(0).type() == StepType.ARTICLE_SEARCH
+                && intent != null
+                && "ARTICLE_SEARCH".equalsIgnoreCase(intent.getIntent())) {
+            log.info("[TASK-PLAN] 单一文章搜索继续走既有 RAG 链路");
+            return TaskRoute.legacy("单一文章搜索交给既有 RAG 链路");
+        }
+
+        /*
          * 5b（2026-10-01）：**单一 WORKFLOW_HANDOFF 计划继续走旧链**。
          *
          * 注册 WorkflowHandoffExecutor 之后 registry.supports(WORKFLOW_HANDOFF) 自然转真，
@@ -119,6 +140,29 @@ public class TaskPlanningFacade {
                 log.info("[TASK-PLAN] 分析诉求未被计划承接且计划含非写动作，拒绝执行一半: steps={}",
                         plan.steps().size());
                 return TaskRoute.cta("这个请求里有一部分我暂时做不到，先不动手——能拆开一句一句说吗？");
+            }
+            /*
+             * ★ 2026-10-07 实测修复：**分类器明确声明过的文章交互动作，计划里不能少。**
+             *
+             * 实测「点赞收藏文章，并分析一下文章，分析完文章之后再关注作者，最后跳转至作者的个人主页」
+             * 同一句话两次规划出现 3 步 ↔ 5 步：漏掉的是 followAuthor（以及 NAVIGATE），
+             * 都落在句子后半段。当时 uncovered=0，编排器照常执行并汇总成"已全部完成"——
+             * 用户以为关注了，其实没有。这是**静默半份**，不是性能问题。
+             *
+             * 判据读 requestedActions 而非 taskGoals，与 analysisGoalNotInPlan 同源：
+             * 摘录类字段（"用户说了哪些动作"）比结构化拆解字段（"拆成哪几步"）可靠，
+             * 而后者正是漏掉的那一环。
+             */
+            if (requestedActionsNotInPlan(plan, intent)) {
+                if (allStepsAreWrites(plan)) {
+                    // 全是写动作 = 第二刀那个复合组合，兼容路径能整体收口，退回不退步
+                    log.info("[TASK-PLAN] 声明的文章动作未被计划承接，显式回退兼容链路: steps={}",
+                            plan.steps().size());
+                    return TaskRoute.legacy("存在未迁移目标，交给兼容链路");
+                }
+                log.info("[TASK-PLAN] 声明的文章动作未被计划承接且计划含非写动作，拒绝执行一半: steps={}",
+                        plan.steps().size());
+                return TaskRoute.cta("这个请求里有几个动作我没能可靠拆出来，先不动手——能拆开一句一句说吗？");
             }
             return TaskRoute.orchestrate(plan);
         }
@@ -321,6 +365,40 @@ public class TaskPlanningFacade {
             return false;
         }
         return plan.steps().stream().noneMatch(s -> s.type() == StepType.ARTICLE_ANALYSIS);
+    }
+
+    /**
+     * 分类器已经声明了某个文章交互动作，但可执行计划里没有对应步骤。
+     *
+     * <p><b>为什么只认六项</b>：{@code requestedActions} 的取值域比 {@code ARTICLE_WRITE}
+     * 能承接的宽——它还含 {@code copyArticleLink} / {@code scrollToComments} 这类客户端动作，
+     * 那些本来就不进计划。拿全量去比对会把"正常"判成"漏目标"，于是每个复合请求都被拦下。
+     * 白名单直接用 {@link ArticleInteractionAction}，与规划期的参数校验同一个来源。
+     *
+     * <p><b>为什么读 requestedActions</b>：它是分类器对"用户说了哪些动作"的**逐字摘录**，
+     * 与 {@code analysisGoalEvidence} 同性质；而 {@code taskGoals} 是结构化拆解结果，
+     * 正是实测里会漏的那一环。判据只做 fail-closed，不自行补造缺失的步骤。
+     *
+     * <p>⚠️ 覆盖不到 {@code NAVIGATE}：{@code requestedActions} 不描述导航，
+     * 而改用原文标记词（"跳转" / "主页"）会把"分析一下关注度"这类误伤。
+     * 宁可少拦一种，也不引入会误杀的判据。
+     */
+    private boolean requestedActionsNotInPlan(TaskPlan plan, AiIntent intent) {
+        if (intent == null || plan.steps().isEmpty()) {
+            return false;
+        }
+        List<String> declared = intent.getRequestedActions();
+        if (declared == null || declared.isEmpty()) {
+            return false;
+        }
+        Set<String> planned = plan.steps().stream()
+                .filter(step -> step.type() == StepType.ARTICLE_WRITE)
+                .map(step -> text(step.input().get("action")))
+                .filter(action -> action != null && !action.isBlank())
+                .collect(Collectors.toSet());
+        return declared.stream()
+                .filter(action -> ArticleInteractionAction.fromClassifierValue(action).isPresent())
+                .anyMatch(action -> !planned.contains(action));
     }
 
     /**

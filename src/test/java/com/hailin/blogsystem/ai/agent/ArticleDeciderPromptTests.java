@@ -66,17 +66,24 @@ class ArticleDeciderPromptTests {
     // ==================== 门 1：FULL 逐字等价（安全网） ====================
 
     @Test
-    @DisplayName("FULL 正常轮与改造前逐字一致")
+    @DisplayName("FULL 正常轮除 answerPlan 协议外与改造前逐字一致")
     void fullNormalIsIdenticalToBaseline() throws Exception {
+        String expected = fixture(DeciderPromptBaselineDumpTests.FULL_NORMAL)
+                .replace("input.answer = 完整的回答文本（中文）",
+                        "input.answerPlan = 1-5 条简短的拟回答要点（中文，禁止展开成完整正文）");
         assertIdentical(DeciderPromptBaselineDumpTests.FULL_NORMAL,
-                fixture(DeciderPromptBaselineDumpTests.FULL_NORMAL), full.buildSystemPrompt(false));
+                expected, full.buildSystemPrompt(false));
     }
 
     @Test
-    @DisplayName("FULL 修复轮与改造前逐字一致")
+    @DisplayName("FULL 修复轮除 answerPlan 约束外与改造前逐字一致")
     void fullRepairIsIdenticalToBaseline() throws Exception {
+        String expected = fixture(DeciderPromptBaselineDumpTests.FULL_REPAIR)
+                .replace("禁止输出 markdown、代码块或任何解释文字。",
+                        "FINAL_ANSWER 必须带非空 input.answerPlan（1-5 条简短要点），禁止使用 input.answer。\n"
+                                + "禁止输出 markdown、代码块或任何解释文字。");
         assertIdentical(DeciderPromptBaselineDumpTests.FULL_REPAIR,
-                fixture(DeciderPromptBaselineDumpTests.FULL_REPAIR), full.buildSystemPrompt(true));
+                expected, full.buildSystemPrompt(true));
     }
 
     // ==================== 门 2：结构硬门 ====================
@@ -131,6 +138,19 @@ class ArticleDeciderPromptTests {
         }
         assertThat(prompt).contains("OPTIMIZE_ARTICLE");
         assertThat(prompt).contains("UPDATE_ARTICLE_TITLE");
+    }
+
+    @Test
+    @DisplayName("Article FINAL_ANSWER 只声明 answerPlan，不要求完整 answer")
+    void finalAnswerUsesAnswerPlanContract() {
+        for (ArticleAgentStepDecider decider : List.of(full, analysisOnly)) {
+            assertThat(decider.buildSystemPrompt(false))
+                    .contains("input.answerPlan")
+                    .doesNotContain("input.answer = 完整的回答文本");
+            assertThat(decider.buildSystemPrompt(true))
+                    .contains("FINAL_ANSWER 必须带非空 input.answerPlan")
+                    .contains("禁止使用 input.answer");
+        }
     }
 
     // ==================== 门 3：静态数字门 ====================

@@ -64,16 +64,18 @@ public class MemoryExtractionAsyncConfig {
      * 大头就是这两次向量召回（每次都要算 query embedding + 查 ES），并行后总耗时 ≈ 两者的 max。
      *
      * 独立成池（不复用上面的写侧池）：召回在**请求线程路径**上，被写侧任务挤占会直接拖慢首字。
-     * 队列用 CallerRunsPolicy 兜底——池满时退回调用线程执行，宁可慢也不丢。
+     * 这里不能排队，也不能用 CallerRunsPolicy：CompletableFuture 超时不会取消底层 HTTP 调用，
+     * 一次下游卡顿就会留下过期任务；退回请求线程还会绕过 3 秒 fail-open。池满时立即拒绝，
+     * 由 Prompt 构建层按「本轮无记忆」降级。
      */
     @Bean("memoryRecallExecutor")
     public Executor memoryRecallExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         executor.setCorePoolSize(2);
         executor.setMaxPoolSize(4);
-        executor.setQueueCapacity(50);
+        executor.setQueueCapacity(0);
         executor.setThreadNamePrefix("memory-recall-");
-        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
         // V4⑥ 可观测性：进池时复制 MDC，否则日志 traceId 一进线程池就断
         executor.setTaskDecorator(new ContextPropagatingTaskDecorator());
         executor.initialize();

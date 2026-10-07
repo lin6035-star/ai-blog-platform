@@ -5,11 +5,14 @@ import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentStepDecision;
 import com.hailin.blogsystem.ai.agent.AgentStepEmitter;
 import com.hailin.blogsystem.ai.agent.ArticleAgentActionExecutor;
+import com.hailin.blogsystem.ai.TokenUsageAccumulator;
+import com.hailin.blogsystem.ai.agent.ArticleAnswerGenerator;
 import com.hailin.blogsystem.ai.agent.ArticleAgentRuntime;
 import com.hailin.blogsystem.ai.agent.ArticleAgentStepDecider;
 import com.hailin.blogsystem.ai.agent.ArticleAnalysisStepDecider;
 import com.hailin.blogsystem.ai.agent.ArticleEvidenceVerifier;
 import com.hailin.blogsystem.ai.agent.ArticleSessionAnchorService;
+import com.hailin.blogsystem.ai.agent.GeneratedAnswer;
 import com.hailin.blogsystem.ai.agent.Verdict;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.AiAgentStep;
@@ -58,6 +61,7 @@ class ArticleAgentRuntimeDecisionContextTests {
     private ArticlesService articlesService;
     private ArticleSessionAnchorService anchorService;
     private ArticleEvidenceVerifier verifier;
+    private ArticleAnswerGenerator answerGenerator;
     private ArticleAgentRuntime runtime;
 
     @BeforeEach
@@ -70,16 +74,23 @@ class ArticleAgentRuntimeDecisionContextTests {
         articlesService = mock(ArticlesService.class);
         anchorService = mock(ArticleSessionAnchorService.class);
         verifier = mock(ArticleEvidenceVerifier.class);
+        answerGenerator = mock(ArticleAnswerGenerator.class);
 
         when(runMapper.insert(any(AiAgentRun.class))).thenAnswer(inv -> {
             AiAgentRun run = inv.getArgument(0);
             run.setId(1L);
             return 1;
         });
+        when(answerGenerator.generate(any(), any(), any(), any())).thenAnswer(inv -> {
+            AgentStepDecision decision = inv.getArgument(1);
+            Object text = decision.input().getOrDefault("answerPlan",
+                    decision.input().getOrDefault("answer", decision.input().getOrDefault("message", "")));
+            return new GeneratedAnswer(String.valueOf(text), new TokenUsageAccumulator(), false);
+        });
 
         runtime = new ArticleAgentRuntime(
                 decider, analysisDecider, executor, runMapper, stepMapper, new ObjectMapper(),
-                articlesService, anchorService, verifier);
+                articlesService, anchorService, verifier, answerGenerator);
     }
 
     @Test
@@ -112,8 +123,12 @@ class ArticleAgentRuntimeDecisionContextTests {
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
                         .withInput(Map.of("articleId", "12")))
                 .thenReturn(finalAnswer("草案 A"))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
+                        .withInput(Map.of("articleId", "12", "focus", "缓存击穿")))
                 .thenReturn(finalAnswer("草案 B"));
-        when(executor.execute(any(), any(), any())).thenReturn(articleReadResult());
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(articleReadResult())
+                .thenReturn(articleReadResult("聚焦片段：互斥锁兜底", "缓存击穿"));
         when(verifier.verify(any(), any(), any(), any(), any()))
                 .thenReturn(Verdict.needMore(Verdict.MissingEvidence.ARTICLE_CONTENT, "缺正文细节"))
                 .thenReturn(Verdict.sufficient());
@@ -194,8 +209,8 @@ class ArticleAgentRuntimeDecisionContextTests {
     }
 
     @Test
-    @DisplayName("P2.3 修订：重复证据时 lastStepHadNewEvidence=false 确实传给 Verifier（R3 放行靠它）")
-    void repeatedEvidenceFlagIsPassedToVerifier() {
+    @DisplayName("证据没有增量时第二次 FINAL_ANSWER 在 Verifier 前收敛")
+    void repeatedEvidenceStopsBeforeSecondVerifier() {
         when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE)
                         .withInput(Map.of("articleId", "12")))
@@ -212,13 +227,14 @@ class ArticleAgentRuntimeDecisionContextTests {
         runtime.run(100L, 200L, "分析这篇文章", articleContext("12"), AgentStepEmitter.noop());
 
         ArgumentCaptor<Boolean> flags = ArgumentCaptor.forClass(Boolean.class);
-        verify(verifier, times(2)).verify(any(), any(), any(), any(), flags.capture());
+        verify(verifier, times(1)).verify(any(), any(), any(), any(), flags.capture());
+        assertThat(flags.getValue()).as("第一次读文章是新证据").isTrue();
 
-        assertThat(flags.getAllValues().get(0)).as("第一次读文章是新证据").isTrue();
-        assertThat(flags.getAllValues().get(1))
-                .as("第二次读回逐字相同的内容 = 无新证据 → R3 才敢放行"
-                        + "（原先结构化路径下这个信号根本不存在，规则静默失效）")
-                .isFalse();
+        ArgumentCaptor<AiAgentStep> steps = ArgumentCaptor.forClass(AiAgentStep.class);
+        verify(stepMapper, atLeastOnce()).insert(steps.capture());
+        assertThat(steps.getAllValues().get(steps.getAllValues().size() - 1).getStatus())
+                .as("重复证据后的终稿不再送 Verifier，而是审计为 SKIPPED")
+                .isEqualTo("SKIPPED");
     }
 
     @Test
@@ -237,17 +253,21 @@ class ArticleAgentRuntimeDecisionContextTests {
 
     private AgentStepDecision finalAnswer(String answer) {
         return AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
-                .withInput(Map.of("answer", answer));
+                .withInput(Map.of("answerPlan", answer));
     }
 
     /** 带结构化事实的读文章结果——结构化路径要靠它建状态 */
     private AgentActionResult articleReadResult() {
-        return AgentActionResult.of("结构摘要：10 节 / 1.3 万字")
+        return articleReadResult("结构摘要：10 节 / 1.3 万字", null);
+    }
+
+    private AgentActionResult articleReadResult(String summary, String focus) {
+        return AgentActionResult.of(summary)
                 .with("articleId", "12")
                 .with("articleTitle", "Redis 缓存设计")
                 .with("owned", true)
-                .with("focus", null)
-                .with("focusHit", null);
+                .with("focus", focus)
+                .with("focusHit", focus == null ? null : true);
     }
 
     private static PageContextDTO articleContext(String articleId) {

@@ -76,7 +76,9 @@ public class ArticleRagSearchService {
                     List.of(),
                     List.of(),
                     List.of(),
+                    List.of(),
                     result.strategy(),
+                    false,
                     false,
                     0L,
                     0L,
@@ -117,6 +119,7 @@ public class ArticleRagSearchService {
         long rankStartedAt = System.nanoTime();
         ArticleRagRankResult rankResult = articleRagRanker.rankWithEvidence(rankQuestion, contexts);
         ArticleRagRelevanceGate.Result gateResult = relevanceGate.apply(lexicalQuery, rankResult);
+        List<ArticleRagRelevanceGate.Decision> allGateDecisions = new ArrayList<>(gateResult.decisions());
         List<ArticleRagContext> rankedContexts = rankResult.contexts();
         List<ArticleRagContext> acceptedContexts = gateResult.acceptedContexts();
 
@@ -128,6 +131,7 @@ public class ArticleRagSearchService {
             contexts = mergeContexts(vectorContexts, keywordContexts);
             rankResult = articleRagRanker.rankWithEvidence(rankQuestion, contexts);
             gateResult = relevanceGate.apply(lexicalQuery, rankResult);
+            allGateDecisions.addAll(gateResult.decisions());
             rankedContexts = rankResult.contexts();
             acceptedContexts = gateResult.acceptedContexts();
         }
@@ -176,8 +180,10 @@ public class ArticleRagSearchService {
                 ArticleRagRetrievalTrace.candidatesOf(contexts),
                 ArticleRagRetrievalTrace.candidatesOf(rankedContexts),
                 ArticleRagRetrievalTrace.candidatesOf(result.contexts()),
+                ArticleRagRetrievalTrace.decisionsOf(allGateDecisions),
                 result.strategy(),
                 true,
+                keywordFallbackTriggered,
                 vectorElapsedMs,
                 keywordElapsedMs,
                 rankElapsedMs,

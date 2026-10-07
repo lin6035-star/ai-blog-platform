@@ -4,9 +4,11 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.AiStageTimer;
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
 import com.hailin.blogsystem.ai.billing.BillingHandle;
 import com.hailin.blogsystem.ai.billing.ChatReserveCalculator;
+import com.hailin.blogsystem.ai.agent.AgentAnswerStreamException;
 import com.hailin.blogsystem.ai.agent.AgentFollowUpResolver;
 import com.hailin.blogsystem.ai.agent.AgentRunResult;
 import com.hailin.blogsystem.ai.agent.AgentRuntime;
@@ -25,6 +27,7 @@ import com.hailin.blogsystem.ai.qa.ArticleQaTargetResolver;
 import com.hailin.blogsystem.ai.qa.ArticleQaTargetResolver.QaTarget;
 import com.hailin.blogsystem.ai.task.AiOrchestrationTaskAdmission;
 import com.hailin.blogsystem.ai.task.OrchestrationOutcome;
+import com.hailin.blogsystem.ai.task.TaskArticleReferenceSupport;
 import com.hailin.blogsystem.ai.task.TaskPlan;
 import com.hailin.blogsystem.ai.task.TaskStepEventSink;
 import com.hailin.blogsystem.ai.task.TaskStepListener;
@@ -69,6 +72,7 @@ import reactor.core.publisher.SignalType;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
@@ -811,6 +815,7 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                     "state", r.state().name(),
                     "summary", r.summary() == null ? "" : r.summary()
             )).toList());
+            eventData.put("references", TaskArticleReferenceSupport.fromResults(outcome.results()));
 
             emitIfOpen(sink, AiChatEventVO.builder()
                     .eventType(AiChatEventType.STOP.getValue())
@@ -989,7 +994,6 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             TokenUsageAccumulator routeUsage
     ) {
 
-
         // V4.5：随流构建一起搬进本方法（原在 streamUserChat 里，doFinally 的取消兜底要用它）
         AtomicBoolean assistantSaved = new AtomicBoolean(false);
 
@@ -1098,21 +1102,29 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
          */
         TokenUsageAccumulator replyUsage = new TokenUsageAccumulator();
         AtomicBoolean timingLogged = new AtomicBoolean(false);
-        Flux<AiChatEventVO> dataEvents = aiModelService.streamChat(prompt,requestId,replyUsage)
-                .doOnNext(chunk -> {
-                    if (timingLogged.compareAndSet(false, true)) {
-                        // §4.0 的量测目的已达成（防抖 250ms 判定合理、记忆召回串行问题已定位并修复），
-                        // 降级 debug 避免每次对话刷屏；后续查「首 token 慢」时临时开 debug 即可
-                        log.debug("V4.5 首字前耗时: resolve={}ms buildPrompt={}ms ragSearch={}ms totalBeforeData={}ms",
-                                timings[0], timings[1], timings[2],
-                                System.currentTimeMillis() - flowStart);
-                    }
-                    fullReply.append(chunk);
-                })
-                .map(chunk -> AiChatEventVO.builder()
-                        .eventType(AiChatEventType.DATA.getValue())
-                        .eventData(chunk)
-                        .build());
+        Flux<AiChatEventVO> dataEvents = Flux.defer(() -> {
+            AiStageTimer generationTimer = AiStageTimer.start();
+            AtomicLong ttftMs = new AtomicLong(-1L);
+            return Flux.defer(() -> aiModelService.streamChat(prompt, requestId, replyUsage))
+                    .doOnNext(chunk -> {
+                        ttftMs.compareAndSet(-1L, generationTimer.elapsedMillis());
+                        if (timingLogged.compareAndSet(false, true)) {
+                            // §4.0 的量测目的已达成（防抖 250ms 判定合理、记忆召回串行问题已定位并修复），
+                            // 降级 debug 避免每次对话刷屏；后续查「首 token 慢」时临时开 debug 即可
+                            log.debug("V4.5 首字前耗时: resolve={}ms buildPrompt={}ms ragSearch={}ms totalBeforeData={}ms",
+                                    timings[0], timings[1], timings[2],
+                                    System.currentTimeMillis() - flowStart);
+                        }
+                        fullReply.append(chunk);
+                    })
+                    .doFinally(signalType -> log.info(
+                            "[PERF-AI] stage=generation ttftMs={} durationMs={} signal={}",
+                            ttftMs.get(), generationTimer.elapsedMillis(), signalType))
+                    .map(chunk -> AiChatEventVO.builder()
+                            .eventType(AiChatEventType.DATA.getValue())
+                            .eventData(chunk)
+                            .build());
+        });
 
         Mono<AiChatEventVO> stopEvent = Mono.fromSupplier(() -> {
             AiMessages assistantMessage = saveStreamAssistantMessage(sessionId,userId,rawPageContextJson, fullReply.toString());
@@ -1342,6 +1354,7 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
          * 与 Workflow 的 Flux.create + boundedElastic 模式一致。
          */
         Flux<AiChatEventVO> agentEvents = Flux.create(sink -> {
+            AtomicBoolean answerChunkDelivered = new AtomicBoolean(false);
             // V3.13：改为匿名类——lambda 不能覆写默认方法，只加接口默认方法而不改这里，
             // 计划会落库但永远不会实时展示
             AgentStepEmitter emitter = new AgentStepEmitter() {
@@ -1361,6 +1374,19 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                             .eventType(AiChatEventType.AGENT_STEP.getValue())
                             .eventData(data)
                             .build());
+                }
+
+                @Override
+                public boolean emitAnswerChunk(String chunk) {
+                    if (chunk == null || chunk.isEmpty() || sink.isCancelled()) {
+                        return false;
+                    }
+                    sink.next(AiChatEventVO.builder()
+                            .eventType(AiChatEventType.DATA.getValue())
+                            .eventData(chunk)
+                            .build());
+                    answerChunkDelivered.set(true);
+                    return true;
                 }
 
                 /**
@@ -1411,12 +1437,15 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                             ? fallbackReply
                             : result.finalAnswer();
 
-                    // 正文：复合路径的动作段已在上面发过，这里只发分析段
-                    for (String chunk : splitIntoChunks(agentReply, 32)) {
-                        emitIfOpen(sink, AiChatEventVO.builder()
-                                .eventType(AiChatEventType.DATA.getValue())
-                                .eventData(chunk)
-                                .build());
+                    // Article Generator 已直接交付 chunk 时不能再次回放权威全文；
+                    // 其他 Agent 域仍沿用完成后的分块输出。
+                    if (!answerChunkDelivered.get()) {
+                        for (String chunk : splitIntoChunks(agentReply, 32)) {
+                            emitIfOpen(sink, AiChatEventVO.builder()
+                                    .eventType(AiChatEventType.DATA.getValue())
+                                    .eventData(chunk)
+                                    .build());
+                        }
                     }
 
                     // 落库的是完整文案：复合路径 = 动作段 + 分析段，刷新后看到的是完整回复
@@ -1489,6 +1518,12 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                             .build());
 
                     completeIfOpen(sink);
+                } catch (AgentAnswerStreamException e) {
+                    // 已展示的正文无法撤回，不能再落一条兜底成功消息掩盖流中断。
+                    log.error("Agent 正文流在部分交付后中断: userId={}", userId, e);
+                    if (!sink.isCancelled()) {
+                        sink.error(e);
+                    }
                 } catch (Throwable e) {
                     log.error("Agent 流式执行异常: userId={}", userId, e);
                     // 复合请求：批次可能已经产生了真实结果，不能因为分析段异常就把它丢掉——

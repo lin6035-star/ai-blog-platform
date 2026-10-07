@@ -85,10 +85,10 @@ class ArticleRagRetrieveServiceTests {
     }
 
     @Test
-    void stillSearchesWhileFirstCanaryInspectionHasNotRun() {
-        // SUSPECT（首次巡检未完成）必须照常检索：否则每次应用启动后的
-        // initial-delay 窗口内，站内语义召回会静默变空。
-        when(healthService.denseSearchAllowed()).thenReturn(true);
+    void skipsDenseRetrievalBeforeFirstCanaryInspection() {
+        // SUSPECT（尚未巡检）不放行：停机期间 embedding 服务可能已经变化，
+        // "还没巡检"不等于"索引健康"。首次巡检延迟已压到 1s，可用性代价可控。
+        when(healthService.denseSearchAllowed()).thenReturn(false);
         when(healthService.current()).thenReturn(new ArticleRagIndexHealthService.Snapshot(
                 ArticleRagIndexHealthService.State.SUSPECT,
                 "尚未完成首次 canary 巡检",
@@ -96,11 +96,11 @@ class ArticleRagRetrieveServiceTests {
                 Instant.now(),
                 null
         ));
-        when(vectorStore.similaritySearch(any(SearchRequest.class))).thenReturn(List.of());
 
-        retrieveService.retrieve("Redis 能做什么");
+        List<ArticleRagContext> contexts = retrieveService.retrieve("Redis 能做什么");
 
-        verify(vectorStore).similaritySearch(any(SearchRequest.class));
+        assertThat(contexts).isEmpty();
+        verify(vectorStore, never()).similaritySearch(any(SearchRequest.class));
     }
 
     @Test

@@ -20,7 +20,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Collectors;
+import java.util.function.LongPredicate;
 
 /**
  * 按 MySQL 权威数据重刷 Memory 的存量向量，并对齐两侧的文档集合。
@@ -71,40 +71,61 @@ public class MemoryRagReindexService {
             aiEpisodicMemoryIndexService.indexMemory(memory);
         }
 
-        int purged = purgeOrphans(USER_MEMORY_SOURCE, idsOfUserMemories(userMemories))
-                + purgeOrphans(EPISODIC_MEMORY_SOURCE, idsOfEpisodicMemories(episodicMemories));
+        int purged = purgeOrphans(USER_MEMORY_SOURCE, this::userMemoryStillActive)
+                + purgeOrphans(EPISODIC_MEMORY_SOURCE, this::episodicMemoryStillExists);
 
         log.info("[MEMORY-REINDEX] 记忆向量重刷完成：userMemories={}, episodicMemories={}, purgedOrphans={}",
                 userMemories.size(), episodicMemories.size(), purged);
         return new ReindexOutcome(userMemories.size(), episodicMemories.size(), purged);
     }
 
-    private int purgeOrphans(String source, Set<Long> liveIds) {
+    /**
+     * 清理“索引里有、MySQL 里没有”的记忆。
+     *
+     * <p>重刷是耗时动作（每条一次 embedding 调用），初始 MySQL 快照在执行期间可能已经过期：
+     * 新增记忆不能误删，已删除记忆也不能被旧快照重新写回。因此 ES 中当前存在的所有 memoryId
+     * 都逐条回数据库确认；候选数量本来就少，额外点查可以忽略。
+     */
+    private int purgeOrphans(String source, LongPredicate stillPresent) {
         Set<Long> indexedIds = loadIndexedMemoryIds(source);
-        List<Long> orphans = findOrphanIds(indexedIds, liveIds);
-
-        for (Long orphan : orphans) {
-            if (EPISODIC_MEMORY_SOURCE.equals(source)) {
-                aiEpisodicMemoryIndexService.deleteMemoryIndex(orphan);
-            } else {
-                aiMemoryIndexService.deleteMemoryIndex(orphan);
-            }
-            log.warn("[MEMORY-REINDEX] 清理幽灵记忆文档：source={}, memoryId={}", source, orphan);
-        }
-        return orphans.size();
-    }
-
-    /** 索引里有、MySQL 里没有的记忆 ID。纯函数，便于单测。 */
-    public static List<Long> findOrphanIds(Set<Long> indexedIds, Set<Long> liveIds) {
-        if (indexedIds == null || indexedIds.isEmpty()) {
-            return List.of();
-        }
-        Set<Long> live = liveIds == null ? Set.of() : liveIds;
-        return indexedIds.stream()
+        List<Long> candidates = indexedIds.stream()
                 .filter(Objects::nonNull)
-                .filter(id -> !live.contains(id))
                 .sorted()
                 .toList();
+        List<Long> confirmable = confirmPurgeCandidates(candidates, stillPresent);
+
+        for (Long candidate : confirmable) {
+            if (EPISODIC_MEMORY_SOURCE.equals(source)) {
+                aiEpisodicMemoryIndexService.deleteMemoryIndex(candidate);
+            } else {
+                aiMemoryIndexService.deleteMemoryIndex(candidate);
+            }
+            log.warn("[MEMORY-REINDEX] 清理幽灵记忆文档：source={}, memoryId={}", source, candidate);
+        }
+        return confirmable.size();
+    }
+
+    /**
+     * 候选孤儿里**经数据库确认已不存在**、可安全删除的部分。
+     *
+     * <p>纯函数，便于单测：ES 文档只是候选，真正的删除依据是删除前的数据库确认。
+     */
+    public static List<Long> confirmPurgeCandidates(List<Long> candidates, LongPredicate stillPresent) {
+        if (candidates == null || candidates.isEmpty()) {
+            return List.of();
+        }
+        return candidates.stream()
+                .filter(id -> id != null && !stillPresent.test(id))
+                .toList();
+    }
+
+    private boolean userMemoryStillActive(Long memoryId) {
+        AiUserMemories memory = aiUserMemoryMapper.selectById(memoryId);
+        return memory != null && Integer.valueOf(1).equals(memory.getEnabled());
+    }
+
+    private boolean episodicMemoryStillExists(Long memoryId) {
+        return aiEpisodicMemoryMapper.selectById(memoryId) != null;
     }
 
     /** 读取失败返回空集——调用方据此跳过清理，避免误删。 */
@@ -136,20 +157,6 @@ public class MemoryRagReindexService {
             log.warn("[MEMORY-REINDEX] 读取 {} 索引文档失败，本次跳过幽灵文档清理：{}", source, e.getMessage());
             return Set.of();
         }
-    }
-
-    private Set<Long> idsOfUserMemories(List<AiUserMemories> memories) {
-        return memories.stream()
-                .map(AiUserMemories::getId)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toCollection(LinkedHashSet::new));
-    }
-
-    private Set<Long> idsOfEpisodicMemories(List<AiEpisodicMemories> memories) {
-        return memories.stream()
-                .map(AiEpisodicMemories::getId)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
     /** 重刷统计；接口返回体不引入新的前端协议。 */

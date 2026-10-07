@@ -27,6 +27,14 @@ public interface AgentStepEmitter {
     default void emitPlan(Long agentRunId, List<String> plan) {
     }
 
+    /**
+     * 最终正文的实时 chunk。返回 true 表示已经交付给外部响应，后续失败时不得从头重试。
+     * 默认 false 让任务编排与测试继续只收集权威全文，不提前透出子 run 正文。
+     */
+    default boolean emitAnswerChunk(String chunk) {
+        return false;
+    }
+
     static AgentStepEmitter noop() {
         return (stepNo, actionType, status, message, thoughtSummary) -> {
         };

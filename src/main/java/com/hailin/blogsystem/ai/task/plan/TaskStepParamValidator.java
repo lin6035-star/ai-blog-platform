@@ -92,12 +92,29 @@ final class TaskStepParamValidator {
         if (target == null || target.isBlank()) {
             return "缺少 target";
         }
-        // 第一版只允许执行器**实际支持**的目标，不能复用全局导航的七类白名单——
-        // 那是前端能力清单，不是这个执行器的能力（校验严于执行同样会造成误杀）
-        if (!NavigateExecutor.TARGET_USER_PROFILE.equals(target)) {
+        if (!NavigateExecutor.supportsTarget(target)) {
             return "target 不在导航白名单内（原值 " + safeForLog(target) + "）";
         }
+        if (NavigateExecutor.isArticleTarget(target)) {
+            String articleTitle = text(params, "articleTitle");
+            String articleId = text(params, "param");
+            if ((articleTitle == null || articleTitle.isBlank())
+                    && (articleId == null || articleId.isBlank())) {
+                return "打开文章缺少 articleTitle 或 param";
+            }
+            if ((articleTitle == null || articleTitle.isBlank()) && !isPositiveLong(articleId)) {
+                return "param 不是有效文章 ID（原值 " + safeForLog(articleId) + "）";
+            }
+        }
         return null;
+    }
+
+    private static boolean isPositiveLong(String value) {
+        try {
+            return value != null && Long.parseLong(value) > 0;
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
     }
 
     private static String text(Map<String, Object> params, String key) {

@@ -3,9 +3,12 @@ package com.hailin.blogsystem;
 import com.hailin.blogsystem.ai.agent.AgentStepDecision;
 import com.hailin.blogsystem.ai.agent.AgentThoughtSanitizer;
 import com.hailin.blogsystem.ai.agent.ArticleAgentStepDecider;
+import com.hailin.blogsystem.ai.agent.ArticleAnalysisStepDecider;
 import com.hailin.blogsystem.ai.agent.GeneralAgentStepDecider;
 import com.hailin.blogsystem.ai.agent.LlmAgentStepDecider;
+import com.hailin.blogsystem.ai.rag.ArticleRagPromptBuilder;
 import com.hailin.blogsystem.entity.dto.AgentStepActionType;
+import com.hailin.blogsystem.entity.dto.ArticleRagContext;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -42,6 +45,12 @@ class LlmAgentStepDeciderOnlineSmokeTests {
 
     @Autowired
     private ArticleAgentStepDecider articleAgentStepDecider;
+
+    @Autowired
+    private ArticleAnalysisStepDecider articleAnalysisStepDecider;
+
+    @Autowired
+    private ArticleRagPromptBuilder articleRagPromptBuilder;
 
     /** mock 掉真 ES vectorStore（decider 本身不碰 ES，只为不拖 Spring 上下文） */
     @MockBean
@@ -93,6 +102,36 @@ class LlmAgentStepDeciderOnlineSmokeTests {
         AgentStepDecision decision = articleAgentStepDecider.decide(
                 "帮我分析这篇文章的结构", "（无）", 1, 5, null);
         assertDecisionOk(decision, ARTICLE_ALLOWED);
+    }
+
+    @Test
+    void compoundSearchComparisonProducesValidAnalysisDecision() {
+        String goal = articleRagPromptBuilder.buildPrompt(
+                "帮我找找关于 Redis 的文章，并横向分析一下各篇文章\n\n"
+                        + "【已完成的前置动作】找到 3 篇 Redis 相关文章\n\n"
+                        + "【这一步要完成的】横向分析一下各篇文章",
+                java.util.List.of(
+                        new ArticleRagContext(1L, "Redis 缓存入门", 0,
+                                "介绍 Redis 数据结构、缓存穿透、击穿与雪崩。"),
+                        new ArticleRagContext(2L, "Redis 缓存工程化", 1,
+                                "比较旁路缓存、延迟双删与最终一致性的边界。"),
+                        new ArticleRagContext(3L, "Redis 秒杀实战", 2,
+                                "介绍库存预扣、Lua 原子扣减与异步削峰。")
+                ));
+
+        AgentStepDecision decision = articleAnalysisStepDecider.decide(
+                goal, "（无）", 1, 6, null);
+
+        assertThat(decision).isNotNull();
+        assertThat(decision.actionType()).isIn(
+                AgentStepActionType.QUERY_ARTICLE,
+                AgentStepActionType.QUERY_MEMORY,
+                AgentStepActionType.SEARCH_RAG,
+                AgentStepActionType.FINAL_ANSWER);
+        if (decision.actionType() == AgentStepActionType.FINAL_ANSWER) {
+            assertThat(decision.input()).containsKey("answerPlan");
+            assertThat(String.valueOf(decision.input().get("answerPlan"))).isNotBlank();
+        }
     }
 
     private void assertDecisionOk(AgentStepDecision decision, Set<AgentStepActionType> allowed) {

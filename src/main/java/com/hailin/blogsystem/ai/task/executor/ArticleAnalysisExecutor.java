@@ -4,6 +4,7 @@ import com.hailin.blogsystem.ai.agent.AgentCompletionKind;
 import com.hailin.blogsystem.ai.agent.AgentRunResult;
 import com.hailin.blogsystem.ai.agent.AgentStepEmitter;
 import com.hailin.blogsystem.ai.agent.ArticleAgentRuntime;
+import com.hailin.blogsystem.ai.rag.ArticleRagPromptBuilder;
 import com.hailin.blogsystem.ai.task.StepCode;
 import com.hailin.blogsystem.ai.task.StepResult;
 import com.hailin.blogsystem.ai.task.StepType;
@@ -11,6 +12,7 @@ import com.hailin.blogsystem.ai.task.TaskExecutionContext;
 import com.hailin.blogsystem.ai.task.TaskStep;
 import com.hailin.blogsystem.ai.task.TaskStepExecutor;
 import com.hailin.blogsystem.entity.dto.AiAgentRunStatus;
+import com.hailin.blogsystem.entity.dto.ArticleRagContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -39,7 +41,10 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class ArticleAnalysisExecutor implements TaskStepExecutor {
 
+    private static final int RAG_CONTEXT_LIMIT = 5;
+
     private final ArticleAgentRuntime articleAgentRuntime;
+    private final ArticleRagPromptBuilder articleRagPromptBuilder;
 
     @Override
     public StepType supports() {
@@ -159,18 +164,59 @@ public class ArticleAnalysisExecutor implements TaskStepExecutor {
         if (!done.isEmpty()) {
             sb.append("\n\n【已完成的前置动作】\n").append(String.join("\n", done));
         }
-        appendSearchEvidence(sb, context, step);
         if (!step.goalEvidence().isEmpty()) {
             sb.append("\n\n【这一步要完成的】").append(String.join("；", step.goalEvidence()));
         }
+
+        List<ArticleRagContext> ragContexts = collectSearchRagContexts(context, step);
+        if (!ragContexts.isEmpty()) {
+            return articleRagPromptBuilder.buildPrompt(sb.toString(), ragContexts);
+        }
+
+        appendLegacySearchEvidence(sb, context, step);
         return sb.toString();
     }
 
     /**
-     * 搜索结果比较的轻量证据：只取已完成搜索步骤的 ID / 标题 / 摘要，不注入多篇完整正文。
-     * 上限与 ArticleSearchExecutor 一致为 5 条，摘要再截断，避免比较任务把 Prompt 撑大。
+     * 当前 Task run 的 RAG 正文证据。它只从前序搜索步骤的结构化输出恢复，
+     * 不进入会话历史或 Memory；最多 5 个 chunk，防止异常持久化数据撑爆 Prompt。
      */
-    private void appendSearchEvidence(StringBuilder sb, TaskExecutionContext context, TaskStep current) {
+    private List<ArticleRagContext> collectSearchRagContexts(TaskExecutionContext context, TaskStep current) {
+        List<ArticleRagContext> contexts = new ArrayList<>();
+        for (TaskStep other : context.plan().steps()) {
+            if (other.stepId().equals(current.stepId())) {
+                break;
+            }
+            if (other.type() != StepType.ARTICLE_SEARCH) {
+                continue;
+            }
+            StepResult result = context.resultOf(other.stepId());
+            if (result == null || !result.isSuccessLike()) {
+                continue;
+            }
+            Object rawContexts = result.output().get("ragContexts");
+            if (!(rawContexts instanceof List<?> items)) {
+                continue;
+            }
+            for (Object rawContext : items) {
+                if (!(rawContext instanceof Map<?, ?> item) || contexts.size() >= RAG_CONTEXT_LIMIT) {
+                    continue;
+                }
+                Long articleId = longValue(item.get("articleId"));
+                Integer chunkIndex = intValue(item.get("chunkIndex"));
+                String title = text(item.get("title"));
+                String content = text(item.get("content"));
+                if (articleId == null || content.isBlank()) {
+                    continue;
+                }
+                contexts.add(new ArticleRagContext(articleId, title, chunkIndex, content));
+            }
+        }
+        return contexts;
+    }
+
+    /** 历史 Task 没有 ragContexts 时，继续消费旧的文章摘要，保证持久化任务可恢复。 */
+    private void appendLegacySearchEvidence(StringBuilder sb, TaskExecutionContext context, TaskStep current) {
         List<String> lines = new ArrayList<>();
         for (TaskStep other : context.plan().steps()) {
             if (other.stepId().equals(current.stepId())) {
@@ -211,6 +257,30 @@ public class ArticleAnalysisExecutor implements TaskStepExecutor {
             sb.append("\n\n【搜索结果证据】\n")
                     .append(String.join("\n", lines))
                     .append("\n只基于以上证据比较；证据未覆盖的维度明确写无法判断，不要声称已经读完全文。");
+        }
+    }
+
+    private Long longValue(Object value) {
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        try {
+            String text = text(value);
+            return text.isBlank() ? null : Long.valueOf(text);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private Integer intValue(Object value) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        try {
+            String text = text(value);
+            return text.isBlank() ? null : Integer.valueOf(text);
+        } catch (NumberFormatException ignored) {
+            return null;
         }
     }
 

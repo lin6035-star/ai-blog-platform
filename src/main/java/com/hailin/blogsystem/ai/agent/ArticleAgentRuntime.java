@@ -75,6 +75,7 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
     private final ArticlesService articlesService;
     private final ArticleSessionAnchorService anchorService;
     private final ArticleEvidenceVerifier evidenceVerifier;
+    private final ArticleAnswerGenerator answerGenerator;
 
     public ArticleAgentRuntime(
             // 两个 decider 是父子关系，按类型注入会撞上两个候选，必须显式指定 bean 名
@@ -86,7 +87,8 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
             ObjectMapper objectMapper,
             ArticlesService articlesService,
             ArticleSessionAnchorService anchorService,
-            ArticleEvidenceVerifier evidenceVerifier
+            ArticleEvidenceVerifier evidenceVerifier,
+            ArticleAnswerGenerator answerGenerator
     ) {
         super(executor, runMapper, stepMapper, objectMapper);
         this.decider = decider;
@@ -94,6 +96,7 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
         this.articlesService = articlesService;
         this.anchorService = anchorService;
         this.evidenceVerifier = evidenceVerifier;
+        this.answerGenerator = answerGenerator;
     }
 
     /**
@@ -268,6 +271,25 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
         }
         return evidenceVerifier.verify(run, decision, evidence, successfulActions,
                 runState == null ? null : runState.lastStepHadNewEvidence());
+    }
+
+    @Override
+    protected boolean usesGeneratedFinalAnswer() {
+        return true;
+    }
+
+    @Override
+    protected GeneratedAnswer generateFinalAnswer(
+            AiAgentRun run,
+            AgentStepDecision decision,
+            List<String> observations,
+            AgentRunState runState,
+            AgentStepEmitter emitter
+    ) {
+        String evidence = runState == null
+                ? clipContext(observations)
+                : runState.verificationEvidence();
+        return answerGenerator.generate(run, decision, evidence, emitter);
     }
 
     /**

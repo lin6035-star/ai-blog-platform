@@ -1,27 +1,21 @@
 package com.hailin.blogsystem;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.TokenUsageAccumulator;
 import com.hailin.blogsystem.ai.agent.AgentActionResult;
+import com.hailin.blogsystem.ai.agent.AgentAnswerStreamException;
 import com.hailin.blogsystem.ai.agent.AgentCompletionKind;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentRunResult;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentStepDecision;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentStepEmitter;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.ArticleAgentActionExecutor;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.ArticleAgentRuntime;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
-import com.hailin.blogsystem.ai.agent.ArticleAnalysisStepDecider;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.ArticleAgentStepDecider;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
+import com.hailin.blogsystem.ai.agent.ArticleAnalysisStepDecider;
+import com.hailin.blogsystem.ai.agent.ArticleAnswerGenerator;
 import com.hailin.blogsystem.ai.agent.ArticleEvidenceVerifier;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.ArticleSessionAnchorService;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
+import com.hailin.blogsystem.ai.agent.GeneratedAnswer;
 import com.hailin.blogsystem.ai.agent.Verdict;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.AiAgentStep;
@@ -37,13 +31,18 @@ import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
+import java.util.ArrayList;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -65,6 +64,7 @@ class ArticleAgentRuntimeVerifierTests {
     private ArticlesService articlesService;
     private ArticleSessionAnchorService anchorService;
     private ArticleEvidenceVerifier verifier;
+    private ArticleAnswerGenerator answerGenerator;
     private ArticleAgentRuntime runtime;
 
     private static PageContextDTO articleContext(String articleId) {
@@ -84,22 +84,29 @@ class ArticleAgentRuntimeVerifierTests {
         articlesService = mock(ArticlesService.class);
         anchorService = mock(ArticleSessionAnchorService.class);
         verifier = mock(ArticleEvidenceVerifier.class);
+        answerGenerator = mock(ArticleAnswerGenerator.class);
 
         when(runMapper.insert(any(AiAgentRun.class))).thenAnswer(inv -> {
             AiAgentRun run = inv.getArgument(0);
             run.setId(1L);
             return 1;
         });
+        when(answerGenerator.generate(any(), any(), any(), any())).thenAnswer(inv -> {
+            AgentStepDecision decision = inv.getArgument(1);
+            Object text = decision.input().getOrDefault("answerPlan",
+                    decision.input().getOrDefault("answer", decision.input().getOrDefault("message", "")));
+            return new GeneratedAnswer(String.valueOf(text), new TokenUsageAccumulator(), false);
+        });
 
         runtime = new ArticleAgentRuntime(
                 decider, analysisDecider, executor, runMapper, stepMapper, new ObjectMapper(),
-                articlesService, anchorService, verifier
+                articlesService, anchorService, verifier, answerGenerator
         );
     }
 
     private AgentStepDecision finalAnswer(String answer) {
         return AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
-                .withInput(Map.of("answer", answer));
+                .withInput(Map.of("answerPlan", answer));
     }
 
     @Test
@@ -133,6 +140,7 @@ class ArticleAgentRuntimeVerifierTests {
         assertThat(steps.get(1).getActionType()).isEqualTo("QUERY_ARTICLE");
         assertThat(steps.get(2).getActionType()).isEqualTo("FINAL_ANSWER");
         assertThat(steps.get(2).getStatus()).isEqualTo("SUCCESS");
+        verify(verifier, times(2)).verify(any(), any(), any(), any(), any());
         // 拦截提示进上下文（下一轮决策器看到缺什么）
         AiAgentRun saved = captureRun();
         assertThat(saved.getContextJson()).contains("回答依据不足");
@@ -207,8 +215,8 @@ class ArticleAgentRuntimeVerifierTests {
     }
 
     @Test
-    void unresolvedRejectionAtMaxStepsShutsDownConservatively() {
-        // 决策器固执地反复 FINAL_ANSWER，验证器恒 NEED_MORE → 5 步全拦 → 到顶保守收尾
+    void repeatedFinalAnswerWithoutEvidenceProgressStopsAtSecondStep() {
+        // 决策器固执地反复 FINAL_ANSWER：第二次没有任何新增证据，Runtime 必须立即收敛
         when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
                 .thenReturn(finalAnswer("这篇不错"));
         when(verifier.verify(any(), any(), any(), any(), any()))
@@ -219,9 +227,14 @@ class ArticleAgentRuntimeVerifierTests {
                 articleContext("12"), com.hailin.blogsystem.ai.agent.AgentStepEmitter.noop());
 
         assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
-        assertThat(result.usedSteps()).isEqualTo(6);
+        assertThat(result.usedSteps()).isEqualTo(2);
         // 保守收尾文案（不走 summarize 硬答）
         assertThat(result.finalAnswer()).contains("不足以让我给出可靠结论");
+        verify(verifier, times(1)).verify(any(), any(), any(), any(), any());
+        verify(answerGenerator, never()).generate(any(), any(), any(), any());
+        assertThat(captureSteps())
+                .extracting(AiAgentStep::getStatus)
+                .containsExactly("FAILED", "SKIPPED");
         verify(decider, never()).summarize(any(), any(), any());
     }
 
@@ -253,7 +266,9 @@ class ArticleAgentRuntimeVerifierTests {
                 .thenReturn(finalAnswer("草案三"))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE));
         when(executor.execute(any(), any(), any()))
-                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》"));
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》\n- 正文片段：第一处"))
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》\n- 正文片段：第二处"))
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》\n- 正文片段：第三处"));
         when(verifier.verify(any(), any(), any(), any(), any()))
                 .thenReturn(Verdict.needMore(Verdict.MissingEvidence.ARTICLE_CONTENT, "缺细节"));
 
@@ -282,6 +297,106 @@ class ArticleAgentRuntimeVerifierTests {
 
         assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
         assertThat(result.finalAnswer()).isEqualTo("直接回答");
+        verify(answerGenerator, times(1)).generate(any(), any(), any(), any());
+    }
+
+    @Test
+    void generatedAnswerTransitionsSameFinalStepFromRunningToSuccess() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(finalAnswer("结论：结构清晰"));
+        when(verifier.verify(any(), any(), any(), any(), any())).thenReturn(Verdict.sufficient());
+        doReturn(new GeneratedAnswer("最终正文", new TokenUsageAccumulator(), false))
+                .when(answerGenerator).generate(any(), any(), any(), any());
+        List<String> statuses = new ArrayList<>();
+        when(stepMapper.insert(any(AiAgentStep.class))).thenAnswer(inv -> {
+            AiAgentStep step = inv.getArgument(0);
+            step.setId(88L);
+            if ("FINAL_ANSWER".equals(step.getActionType())) {
+                statuses.add(step.getStatus());
+            }
+            return 1;
+        });
+        when(stepMapper.updateById(any(AiAgentStep.class))).thenAnswer(inv -> {
+            AiAgentStep step = inv.getArgument(0);
+            statuses.add(step.getStatus());
+            return 1;
+        });
+
+        AgentRunResult result = runtime.run(100L, 200L, "分析文章",
+                articleContext("12"), AgentStepEmitter.noop());
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.finalAnswer()).isEqualTo("最终正文");
+        assertThat(statuses).containsExactly("RUNNING", "SUCCESS");
+    }
+
+    @Test
+    void generationFailureTransitionsSameStepToFailedAndCountsUsage() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(finalAnswer("结论：结构清晰"));
+        when(verifier.verify(any(), any(), any(), any(), any())).thenReturn(Verdict.sufficient());
+        TokenUsageAccumulator usage = new TokenUsageAccumulator();
+        org.springframework.ai.chat.metadata.Usage rawUsage = mock(org.springframework.ai.chat.metadata.Usage.class);
+        when(rawUsage.getPromptTokens()).thenReturn(10);
+        when(rawUsage.getCompletionTokens()).thenReturn(2);
+        when(rawUsage.getTotalTokens()).thenReturn(12);
+        usage.add(rawUsage);
+        doThrow(new AgentAnswerStreamException("生成失败", new RuntimeException("503"), usage, false))
+                .when(answerGenerator).generate(any(), any(), any(), any());
+        List<String> statuses = new ArrayList<>();
+        when(stepMapper.insert(any(AiAgentStep.class))).thenAnswer(inv -> {
+            AiAgentStep step = inv.getArgument(0);
+            step.setId(89L);
+            statuses.add(step.getStatus());
+            return 1;
+        });
+        when(stepMapper.updateById(any(AiAgentStep.class))).thenAnswer(inv -> {
+            statuses.add(inv.<AiAgentStep>getArgument(0).getStatus());
+            return 1;
+        });
+
+        AgentRunResult result = runtime.run(100L, 200L, "分析文章",
+                articleContext("12"), AgentStepEmitter.noop());
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
+        assertThat(result.totalTokens()).isEqualTo(12);
+        assertThat(statuses).containsExactly("RUNNING", "FAILED");
+        verify(anchorService, never()).markConclusion(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void deliveredGenerationFailureEscapesRuntimeAfterMarkingFailed() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(finalAnswer("结论：结构清晰"));
+        when(verifier.verify(any(), any(), any(), any(), any())).thenReturn(Verdict.sufficient());
+        doThrow(new AgentAnswerStreamException(
+                "流中断", new RuntimeException("503"), new TokenUsageAccumulator(), true))
+                .when(answerGenerator).generate(any(), any(), any(), any());
+
+        assertThatThrownBy(() -> runtime.run(100L, 200L, "分析文章",
+                articleContext("12"), AgentStepEmitter.noop()))
+                .isInstanceOf(AgentAnswerStreamException.class);
+        ArgumentCaptor<AiAgentRun> runCaptor = ArgumentCaptor.forClass(AiAgentRun.class);
+        verify(runMapper, atLeastOnce()).updateById(runCaptor.capture());
+        assertThat(runCaptor.getAllValues())
+                .anySatisfy(run -> assertThat(run.getStatus()).isEqualTo(AiAgentRunStatus.FAILED.name()));
+    }
+
+    @Test
+    void finalAnswerStepDurationIncludesDeciderTime() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any())).thenAnswer(invocation -> {
+            Thread.sleep(20);
+            return finalAnswer("直接回答");
+        });
+        when(verifier.verify(any(), any(), any(), any(), any())).thenReturn(null);
+
+        runtime.run(100L, 200L, "这篇文章怎么样",
+                articleContext("12"), AgentStepEmitter.noop());
+
+        assertThat(captureSteps()).singleElement()
+                .extracting(AiAgentStep::getDurationMs)
+                .as("step duration 应覆盖 Decider，而不是把终态固定写成 0")
+                .satisfies(durationMs -> assertThat(durationMs).isPositive());
     }
 
     // ==================== 第四步·阶段 2：父子 run 拓扑 ====================

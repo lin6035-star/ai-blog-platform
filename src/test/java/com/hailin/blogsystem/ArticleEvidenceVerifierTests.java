@@ -204,6 +204,54 @@ class ArticleEvidenceVerifierTests {
     }
 
     @Test
+    void semanticGatePrefersAnswerPlanAndLabelsItAsPlannedPoints() {
+        when(callSpec.chatResponse()).thenAnswer(inv -> textResponse(
+                "{\"verdict\":\"SUFFICIENT\",\"reason\":\"要点有证据\"}"));
+        AgentStepDecision decision = AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                .withInput(Map.of(
+                        "answerPlan", "只审这个要点",
+                        "answer", "不要优先审这个旧正文",
+                        "message", "也不要审这个兼容字段"
+                ));
+
+        verifier.verify(
+                run(12L, "分析文章"),
+                decision,
+                List.of("当前文章分析：三节"),
+                READ_ARTICLE
+        );
+
+        ArgumentCaptor<String> userPrompt = ArgumentCaptor.forClass(String.class);
+        verify(requestSpec).user(userPrompt.capture());
+        assertThat(userPrompt.getValue())
+                .contains("【拟回答要点】\n只审这个要点")
+                .doesNotContain("不要优先审这个旧正文")
+                .doesNotContain("也不要审这个兼容字段")
+                .doesNotContain("【回答草案】");
+    }
+
+    @Test
+    void semanticGateUsesCurrentRunFullGoalInsteadOfPersistedAuditSummary() {
+        when(callSpec.chatResponse()).thenAnswer(inv -> textResponse(
+                "{\"verdict\":\"SUFFICIENT\",\"reason\":\"证据足够\"}"));
+        AiAgentRun run = run(null, "已截断的审计摘要");
+        run.setRuntimeGoal("本轮完整目标：比较三篇 Redis 文章，并保留完整 RAG 正文证据");
+
+        verifier.verify(
+                run,
+                finalAnswer("三篇文章侧重点不同"),
+                List.of("已检索三篇文章正文"),
+                NO_READ
+        );
+
+        ArgumentCaptor<String> userPrompt = ArgumentCaptor.forClass(String.class);
+        verify(requestSpec).user(userPrompt.capture());
+        assertThat(userPrompt.getValue())
+                .contains("本轮完整目标：比较三篇 Redis 文章，并保留完整 RAG 正文证据")
+                .doesNotContain("已截断的审计摘要");
+    }
+
+    @Test
     void semanticGateSystemPromptDefinesExternalMaterialTrustBoundary() {
         when(callSpec.chatResponse()).thenAnswer(inv -> textResponse(
                 "{\"verdict\":\"SUFFICIENT\",\"reason\":\"证据足够\"}"

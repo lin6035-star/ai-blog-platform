@@ -7,14 +7,14 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
-import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.servlet.AsyncHandlerInterceptor;
 
 /**
  * 公开接口的可选登录态：有有效 token 就写入 UserContext，没有 token 仍按游客放行。
  */
 @Component
 @RequiredArgsConstructor
-public class OptionalJwtInterceptor implements HandlerInterceptor {
+public class OptionalJwtInterceptor implements AsyncHandlerInterceptor {
 
     private final JwtUtil jwtUtil;
     private final TokenBlacklist tokenBlacklist;
@@ -22,6 +22,7 @@ public class OptionalJwtInterceptor implements HandlerInterceptor {
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response,
                              Object handler) {
+        UserContext.clear();
         String authHeader = request.getHeader("Authorization");
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
             return true;
@@ -46,6 +47,13 @@ public class OptionalJwtInterceptor implements HandlerInterceptor {
     @Override
     public void afterCompletion(HttpServletRequest request, HttpServletResponse response,
                                 Object handler, Exception ex) {
+        UserContext.clear();
+    }
+
+    @Override
+    public void afterConcurrentHandlingStarted(HttpServletRequest request,
+                                               HttpServletResponse response,
+                                               Object handler) {
         UserContext.clear();
     }
 }

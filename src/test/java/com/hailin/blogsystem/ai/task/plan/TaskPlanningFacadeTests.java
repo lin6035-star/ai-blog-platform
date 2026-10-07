@@ -502,12 +502,29 @@ class TaskPlanningFacadeTests {
     }
 
     @Test
-    void comparativeAdjectiveInSearchQueryDoesNotTriggerMissingComparisonGuard() {
-        String message = "帮我找比较新的 Redis 文章";
+    void standaloneArticleSearchUsesLegacyRagPipeline() {
+        String message = "有没有关于 Redis 的文章？";
         AiIntent intent = intent("TASK",
-                goalOf("ARTICLE_SEARCH", Map.of("query", "Redis"), "找比较新的 Redis 文章"));
+                goalOf("ARTICLE_SEARCH", Map.of("query", "Redis"), "有没有关于 Redis 的文章"));
+        intent.setIntent("ARTICLE_SEARCH");
 
-        assertThat(facadeWithSearch.decide(message, intent, 1L).isOrchestrate()).isTrue();
+        assertThat(facadeWithSearch.decide(message, intent, 1L).route())
+                .isEqualTo(TaskRoute.Route.LEGACY);
+    }
+
+    @Test
+    void articleWritePlusSearchStillOrchestrates() {
+        AiIntent intent = intent("TASK",
+                goalOf("ARTICLE_WRITE", Map.of("action", "likeArticle"), "点赞这篇文章"),
+                goalOf("ARTICLE_SEARCH", Map.of("query", "Redis"), "找找 Redis 文章"));
+        intent.setIntent("ARTICLE_ACTION");
+        intent.setRequestedActions(List.of("likeArticle"));
+
+        TaskRoute route = facadeWithSearch.decide("点赞这篇文章，再找找 Redis 文章", intent, 1L);
+
+        assertThat(route.isOrchestrate()).isTrue();
+        assertThat(route.plan().steps()).extracting(step -> step.type())
+                .containsExactly(StepType.ARTICLE_WRITE, StepType.ARTICLE_SEARCH);
     }
 
     // ==================== 多目标含未迁移 → CTA，不执行一半 ====================
@@ -545,6 +562,79 @@ class TaskPlanningFacadeTests {
                         goal("ARTICLE_ANALYSIS", "点赞这篇文章")), 1L);
 
         assertThat(route.route()).isEqualTo(TaskRoute.Route.LEGACY);
+    }
+
+    // ==================== 声明的动作未被计划承接（2026-10-07） ====================
+
+    /**
+     * 页面实测原话（五个目标，四个是文章交互动作 + 一段分析）。
+     * 实测失败那次 plan 只有三步，漏掉的 {@code followAuthor} 与 {@code NAVIGATE} 都落在后半段。
+     */
+    private static final String FIVE_GOAL_MESSAGE =
+            "点赞收藏文章，并分析一下文章，分析完文章之后再关注作者";
+
+    @Test
+    void declaredActionMissingFromPlanGoesCta() {
+        AiIntent intent = intent("TASK",
+                goal("ARTICLE_WRITE", Map.of("action", "likeArticle"), "点赞"),
+                goal("ARTICLE_WRITE", Map.of("action", "favoriteArticle"), "收藏文章"),
+                goal("ARTICLE_ANALYSIS", Map.<String, Object>of(), "分析一下文章"));
+        // 分类器声明了三个动作，但 taskGoals 只拆出前两个——实测漏的正是最后那个
+        intent.setRequestedActions(List.of("likeArticle", "favoriteArticle", "followAuthor"));
+
+        assertThat(facadeWithAnalysis.decide(FIVE_GOAL_MESSAGE, intent, 1L).route())
+                .as("followAuthor 被声明却没进计划；计划含分析（不是纯写）→ 没有任何路径能完整处理")
+                .isEqualTo(TaskRoute.Route.CTA);
+    }
+
+    /** 全是写动作时退回第二刀复合路径——它按数组处理 requestedActions，能整体收口。 */
+    @Test
+    void declaredActionMissingFromAllWritePlanFallsBackToLegacy() {
+        AiIntent intent = intent("TASK",
+                goal("ARTICLE_WRITE", Map.of("action", "likeArticle"), "点赞"),
+                goal("ARTICLE_WRITE", Map.of("action", "favoriteArticle"), "收藏文章"));
+        intent.setRequestedActions(List.of("likeArticle", "favoriteArticle", "followAuthor"));
+
+        assertThat(facade.decide(FIVE_GOAL_MESSAGE, intent, 1L).route())
+                .as("退回不退步：兼容链路本来就能处理这个组合")
+                .isEqualTo(TaskRoute.Route.LEGACY);
+    }
+
+    /**
+     * 客户端动作不进计划是**正常**的——{@code requestedActions} 的取值域比
+     * {@code ARTICLE_WRITE} 能承接的宽。拿全量比对会把每个带"复制链接 / 看评论"的
+     * 复合请求都判成"漏目标"，于是正常请求全被拦下。
+     */
+    @Test
+    void clientSideActionsDoNotTripTheGuard() {
+        AiIntent intent = intent("TASK",
+                goal("ARTICLE_WRITE", Map.of("action", "likeArticle"), "点赞"));
+        intent.setRequestedActions(List.of("likeArticle", "copyArticleLink", "scrollToComments"));
+
+        assertThat(facade.decide(FIVE_GOAL_MESSAGE, intent, 1L).route())
+                .as("只有 ArticleInteractionAction 白名单内的六项参与比对")
+                .isEqualTo(TaskRoute.Route.ORCHESTRATE);
+    }
+
+    @Test
+    void fullyPlannedActionsDoNotTripTheGuard() {
+        AiIntent intent = intent("TASK",
+                goal("ARTICLE_WRITE", Map.of("action", "likeArticle"), "点赞"),
+                goal("ARTICLE_WRITE", Map.of("action", "followAuthor"), "关注作者"));
+        intent.setRequestedActions(List.of("likeArticle", "followAuthor"));
+
+        assertThat(facade.decide(FIVE_GOAL_MESSAGE, intent, 1L).route())
+                .isEqualTo(TaskRoute.Route.ORCHESTRATE);
+    }
+
+    /** 旧协议下分类器不给 requestedActions——判据必须退场，不能把所有请求都拦下。 */
+    @Test
+    void missingRequestedActionsDoesNotTripTheGuard() {
+        AiIntent intent = intent("TASK",
+                goal("ARTICLE_WRITE", Map.of("action", "likeArticle"), "点赞"));
+
+        assertThat(facade.decide(FIVE_GOAL_MESSAGE, intent, 1L).route())
+                .isEqualTo(TaskRoute.Route.ORCHESTRATE);
     }
 
     // ==================== 证据 ====================

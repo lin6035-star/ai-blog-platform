@@ -2,10 +2,7 @@ package com.hailin.blogsystem.ai.agent;
 
 import com.hailin.blogsystem.entity.dto.AgentStepActionType;
 
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
  * 文章域结构化运行状态（P2.2，Token 设计稿 §7.2 状态模型）。
@@ -46,6 +43,13 @@ public final class ArticleAgentState implements AgentRunState {
     private final Map<String, String> articleEvidence = new LinkedHashMap<>();
     private final Map<String, String> memories = new LinkedHashMap<>();
     private final Map<String, String> ragFacts = new LinkedHashMap<>();
+    private final Set<String> articleEmptyQueries = new HashSet<>();
+    private final Set<String> memoryEmptyQueries = new HashSet<>();
+    private final Set<String> ragEmptyQueries = new HashSet<>();
+    private final EnumMap<Verdict.MissingEvidence, Long> evidenceRevisions =
+            new EnumMap<>(Verdict.MissingEvidence.class);
+    private Verdict.MissingEvidence rejectedEvidenceType;
+    private long rejectedAtRevision;
 
     // ---- actions ----
     private final List<String> completedActions = new ArrayList<>();
@@ -72,6 +76,7 @@ public final class ArticleAgentState implements AgentRunState {
         Map<String, Object> payload = result == null ? Map.of() : result.payload();
 
         if (Boolean.TRUE.equals(payload.get("failed"))) {
+            lastStepHadNewEvidence = false;
             completedActions.add(decision.actionType().name() + "（失败）");
             latestError = new LatestError(decision.actionType(), oneLine(result.summary()));
             return;
@@ -103,13 +108,17 @@ public final class ArticleAgentState implements AgentRunState {
         if (noFocus || focusHit) {
             // 键含 focus：不同 focus 允许并存（受槽位预算限制），同一个 focus 的新结果替换旧的
             String key = "QUERY_ARTICLE|" + articleId + "|" + (noFocus ? "" : focus);
-            lastStepHadNewEvidence = !result.summary().equals(articleEvidence.get(key));
+            lastStepHadNewEvidence = !Objects.equals(result.summary(), articleEvidence.get(key));
             articleEvidence.put(key, result.summary());
+            incrementEvidenceIfNew(Verdict.MissingEvidence.ARTICLE_CONTENT, lastStepHadNewEvidence);
             missingEvidence.removeIf(entry -> entry.startsWith("文章内容"));
             // 正文补到了：指向「文章内容」的旧反馈（如 Verifier 的"缺正文细节"）必须一起清，
             // 否则下一轮 Verifier 又看到"证据不足"，形成自我强化
             clearFeedback(FeedbackClearKey.ARTICLE_CONTENT);
         } else {
+            String emptyKey = "QUERY_ARTICLE_EMPTY|" + articleId + "|" + focus;
+            lastStepHadNewEvidence = articleEmptyQueries.add(emptyKey);
+            incrementEvidenceIfNew(Verdict.MissingEvidence.ARTICLE_CONTENT, lastStepHadNewEvidence);
             missingEvidence.add("文章内容（用户问的那部分没找到，需要换说法或换 focus）");
         }
     }
@@ -122,16 +131,17 @@ public final class ArticleAgentState implements AgentRunState {
         // P2.3 修订：检索**失败**不能被说成"没有命中"——那会告诉模型"不必再查"，
         // 而真实情况是这次查询根本没跑成（语义记忆 / 情景记忆是两个来源，可能只挂了一个）。
         if ("FAILED".equals(status)) {
+            lastStepHadNewEvidence = false;
             completedActions.add("查写作偏好失败");
             missingEvidence.add("写作偏好（检索服务失败，可重试）");
             latestError = new LatestError(decision.actionType(), oneLine(result.summary()));
             return;
         }
         if ("PARTIAL_FAILURE".equals(status)) {
+            lastStepHadNewEvidence = false;
             completedActions.add("查写作偏好部分失败（命中 " + hits + " 条）");
             if (hits > 0) {
                 String key = "QUERY_MEMORY|" + query;
-                lastStepHadNewEvidence = !result.summary().equals(memories.get(key));
                 memories.put(key, result.summary());
             }
             missingEvidence.add("写作偏好（有来源检索失败，命中可能不全）");
@@ -141,30 +151,67 @@ public final class ArticleAgentState implements AgentRunState {
         completedActions.add(hits > 0 ? "已查写作偏好（命中 " + hits + " 条）" : "已查写作偏好（无命中）");
         if (hits > 0) {
             String key = "QUERY_MEMORY|" + query;
-            lastStepHadNewEvidence = !result.summary().equals(memories.get(key));
+            lastStepHadNewEvidence = !Objects.equals(result.summary(), memories.get(key));
             memories.put(key, result.summary());
+            incrementEvidenceIfNew(Verdict.MissingEvidence.MEMORY, lastStepHadNewEvidence);
             missingEvidence.removeIf(entry -> entry.startsWith("写作偏好"));
             clearFeedback(FeedbackClearKey.MEMORY);
         } else {
+            lastStepHadNewEvidence = memoryEmptyQueries.add("QUERY_MEMORY_EMPTY|" + query);
+            incrementEvidenceIfNew(Verdict.MissingEvidence.MEMORY, lastStepHadNewEvidence);
             missingEvidence.add("写作偏好（记忆里没有命中，不必再查）");
         }
     }
 
-    private void reduceRag(AgentStepDecision decision, AgentActionResult result, Map<String, Object> payload) {        int hits = asInt(payload.get("hitCount"));
+    private void reduceRag(AgentStepDecision decision, AgentActionResult result, Map<String, Object> payload) {
+        int hits = asInt(payload.get("hitCount"));
         String keyword = asString(payload.get("keyword"));
         completedActions.add(hits > 0 ? "已检索站内知识（命中 " + hits + " 条）" : "已检索站内知识（无命中）");
 
         if (hits > 0) {
             String key = "SEARCH_RAG|" + keyword;
-            lastStepHadNewEvidence = !result.summary().equals(ragFacts.get(key));
+            lastStepHadNewEvidence = !Objects.equals(result.summary(), ragFacts.get(key));
             ragFacts.put(key, result.summary());
+            incrementEvidenceIfNew(Verdict.MissingEvidence.RAG, lastStepHadNewEvidence);
             // P2.3 修订：换关键词命中后必须清掉旧的"无命中"——Memory / Article 都有清理，RAG 原先漏了，
             // 缺失项只增不减，模型会一直以为"站内查不到"。
             missingEvidence.removeIf(entry -> entry.startsWith("站内知识"));
             clearFeedback(FeedbackClearKey.RAG);
         } else {
+            lastStepHadNewEvidence = keyword != null && !keyword.isBlank()
+                    && ragEmptyQueries.add("SEARCH_RAG_EMPTY|" + keyword);
+            incrementEvidenceIfNew(Verdict.MissingEvidence.RAG, lastStepHadNewEvidence);
             missingEvidence.add("站内知识（关键词无命中）");
         }
+    }
+
+    private void incrementEvidenceIfNew(Verdict.MissingEvidence type, boolean isNew) {
+        if (isNew) {
+            evidenceRevisions.merge(type, 1L, Long::sum);
+        }
+    }
+
+    @Override
+    public long evidenceRevision(Verdict.MissingEvidence type) {
+        Verdict.MissingEvidence normalized = type == null ? Verdict.MissingEvidence.OTHER : type;
+        if (normalized == Verdict.MissingEvidence.OTHER) {
+            return evidenceRevisions.getOrDefault(Verdict.MissingEvidence.ARTICLE_CONTENT, 0L)
+                    + evidenceRevisions.getOrDefault(Verdict.MissingEvidence.MEMORY, 0L)
+                    + evidenceRevisions.getOrDefault(Verdict.MissingEvidence.RAG, 0L);
+        }
+        return evidenceRevisions.getOrDefault(normalized, 0L);
+    }
+
+    @Override
+    public void noteVerifierRejection(Verdict.MissingEvidence type) {
+        rejectedEvidenceType = type == null ? Verdict.MissingEvidence.OTHER : type;
+        rejectedAtRevision = evidenceRevision(rejectedEvidenceType);
+    }
+
+    @Override
+    public boolean hasEvidenceProgressSinceRejection() {
+        return rejectedEvidenceType == null
+                || evidenceRevision(rejectedEvidenceType) > rejectedAtRevision;
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.hailin.blogsystem.ai.rag;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.hailin.blogsystem.ai.AiStageTimer;
 import com.hailin.blogsystem.config.BlogAiProperties;
 import com.hailin.blogsystem.entity.dto.ArticleRagContext;
 import lombok.RequiredArgsConstructor;
@@ -34,25 +35,34 @@ public class GteRerankV2ArticleRagRanker implements ArticleRagRanker{
 
     @Override
     public ArticleRagRankResult rankWithEvidence(String question, List<ArticleRagContext> contexts) {
-        if (contexts == null || contexts.isEmpty()) {
-            log.info("gte-rerank-v2 skip: empty contexts");
-            return ArticleRagRankResult.empty();
-        }
-
-        BlogAiProperties.Rerank rerank = blogAiProperties.getRag().getRerank();
-        if (rerank == null || !rerank.isEnabled()) {
-            log.info("gte-rerank-v2 disabled, fallback to default");
-            return defaultArticleRagRanker.rankWithEvidence(question, contexts);
-        }
-        if (rerank.getWorkspaceId() == null || rerank.getWorkspaceId().isBlank()) {
-            log.info("gte-rerank-v2 workspaceId missing, fallback to default");
-            return defaultArticleRagRanker.rankWithEvidence(question, contexts);
-        }
-
+        AiStageTimer timer = AiStageTimer.start();
+        String outcome = "error";
+        int candidateCount = contexts == null ? 0 : contexts.size();
         try {
-            List<ArticleRagContext> limited = contexts.stream()
-                    .limit(rerank.getMaxDocuments())
-                    .toList();
+            if (contexts == null || contexts.isEmpty()) {
+                outcome = "empty";
+                log.info("gte-rerank-v2 skip: empty contexts");
+                return ArticleRagRankResult.empty();
+            }
+
+            BlogAiProperties.Rerank rerank = blogAiProperties.getRag().getRerank();
+            if (rerank == null || !rerank.isEnabled()) {
+                outcome = "fallback_disabled";
+                log.info("gte-rerank-v2 disabled, fallback to default");
+                return defaultArticleRagRanker.rankWithEvidence(question, contexts);
+            }
+            if (rerank.getWorkspaceId() == null || rerank.getWorkspaceId().isBlank()) {
+                outcome = "fallback_config";
+                log.info("gte-rerank-v2 workspaceId missing, fallback to default");
+                return defaultArticleRagRanker.rankWithEvidence(question, contexts);
+            }
+
+            try {
+                List<ArticleRagContext> limited = selectRerankCandidates(
+                        contexts,
+                        rerank.getMaxDocuments(),
+                        rerank.getMaxChunksPerArticle()
+                );
 
             List<String> documents = limited.stream()
                     .map(this::toDocumentText)
@@ -77,8 +87,9 @@ public class GteRerankV2ArticleRagRanker implements ArticleRagRanker{
                     "parameters", parameters
             );
 
-            log.info("gte-rerank-v2 request: candidate={}, topN={}, model={}",
-                    limited.size(), rerank.getTopN(), rerank.getModel());
+            log.info("gte-rerank-v2 request: originalCandidate={}, candidate={}, maxChunksPerArticle={}, topN={}, model={}",
+                    contexts.size(), limited.size(), rerank.getMaxChunksPerArticle(),
+                    rerank.getTopN(), rerank.getModel());
 
             JsonNode response = restClient.post()
                     .uri(url)
@@ -94,17 +105,24 @@ public class GteRerankV2ArticleRagRanker implements ArticleRagRanker{
 
             List<ArticleRagRankResult.Candidate> ranked = parseRanked(response, limited, rerank.getTopN());
             if (ranked.isEmpty() || ranked.stream().anyMatch(candidate -> candidate.relevanceScore() == null)) {
+                outcome = "fallback_empty";
                 log.info("gte-rerank-v2 empty results, fallback to default");
                 return defaultArticleRagRanker.rankWithEvidence(question, contexts);
             }
 
-            log.info("gte-rerank-v2 排序成功，question={}, candidate={}, ranked={}",
-                    question, limited.size(), ranked.size());
+                log.info("gte-rerank-v2 排序成功，candidate={}, ranked={}",
+                        limited.size(), ranked.size());
 
-            return new ArticleRagRankResult(ArticleRagRankResult.Status.MODEL_APPLIED, ranked);
-        } catch (Exception e) {
-            log.warn("gte-rerank-v2 失败，回退规则 rerank: {}", e.getMessage());
-            return defaultArticleRagRanker.rankWithEvidence(question, contexts);
+                outcome = "applied";
+                return new ArticleRagRankResult(ArticleRagRankResult.Status.MODEL_APPLIED, ranked);
+            } catch (Exception e) {
+                outcome = "fallback_error";
+                log.warn("gte-rerank-v2 失败，回退规则 rerank: {}", e.getMessage());
+                return defaultArticleRagRanker.rankWithEvidence(question, contexts);
+            }
+        } finally {
+            log.info("[PERF-AI] stage=rerank durationMs={} outcome={} candidates={}",
+                    timer.elapsedMillis(), outcome, candidateCount);
         }
     }
 
@@ -143,6 +161,32 @@ public class GteRerankV2ArticleRagRanker implements ArticleRagRanker{
         }
 
         return ranked;
+    }
+
+    private List<ArticleRagContext> selectRerankCandidates(List<ArticleRagContext> contexts,
+                                                            int maxDocuments,
+                                                            int maxChunksPerArticle) {
+        int documentLimit = Math.max(1, maxDocuments);
+        int perArticleLimit = Math.max(1, maxChunksPerArticle);
+        List<ArticleRagContext> selected = new ArrayList<>(Math.min(documentLimit, contexts.size()));
+        Map<Long, Integer> selectedPerArticle = new HashMap<>();
+
+        for (ArticleRagContext context : contexts) {
+            Long articleId = context.articleId();
+            if (articleId != null) {
+                int selectedCount = selectedPerArticle.getOrDefault(articleId, 0);
+                if (selectedCount >= perArticleLimit) {
+                    continue;
+                }
+                selectedPerArticle.put(articleId, selectedCount + 1);
+            }
+
+            selected.add(context);
+            if (selected.size() >= documentLimit) {
+                break;
+            }
+        }
+        return List.copyOf(selected);
     }
 
     private String toDocumentText(ArticleRagContext context) {

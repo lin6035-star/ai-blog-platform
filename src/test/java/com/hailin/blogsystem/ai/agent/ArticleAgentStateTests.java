@@ -360,6 +360,78 @@ class ArticleAgentStateTests {
     }
 
     @Test
+    @DisplayName("Verifier 拒绝后只认对应类型的新证据")
+    void verifierProgressTracksMatchingEvidenceType() {
+        ArticleAgentState state = state();
+
+        assertThat(state.hasEvidenceProgressSinceRejection())
+                .as("从未被拒绝时不能触发收敛拦截")
+                .isTrue();
+
+        state.noteVerifierRejection(Verdict.MissingEvidence.MEMORY);
+        assertThat(state.hasEvidenceProgressSinceRejection()).isFalse();
+
+        state.reduce(decision(AgentStepActionType.QUERY_ARTICLE),
+                articleResult("结构摘要：10 节", null, null));
+        assertThat(state.evidenceRevision(Verdict.MissingEvidence.ARTICLE_CONTENT)).isEqualTo(1);
+        assertThat(state.evidenceRevision(Verdict.MissingEvidence.MEMORY)).isZero();
+        assertThat(state.hasEvidenceProgressSinceRejection())
+                .as("缺记忆时补文章内容，不算满足这次拒绝")
+                .isFalse();
+
+        state.reduce(decision(AgentStepActionType.QUERY_MEMORY),
+                AgentActionResult.of("记忆摘要：喜欢简洁")
+                        .with("query", "写作偏好").with("hitCount", 1).with("status", "SUCCESS"));
+
+        assertThat(state.evidenceRevision(Verdict.MissingEvidence.MEMORY)).isEqualTo(1);
+        assertThat(state.evidenceRevision(Verdict.MissingEvidence.OTHER)).isEqualTo(2);
+        assertThat(state.hasEvidenceProgressSinceRejection()).isTrue();
+    }
+
+    @Test
+    @DisplayName("首次权威空结果算进展；重复空结果、失败和部分失败不算")
+    void evidenceRevisionIgnoresRepeatedEmptyAndFailedRetrievals() {
+        ArticleAgentState state = state();
+
+        state.noteVerifierRejection(Verdict.MissingEvidence.MEMORY);
+        state.reduce(decision(AgentStepActionType.QUERY_MEMORY),
+                AgentActionResult.of("记忆摘要：无命中")
+                        .with("query", "写作偏好").with("hitCount", 0).with("status", "SUCCESS"));
+        assertThat(state.evidenceRevision(Verdict.MissingEvidence.MEMORY)).isEqualTo(1);
+        assertThat(state.hasEvidenceProgressSinceRejection()).isTrue();
+
+        state.noteVerifierRejection(Verdict.MissingEvidence.MEMORY);
+        state.reduce(decision(AgentStepActionType.QUERY_MEMORY),
+                AgentActionResult.of("记忆摘要：无命中")
+                        .with("query", "写作偏好").with("hitCount", 0).with("status", "SUCCESS"));
+        assertThat(state.evidenceRevision(Verdict.MissingEvidence.MEMORY)).isEqualTo(1);
+        assertThat(state.hasEvidenceProgressSinceRejection()).isFalse();
+
+        state.reduce(decision(AgentStepActionType.QUERY_MEMORY),
+                AgentActionResult.of("记忆检索失败")
+                        .with("query", "另一查询").with("hitCount", 0).with("status", "FAILED"));
+        state.reduce(decision(AgentStepActionType.QUERY_MEMORY),
+                AgentActionResult.of("部分命中但有来源失败")
+                        .with("query", "第三查询").with("hitCount", 1).with("status", "PARTIAL_FAILURE"));
+        assertThat(state.evidenceRevision(Verdict.MissingEvidence.MEMORY)).isEqualTo(1);
+        assertThat(state.hasEvidenceProgressSinceRejection()).isFalse();
+
+        state.noteVerifierRejection(Verdict.MissingEvidence.RAG);
+        state.reduce(decision(AgentStepActionType.SEARCH_RAG),
+                AgentActionResult.of("站内没有检索到")
+                        .with("keyword", "量子计算").with("hitCount", 0));
+        assertThat(state.evidenceRevision(Verdict.MissingEvidence.RAG)).isEqualTo(1);
+        assertThat(state.hasEvidenceProgressSinceRejection()).isTrue();
+
+        state.noteVerifierRejection(Verdict.MissingEvidence.RAG);
+        state.reduce(decision(AgentStepActionType.SEARCH_RAG),
+                AgentActionResult.of("站内没有检索到")
+                        .with("keyword", "量子计算").with("hitCount", 0));
+        assertThat(state.evidenceRevision(Verdict.MissingEvidence.RAG)).isEqualTo(1);
+        assertThat(state.hasEvidenceProgressSinceRejection()).isFalse();
+    }
+
+    @Test
     @DisplayName("多步累积时结构化上下文明显短于 observation 重放（P2.2 的收益所在）")
     void structuredContextIsShorterThanObservationReplay() {
         int steps = 6;

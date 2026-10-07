@@ -3,6 +3,7 @@ package com.hailin.blogsystem.ai.agent;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.AiStageTimer;
 import com.hailin.blogsystem.ai.LogValues;
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
 import com.hailin.blogsystem.entity.AiAgentRun;
@@ -240,6 +241,23 @@ public abstract class AbstractAgentRuntime {
         return null;
     }
 
+    /** 仅需要独立 Generator 的领域覆写为 true；默认域继续使用 Decider 的 answer/message。 */
+    protected boolean usesGeneratedFinalAnswer() {
+        return false;
+    }
+
+    /** 独立最终正文生成钩子，仅在 {@link #usesGeneratedFinalAnswer()} 为 true 时调用。 */
+    protected GeneratedAnswer generateFinalAnswer(
+            AiAgentRun run,
+            AgentStepDecision decision,
+            List<String> observations,
+            AgentRunState runState,
+            AgentStepEmitter emitter
+    ) {
+        return new GeneratedAnswer(
+                extractFinalAnswerText(decision), new TokenUsageAccumulator(), false);
+    }
+
     // ==================== V3.13 Plan Preview 域钩子 ====================
 
     /**
@@ -412,7 +430,7 @@ public abstract class AbstractAgentRuntime {
         String effectiveGoal = effectiveGoal(goal, userId, sessionId, pageContext);
         AiAgentRun run = createRun(userId, sessionId, effectiveGoal, parentRunId);
         log.info("Agent Run 创建: runId={}, taskRunId={}, userId={}, goal={}",
-                run.getId(), parentRunId, userId, truncate(effectiveGoal, 100));
+                run.getId(), parentRunId, userId, LogValues.safe(effectiveGoal, 100));
 
         // V4⑥ 可观测性：run 期间的所有日志带上 agentRunId，与 traceId 配合做「日志 ↔ DB」互查
         MDC.put("agentRunId", String.valueOf(run.getId()));
@@ -437,13 +455,24 @@ public abstract class AbstractAgentRuntime {
 
                 // 本步决策的用量单独收集：既累到 run 级，也落到 step 行（谁花的算谁的）
                 TokenUsageAccumulator stepUsage = new TokenUsageAccumulator();
-                AgentStepDecision decision = policy.decider().decide(
-                        effectiveGoal,
-                        decisionContext(runState, observations),
-                        nextStepNo,
-                        run.getMaxSteps(),
-                        stepUsage
-                );
+                AiStageTimer stepTimer = AiStageTimer.start();
+                AgentStepDecision decision;
+                try {
+                    decision = policy.decider().decide(
+                            effectiveGoal,
+                            decisionContext(runState, observations),
+                            nextStepNo,
+                            run.getMaxSteps(),
+                            stepUsage
+                    );
+                    log.info("[PERF-AI] stage=agent_decider runId={} stepNo={} durationMs={} outcome={}",
+                            run.getId(), nextStepNo, stepTimer.elapsedMillis(),
+                            decision == null || decision.actionType() == null ? "empty" : "success");
+                } catch (RuntimeException e) {
+                    log.info("[PERF-AI] stage=agent_decider runId={} stepNo={} durationMs={} outcome=error",
+                            run.getId(), nextStepNo, stepTimer.elapsedMillis());
+                    throw e;
+                }
                 AgentTokenRecorder.accumulate(run, stepUsage);
 
                 // 白名单校验：null / 非法动作直接 FAILED
@@ -480,18 +509,56 @@ public abstract class AbstractAgentRuntime {
 
                 // 终态：FINAL_ANSWER
                 if (decision.actionType() == AgentStepActionType.FINAL_ANSWER) {
+                    // 上次 Verifier 已明确缺某类证据，而此后对应证据版本没有变化：
+                    // 再调一次 Verifier 只会重复同一结论，随后继续空转。
+                    // 默认状态实现恒返回 true，所以只对启用结构化证据版本的文章域生效。
+                    if (runState != null && !runState.hasEvidenceProgressSinceRejection()) {
+                        String reason = "上次拒绝后没有新增证据";
+                        emitter.emit(nextStepNo, "FINAL_ANSWER", AiAgentStepStatus.SKIPPED.name(),
+                                "没有新增证据，停止重复回答", null);
+                        recordSkippedStep(run, decision, nextStepNo, reason, stepUsage,
+                                stepTimer.elapsedMillis());
+                        run.setCurrentStep(nextStepNo);
+                        run.setUsedSteps(nextStepNo);
+                        run.setContextJson(toJson(clipContext(observations)));
+                        run.setUpdatedAt(LocalDateTime.now());
+                        runMapper.updateById(run);
+                        return completeWithConservativeShutdown(run, observations);
+                    }
+
                     // V3.11 证据收敛门：领域钩子判定「证据是否足以支撑该回答草案」。
                     // NEED_MORE 拦截回循环补查；ASK_USER 转问；SUFFICIENT/null（无验证器）放行。
-                    Verdict verdict = verifyBeforeFinalization(
-                            run, decision, observations, successfulActions, runState);
+                    //
+                    // 埋点（2026-10-04）：这一步此前既无耗时也无判定记录，于是"被拒后重试"的
+                    // 成本一直算不出来。实测 decider 一次 FINAL_ANSWER 要 ~30s（生成完整草案），
+                    // 而拒绝发生在草案生成**之后**——真正贵的是被丢掉的那份草案，不是判定本身。
+                    // outcome 记 verdict 类型，用 NEED_MORE 占比就能直接读出空转比例。
+                    AiStageTimer verifierTimer = AiStageTimer.start();
+                    Verdict verdict;
+                    try {
+                        verdict = verifyBeforeFinalization(
+                                run, decision, observations, successfulActions, runState);
+                        log.info("[PERF-AI] stage=agent_verifier runId={} stepNo={} durationMs={} outcome={}",
+                                run.getId(), nextStepNo, verifierTimer.elapsedMillis(),
+                                verdict == null ? "none" : verdict.type());
+                    } catch (RuntimeException e) {
+                        log.info("[PERF-AI] stage=agent_verifier runId={} stepNo={} durationMs={} outcome=error",
+                                run.getId(), nextStepNo, verifierTimer.elapsedMillis());
+                        throw e;
+                    }
                     if (verdict != null && verdict.type() == Verdict.VerdictType.NEED_MORE) {
                         lastVerifierRejectionStep = nextStepNo;
+                        if (runState != null) {
+                            runState.noteVerifierRejection(
+                                    Verdict.MissingEvidence.from(verdict.missingEvidence()));
+                        }
                         String rejectReason = "回答证据不足（缺 " + verdict.missingEvidenceLabel()
                                 + "）：" + (verdict.reason() == null || verdict.reason().isBlank()
                                 ? "证据不足以支撑该回答" : verdict.reason());
                         emitter.emit(nextStepNo, "FINAL_ANSWER", "FAILED",
                                 "回答被拦截：证据不足", null);
-                        recordRejectedStep(run, decision, nextStepNo, rejectReason, stepUsage);
+                        recordRejectedStep(run, decision, nextStepNo, rejectReason, stepUsage,
+                                stepTimer.elapsedMillis());
                         String verifierHint = verifierRejectHint(verdict);
                         observations.add(verifierHint);
                         // 带上缺失类型：补到该类证据时要能把它清掉，否则旧反馈会自我强化
@@ -521,18 +588,26 @@ public abstract class AbstractAgentRuntime {
                                 null);
                         emitter.emit(nextStepNo, "ASK_USER", "SUCCESS",
                                 "需要向你确认一个问题", null);
-                        return markWaitingUser(run, askDecision, observations, stepUsage);
+                        return markWaitingUser(run, askDecision, observations, stepUsage,
+                                stepTimer.elapsedMillis());
+                    }
+                    if (usesGeneratedFinalAnswer()) {
+                        return completeWithGeneratedAnswer(
+                                run, decision, observations, successfulActions, runState,
+                                emitter, stepUsage, stepTimer);
                     }
                     emitter.emit(nextStepNo, "FINAL_ANSWER", "SUCCESS",
                             finalAnswerSuccessMessage(), decision.thoughtSummary());
-                    return completeWithAnswer(run, decision, observations, successfulActions, stepUsage);
+                    return completeWithAnswer(run, decision, observations, successfulActions, stepUsage,
+                            stepTimer.elapsedMillis());
                 }
 
                 // 终态：ASK_USER（问题快照留 run）
                 if (decision.actionType() == AgentStepActionType.ASK_USER) {
                     emitter.emit(nextStepNo, "ASK_USER", "SUCCESS",
                             "需要向你确认一个问题", decision.thoughtSummary());
-                    return markWaitingUser(run, decision, observations, stepUsage);
+                    return markWaitingUser(run, decision, observations, stepUsage,
+                            stepTimer.elapsedMillis());
                 }
 
                 // 终态：SUGGEST_WORKFLOW
@@ -543,7 +618,8 @@ public abstract class AbstractAgentRuntime {
                         String rejectReason = "首轮零观察建议被拒绝：必须先执行至少一个只读查询";
                         emitter.emit(nextStepNo, "SUGGEST_WORKFLOW", "FAILED",
                                 "建议被拒绝：需先完成一次查询", null);
-                        recordRejectedStep(run, decision, nextStepNo, rejectReason, stepUsage);
+                        recordRejectedStep(run, decision, nextStepNo, rejectReason, stepUsage,
+                                stepTimer.elapsedMillis());
                         String suggestHint = suggestWorkflowRejectHint();
                         observations.add(suggestHint);
                         noteFeedback(runState, suggestHint, AgentRunState.FeedbackClearKey.QUERY_REQUIRED);
@@ -554,7 +630,8 @@ public abstract class AbstractAgentRuntime {
                         runMapper.updateById(run);
                         continue;
                     }
-                    return suggestWorkflow(run, decision, effectiveGoal, observations, emitter, pageContext, stepUsage);
+                    return suggestWorkflow(run, decision, effectiveGoal, observations, emitter, pageContext,
+                            stepUsage, stepTimer.elapsedMillis());
                 }
 
                 // V3.8：后端预处理（决议目标并入 QUERY_ARTICLE input）。
@@ -563,7 +640,7 @@ public abstract class AbstractAgentRuntime {
 
                 // V4 规则级重复拦截：同动作 + 同参数的查询再来一次不会有新结果
                 if (rejectDuplicatedQuery(run, prepared, nextStepNo, observations, emitter, stepUsage,
-                        runState)) {
+                        runState, stepTimer.elapsedMillis())) {
                     run.setCurrentStep(nextStepNo);
                     run.setUsedSteps(nextStepNo);
                     run.setContextJson(toJson(clipContext(observations)));
@@ -579,7 +656,7 @@ public abstract class AbstractAgentRuntime {
                         "正在" + actionLabel(decision.actionType()) + "...", decision.thoughtSummary());
                 AgentActionResult actionResult = executeActionAndRecordStep(
                         run, prepared, userId, nextStepNo, emitter, pageContext,
-                        successfulActions, successfulActionSteps, stepUsage
+                        successfulActions, successfulActionSteps, stepUsage, stepTimer
                 );
                 String observation = actionResult.summary();
                 observations.add(observation);
@@ -613,6 +690,9 @@ public abstract class AbstractAgentRuntime {
             // 终局失败：失败 step 已落库，这里直接收尾（COMPLETED + 友好文案），不再走 LLM
             log.info("Agent Run 终局失败收尾: runId={}, reason={}", run.getId(), e.getMessage());
             return completeWithTerminalFailure(run, observations, e);
+        } catch (AgentAnswerStreamException e) {
+            // 已向外部交付部分正文后，必须让 SSE 适配层终止失败流；不能降级成成功回答。
+            throw e;
         } catch (Exception e) {
             log.error("Agent Run 执行异常: runId={}", run.getId(), e);
             return markFailed(run, "Agent 执行异常，请稍后重试");
@@ -772,6 +852,7 @@ public abstract class AbstractAgentRuntime {
         run.setUserId(userId);
         run.setSessionId(sessionId);
         run.setGoal(truncate(goal, 500));
+        run.setRuntimeGoal(goal);
         run.setStatus(AiAgentRunStatus.RUNNING.name());
         run.setCurrentStep(0);
         run.setMaxSteps(maxSteps());
@@ -800,9 +881,10 @@ public abstract class AbstractAgentRuntime {
             PageContextDTO pageContext,
             List<AgentStepActionType> successfulActions,
             List<Integer> successfulActionSteps,
-            TokenUsageAccumulator stepUsage
+            TokenUsageAccumulator stepUsage,
+            AiStageTimer stepTimer
     ) {
-        long start = System.currentTimeMillis();
+        AiStageTimer actionTimer = AiStageTimer.start();
         AiAgentStep step = new AiAgentStep();
         step.setAgentRunId(run.getId());
         step.setStepNo(stepNo);
@@ -819,8 +901,10 @@ public abstract class AbstractAgentRuntime {
             String observation = actionResult.summary();
             step.setOutputJson(toJson(Map.of("summary", observation)));
             step.setStatus(AiAgentStepStatus.SUCCESS.name());
-            step.setDurationMs(System.currentTimeMillis() - start);
+            step.setDurationMs(stepTimer.elapsedMillis());
             stepMapper.updateById(step);
+            log.info("[PERF-AI] stage=agent_action runId={} stepNo={} action={} executorDurationMs={} totalDurationMs={} outcome=success",
+                    run.getId(), stepNo, decision.actionType(), actionTimer.elapsedMillis(), step.getDurationMs());
             log.info("Agent Step 成功: runId={}, stepNo={}, action={}", run.getId(), stepNo, decision.actionType());
             emitter.emit(stepNo, decision.actionType().name(), "SUCCESS",
                     "已完成" + actionLabel(decision.actionType()), decision.thoughtSummary());
@@ -835,9 +919,11 @@ public abstract class AbstractAgentRuntime {
             log.warn("Agent Step 执行失败: runId={}, stepNo={}, action={}",
                     run.getId(), stepNo, decision.actionType(), e);
             step.setStatus(AiAgentStepStatus.FAILED.name());
-            step.setDurationMs(System.currentTimeMillis() - start);
+            step.setDurationMs(stepTimer.elapsedMillis());
             step.setErrorMessage(truncate(e.getMessage(), 300));
             stepMapper.updateById(step);
+            log.info("[PERF-AI] stage=agent_action runId={} stepNo={} action={} executorDurationMs={} totalDurationMs={} outcome=error",
+                    run.getId(), stepNo, decision.actionType(), actionTimer.elapsedMillis(), step.getDurationMs());
             emitter.emit(stepNo, decision.actionType().name(), "FAILED",
                     actionLabel(decision.actionType()) + "失败", null);
             // 终局失败（如文章归属校验失败）：失败 step 已落库，直接抛出内部信号收尾
@@ -895,13 +981,14 @@ public abstract class AbstractAgentRuntime {
             AgentStepDecision decision,
             List<String> observations,
             List<AgentStepActionType> successfulActions,
-            TokenUsageAccumulator stepUsage
+            TokenUsageAccumulator stepUsage,
+            long durationMs
     ) {
         String extracted = extractFinalAnswerText(decision);
         boolean realAnswer = extracted != null && !extracted.isBlank();
         // V3.12：兜底文案不是「结论」——不写锚（用 realAnswer 判断，避免比较字符串是否等于 fallback 的脆弱写法）
         String finalAnswer = realAnswer ? extracted : emptyAnswerFallback();
-        recordTerminalStep(run, decision, run.getUsedSteps() + 1, stepUsage);
+        recordTerminalStep(run, decision, run.getUsedSteps() + 1, stepUsage, durationMs);
         AgentRunResult result = finish(run, AiAgentRunStatus.COMPLETED, finalAnswer, observations,
                 // 兜底文案不是「结论」：空答案兜底与正常回答在外层必须能区分（第四步）
                 realAnswer ? AgentCompletionKind.ANSWER : AgentCompletionKind.EMPTY_ANSWER_FALLBACK);
@@ -911,6 +998,112 @@ public abstract class AbstractAgentRuntime {
             onAnswerConcluded(run, finalAnswer, successfulActions);
         }
         return result;
+    }
+
+    private AgentRunResult completeWithGeneratedAnswer(
+            AiAgentRun run,
+            AgentStepDecision decision,
+            List<String> observations,
+            List<AgentStepActionType> successfulActions,
+            AgentRunState runState,
+            AgentStepEmitter emitter,
+            TokenUsageAccumulator stepUsage,
+            AiStageTimer stepTimer
+    ) {
+        int stepNo = run.getUsedSteps() + 1;
+        AiAgentStep terminalStep = recordRunningTerminalStep(run, decision, stepNo, stepUsage);
+        emitter.emit(stepNo, "FINAL_ANSWER", AiAgentStepStatus.RUNNING.name(),
+                "正在生成最终回答", decision.thoughtSummary());
+
+        try {
+            GeneratedAnswer generated = generateFinalAnswer(
+                    run, decision, observations, runState, emitter);
+            TokenUsageAccumulator generatorUsage = generated == null ? null : generated.usage();
+            stepUsage.add(generatorUsage);
+            AgentTokenRecorder.accumulate(run, generatorUsage);
+
+            String finalAnswer = generated == null ? null : generated.content();
+            if (finalAnswer == null || finalAnswer.isBlank()) {
+                throw new AgentAnswerStreamException(
+                        "文章回答生成失败：模型返回空内容", null,
+                        new TokenUsageAccumulator(), false);
+            }
+
+            completeTerminalStep(run, terminalStep, stepUsage, stepTimer.elapsedMillis());
+            emitter.emit(stepNo, "FINAL_ANSWER", AiAgentStepStatus.SUCCESS.name(),
+                    finalAnswerSuccessMessage(), decision.thoughtSummary());
+            AgentRunResult result = finish(run, AiAgentRunStatus.COMPLETED, finalAnswer, observations,
+                    AgentCompletionKind.ANSWER);
+            onAnswerConcluded(run, finalAnswer, successfulActions);
+            return result;
+        } catch (AgentAnswerStreamException e) {
+            stepUsage.add(e.usage());
+            AgentTokenRecorder.accumulate(run, e.usage());
+            failTerminalStep(run, terminalStep, stepUsage, stepTimer.elapsedMillis(), e.getMessage());
+            emitter.emit(stepNo, "FINAL_ANSWER", AiAgentStepStatus.FAILED.name(),
+                    "最终回答生成失败", null);
+            AgentRunResult failed = markFailed(run, "最终回答生成失败，请稍后重试");
+            if (e.deliveredAnyChunk()) {
+                throw e;
+            }
+            return failed;
+        } catch (RuntimeException e) {
+            failTerminalStep(run, terminalStep, stepUsage, stepTimer.elapsedMillis(), e.getMessage());
+            emitter.emit(stepNo, "FINAL_ANSWER", AiAgentStepStatus.FAILED.name(),
+                    "最终回答生成失败", null);
+            return markFailed(run, "最终回答生成失败，请稍后重试");
+        }
+    }
+
+    private AiAgentStep recordRunningTerminalStep(
+            AiAgentRun run,
+            AgentStepDecision decision,
+            int stepNo,
+            TokenUsageAccumulator stepUsage
+    ) {
+        AiAgentStep step = new AiAgentStep();
+        step.setAgentRunId(run.getId());
+        step.setStepNo(stepNo);
+        step.setActionType(decision.actionType().name());
+        step.setThoughtSummary(decision.thoughtSummary());
+        step.setInputJson(toJson(decision.input()));
+        step.setStatus(AiAgentStepStatus.RUNNING.name());
+        step.setDurationMs(0L);
+        applyStepTokens(step, stepUsage);
+        step.setCreatedAt(LocalDateTime.now());
+        stepMapper.insert(step);
+        return step;
+    }
+
+    private void completeTerminalStep(
+            AiAgentRun run,
+            AiAgentStep step,
+            TokenUsageAccumulator stepUsage,
+            long durationMs
+    ) {
+        step.setStatus(AiAgentStepStatus.SUCCESS.name());
+        step.setErrorMessage(null);
+        step.setDurationMs(Math.max(0L, durationMs));
+        applyStepTokens(step, stepUsage);
+        stepMapper.updateById(step);
+        run.setCurrentStep(step.getStepNo());
+        run.setUsedSteps(step.getStepNo());
+    }
+
+    private void failTerminalStep(
+            AiAgentRun run,
+            AiAgentStep step,
+            TokenUsageAccumulator stepUsage,
+            long durationMs,
+            String errorMessage
+    ) {
+        step.setStatus(AiAgentStepStatus.FAILED.name());
+        step.setErrorMessage(truncate(errorMessage, 1000));
+        step.setDurationMs(Math.max(0L, durationMs));
+        applyStepTokens(step, stepUsage);
+        stepMapper.updateById(step);
+        run.setCurrentStep(step.getStepNo());
+        run.setUsedSteps(step.getStepNo());
     }
 
     /**
@@ -955,7 +1148,8 @@ public abstract class AbstractAgentRuntime {
             AiAgentRun run,
             AgentStepDecision decision,
             List<String> observations,
-            TokenUsageAccumulator stepUsage
+            TokenUsageAccumulator stepUsage,
+            long durationMs
     ) {
         // question 键兼容回退（与 FINAL_ANSWER 的 answer/message 同款防呆：模型偶发写 message 键）
         Object question = decision.input() == null ? null : decision.input().get("question");
@@ -969,7 +1163,7 @@ public abstract class AbstractAgentRuntime {
                 ? emptyAskUserFallback()
                 : String.valueOf(question);
 
-        recordTerminalStep(run, decision, run.getUsedSteps() + 1, stepUsage);
+        recordTerminalStep(run, decision, run.getUsedSteps() + 1, stepUsage, durationMs);
         return finish(run, AiAgentRunStatus.WAITING_USER, questionText, observations, null);
     }
 
@@ -1006,7 +1200,8 @@ public abstract class AbstractAgentRuntime {
             List<String> observations,
             AgentStepEmitter emitter,
             PageContextDTO pageContext,
-            TokenUsageAccumulator stepUsage
+            TokenUsageAccumulator stepUsage,
+            long durationMs
     ) {
         Map<String, Object> input = decision.input() == null ? Map.of() : decision.input();
         String workflowType = text(input, "workflowType");
@@ -1038,7 +1233,7 @@ public abstract class AbstractAgentRuntime {
 
         emitter.emit(run.getUsedSteps() + 1, "SUGGEST_WORKFLOW", "SUCCESS",
                 "建议启动「" + workflowLabel(workflowType) + "」流程", decision.thoughtSummary());
-        recordTerminalStep(run, decision, run.getUsedSteps() + 1, stepUsage);
+        recordTerminalStep(run, decision, run.getUsedSteps() + 1, stepUsage, durationMs);
         run.setStatus(AiAgentRunStatus.WAITING_WORKFLOW_CONFIRM.name());
         // 正文直接用 reason（不带"建议启动「X」："前缀，建议卡已展示类型）
         run.setFinalAnswer(reason);
@@ -1083,7 +1278,8 @@ public abstract class AbstractAgentRuntime {
             List<String> observations,
             AgentStepEmitter emitter,
             TokenUsageAccumulator stepUsage,
-            AgentRunState runState
+            AgentRunState runState,
+            long durationMs
     ) {
         AiAgentStep previous = stepMapper.selectOne(new LambdaQueryWrapper<AiAgentStep>()
                 .eq(AiAgentStep::getAgentRunId, run.getId())
@@ -1101,7 +1297,7 @@ public abstract class AbstractAgentRuntime {
         recordSkippedStep(run, decision, stepNo,
                 AgentStepLabelSupport.DUPLICATE_QUERY_SKIP_PREFIX
                         + "：同一动作 + 同一参数在第 " + previous.getStepNo() + " 步已成功执行过",
-                stepUsage);
+                stepUsage, durationMs);
         String duplicateHint = duplicateQueryHint(previous.getStepNo());
         observations.add(duplicateHint);
         noteFeedback(runState, duplicateHint);
@@ -1126,6 +1322,17 @@ public abstract class AbstractAgentRuntime {
             String reason,
             TokenUsageAccumulator stepUsage
     ) {
+        recordSkippedStep(run, decision, stepNo, reason, stepUsage, 0L);
+    }
+
+    protected void recordSkippedStep(
+            AiAgentRun run,
+            AgentStepDecision decision,
+            int stepNo,
+            String reason,
+            TokenUsageAccumulator stepUsage,
+            long durationMs
+    ) {
         AiAgentStep step = new AiAgentStep();
         step.setAgentRunId(run.getId());
         step.setStepNo(stepNo);
@@ -1133,7 +1340,7 @@ public abstract class AbstractAgentRuntime {
         step.setInputJson(toJson(decision.input()));
         step.setStatus(AiAgentStepStatus.SKIPPED.name());
         step.setErrorMessage(reason);
-        step.setDurationMs(0L);
+        step.setDurationMs(Math.max(0L, durationMs));
         applyStepTokens(step, stepUsage);
         step.setCreatedAt(LocalDateTime.now());
         stepMapper.insert(step);
@@ -1149,6 +1356,17 @@ public abstract class AbstractAgentRuntime {
             String reason,
             TokenUsageAccumulator stepUsage
     ) {
+        recordRejectedStep(run, decision, stepNo, reason, stepUsage, 0L);
+    }
+
+    protected void recordRejectedStep(
+            AiAgentRun run,
+            AgentStepDecision decision,
+            int stepNo,
+            String reason,
+            TokenUsageAccumulator stepUsage,
+            long durationMs
+    ) {
         AiAgentStep step = new AiAgentStep();
         step.setAgentRunId(run.getId());
         step.setStepNo(stepNo);
@@ -1156,7 +1374,7 @@ public abstract class AbstractAgentRuntime {
         step.setInputJson(toJson(decision.input()));
         step.setStatus(AiAgentStepStatus.FAILED.name());
         step.setErrorMessage(reason);
-        step.setDurationMs(0L);
+        step.setDurationMs(Math.max(0L, durationMs));
         applyStepTokens(step, stepUsage);
         step.setCreatedAt(LocalDateTime.now());
         stepMapper.insert(step);
@@ -1172,6 +1390,16 @@ public abstract class AbstractAgentRuntime {
             int stepNo,
             TokenUsageAccumulator stepUsage
     ) {
+        recordTerminalStep(run, decision, stepNo, stepUsage, 0L);
+    }
+
+    protected void recordTerminalStep(
+            AiAgentRun run,
+            AgentStepDecision decision,
+            int stepNo,
+            TokenUsageAccumulator stepUsage,
+            long durationMs
+    ) {
         AiAgentStep step = new AiAgentStep();
         step.setAgentRunId(run.getId());
         step.setStepNo(stepNo);
@@ -1179,7 +1407,7 @@ public abstract class AbstractAgentRuntime {
         step.setThoughtSummary(decision.thoughtSummary());
         step.setInputJson(toJson(decision.input()));
         step.setStatus(AiAgentStepStatus.SUCCESS.name());
-        step.setDurationMs(0L);
+        step.setDurationMs(Math.max(0L, durationMs));
         applyStepTokens(step, stepUsage);
         step.setCreatedAt(LocalDateTime.now());
         stepMapper.insert(step);
