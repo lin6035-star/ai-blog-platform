@@ -46,6 +46,9 @@ public class AiMemoryRetrieveService {
         );
 
         if (documents == null || documents.isEmpty()) {
+            // 空召回以前完全静默：线上只看到「召回完成 count=N」，看不出「这次一条都没有」。
+            // 2026-10-13 排查「AI 说不认识我」时，正是因为这里不打日志而绕了一大圈。
+            log.info("Memory 向量召回完成，userId={}, count=0（阈值 {} 下无命中）", userId, SIMILARITY_THRESHOLD);
             return List.of();
         }
 

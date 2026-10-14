@@ -248,13 +248,44 @@ class ArticleAgentRuntimeTests {
     }
 
     @Test
-    void suggestWriteUnknownActionTypeFailsRun() {
-        // V3.4：文章域只认 UPDATE_ARTICLE_TITLE——学习域动作/幻觉动作一律 FAILED 终局，绝不回落到任何动作
+    void suggestArticleWriteTerminalStepKeepsDecisionTokenUsage() {
+        Usage suggestUsage = mockUsage(200, 20, 220);
         when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
-                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
-                        .withInput(Map.of("actionType", AgentWriteProposal.TYPE_UPDATE_TASK_DONE,
-                                "taskTitle", "缓存击穿")));
+                .thenAnswer(inv -> {
+                    inv.getArgument(4, TokenUsageAccumulator.class).add(suggestUsage);
+                    return AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                            .withInput(Map.of(
+                                    "actionType", AgentWriteProposal.TYPE_UPDATE_ARTICLE_TITLE,
+                                    "newTitle", "Redis 缓存实战"));
+                });
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存原理》"));
+        when(articlesService.getById(12L)).thenReturn(article(12L, 100L, "Redis 缓存原理"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "把标题改成 Redis 缓存实战",
+                articleContext("12"), com.hailin.blogsystem.ai.agent.AgentStepEmitter.noop());
+
+        assertThat(result.totalTokens()).isEqualTo(220);
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps).hasSize(2);
+        assertThat(steps.get(1).getActionType()).isEqualTo("SUGGEST_WRITE");
+        assertThat(steps.get(1).getInputTokens()).isEqualTo(200);
+        assertThat(steps.get(1).getOutputTokens()).isEqualTo(20);
+    }
+
+    @Test
+    void suggestWriteUnknownActionTypeFailsRun() {
+        // V3.4：文章域只认 UPDATE_ARTICLE_TITLE——学习域动作/幻觉动作一律 FAILED 终局，绝不回落到任何动作
+        Usage rejectedUsage = mockUsage(210, 21, 231);
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
+                .thenAnswer(invocation -> {
+                    invocation.getArgument(4, TokenUsageAccumulator.class).add(rejectedUsage);
+                    return AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                            .withInput(Map.of("actionType", AgentWriteProposal.TYPE_UPDATE_TASK_DONE,
+                                    "taskTitle", "缓存击穿"));
+                });
         when(executor.execute(any(), any(), any()))
                 .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存原理》"));
 
@@ -262,6 +293,8 @@ class ArticleAgentRuntimeTests {
                 articleContext("12"), com.hailin.blogsystem.ai.agent.AgentStepEmitter.noop());
 
         assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
+        assertThat(result.totalTokens()).isEqualTo(231);
+        assertThat(result.usedSteps()).isEqualTo(2);
         AiAgentRun saved = captureRun();
         assertThat(saved.getErrorMessage()).contains("不支持的写动作类型");
         // C0.2：模型给的内部协议值只进日志，不进用户可见文案（原先这里断言的是"含 actionType 原文"）
@@ -269,6 +302,11 @@ class ArticleAgentRuntimeTests {
         // 未产生任何写提案（run 直接终局 FAILED，contextJson 无 pendingWriteAction）
         assertThat(saved.getStatus()).isEqualTo("FAILED");
         assertThat(saved.getContextJson()).doesNotContain("pendingWriteAction");
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps).hasSize(2);
+        assertThat(steps.get(1).getStatus()).isEqualTo("FAILED");
+        assertThat(steps.get(1).getInputTokens()).isEqualTo(210);
+        assertThat(steps.get(1).getOutputTokens()).isEqualTo(21);
     }
 
     @Test

@@ -485,3 +485,26 @@ CREATE TABLE IF NOT EXISTS seckill_order (
 );
 
 CREATE INDEX IF NOT EXISTS idx_seckill_order_activity ON seckill_order (activity_id, status);
+
+-- ============================================
+-- 站内通知（设计稿：docs/notification/通知中心设计.md）
+-- 与 db/init.sql 第 29 节保持一致；这里是 H2 语法（无 COMMENT/ENGINE/UNSIGNED，DATETIME→TIMESTAMP）
+-- ============================================
+CREATE TABLE IF NOT EXISTS notifications (
+    id BIGINT PRIMARY KEY,
+    receiver_id BIGINT NOT NULL,
+    actor_id BIGINT NOT NULL,
+    type VARCHAR(32) NOT NULL,
+    target_id BIGINT NOT NULL,
+    article_id BIGINT NULL,
+    is_read TINYINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- 幂等键：四列全部 NOT NULL（MySQL 唯一索引不约束 NULL，可空列会让幂等静默失效）。
+    -- 与 db/init.sql 第 29 节一致；id 由应用生成（实体需显式 @TableId(ASSIGN_ID)），故无自增
+    CONSTRAINT uk_notification UNIQUE (receiver_id, type, actor_id, target_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_receiver_created ON notifications (receiver_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_receiver_read_created ON notifications (receiver_id, is_read, created_at);
+-- 保留期清理用（不带 receiver_id，上面两条覆盖不到）
+CREATE INDEX IF NOT EXISTS idx_created_at ON notifications (created_at);

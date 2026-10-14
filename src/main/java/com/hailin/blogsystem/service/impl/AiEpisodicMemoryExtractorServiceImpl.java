@@ -27,7 +27,14 @@ public class AiEpisodicMemoryExtractorServiceImpl implements
         AiEpisodicMemoryExtractorService {
 
     private static final int WINDOW_MESSAGE_COUNT = 20;
-    private static final int WINDOW_TRIGGER_MOD = 10;
+    /**
+     * 窗口兜底：会话消息数每满这个数就过一次 LLM 提取（关键词未命中时的保险）。
+     *
+     * <p><b>2026-10-13 从 10 降到 6</b>：实测 12 个真实会话平均只有 4.5 条消息、最长 16 条，
+     * 而 `% 10 == 0` 要求「恰好等于 10 的倍数」——导致这个兜底几乎从不生效
+     * （情景记忆自 8-19 起再无新增，唯一那条还是靠它偶然命中）。
+     */
+    private static final int WINDOW_TRIGGER_MOD = 6;
 
     private final AiMessageMapper aiMessageMapper;
     private final ChatClient.Builder chatClientBuilder;

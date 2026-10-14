@@ -81,6 +81,16 @@ public class AiMemoryCandidateExtractorServiceImpl implements AiMemoryCandidateE
     // 规则预筛：不是每轮对话都调用 LLM
     // ================================================================
 
+    /**
+     * 第一层规则预筛——只负责「别漏」，是否真值得记由第二层 LLM（shouldRemember / JSON 为空）
+     * 决定。多送一次只是多一次**异步、不阻塞 SSE、不计费**的 LLM 调用；漏掉则是记忆永久缺失。
+     *
+     * <p><b>2026-10-13 放宽</b>：原词表只有 10 个词，实测在 27 条真实用户消息里**只命中 2 条（7%）**，
+     * 候选记忆自 9-17 起完全停止生长（表现就是"AI 记不住任何新东西"）。
+     * 现在补上两类高频表达：
+     * ② 第一人称 + 动词的陈述句（用户画像 / 偏好 / 项目状态的典型载体）；
+     * ③ 回答风格类祈使句（不含第一人称，但同样是稳定偏好，如"回答直接一点"）。
+     */
     private boolean shouldExtract(String userMessage) {
         if (userMessage == null || userMessage.isBlank()) {
             return false;
@@ -89,6 +99,7 @@ public class AiMemoryCandidateExtractorServiceImpl implements AiMemoryCandidateE
         String text = userMessage.replaceAll("\\s+", "");
 
         return containsAny(text,
+                // ① 显式记忆指令 / 原有词表
                 "记住",
                 "以后",
                 "我喜欢",
@@ -98,7 +109,32 @@ public class AiMemoryCandidateExtractorServiceImpl implements AiMemoryCandidateE
                 "这个项目",
                 "我们决定",
                 "先不做",
-                "后面再做"
+                "后面再做",
+                // ② 第一人称 + 动词
+                "我是",
+                "我在",
+                "我要",
+                "我想",
+                "我觉得",
+                "我认为",
+                "我希望",
+                "我习惯",
+                "我通常",
+                "我一般",
+                "我倾向",
+                "我打算",
+                "我准备",
+                "我计划",
+                "我不喜欢",
+                "我要求",
+                // ③ 回答风格类祈使句
+                "直接一点",
+                "直接点",
+                "简洁",
+                "简单点",
+                "详细点",
+                "不要那么",
+                "别那么"
         );
     }
 

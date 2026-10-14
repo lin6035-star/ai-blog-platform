@@ -4,12 +4,14 @@ import com.hailin.blogsystem.ai.memory.AiEpisodicMemoryRetrieveService;
 import com.hailin.blogsystem.ai.memory.AiMemoryRetrieveService;
 import com.hailin.blogsystem.ai.rag.ArticleRagSearchService;
 import com.hailin.blogsystem.config.BlogAiProperties;
+import com.hailin.blogsystem.entity.AiUserMemories;
 import com.hailin.blogsystem.entity.dto.AiIntent;
 import com.hailin.blogsystem.entity.dto.ArticleRagContext;
 import com.hailin.blogsystem.entity.dto.ArticleRagSearchResult;
 import com.hailin.blogsystem.entity.dto.EpisodicMemoryRagContext;
 import com.hailin.blogsystem.entity.dto.MemoryRagContext;
 import com.hailin.blogsystem.entity.dto.PageContextDTO;
+import com.hailin.blogsystem.service.AiUserMemoryService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -37,6 +39,7 @@ public class GeneralAgentActionExecutorImpl implements GeneralAgentActionExecuto
     private final AiEpisodicMemoryRetrieveService aiEpisodicMemoryRetrieveService;
     private final ArticleRagSearchService articleRagSearchService;
     private final BlogAiProperties blogAiProperties;
+    private final AiUserMemoryService aiUserMemoryService;
 
     @Override
     public AgentActionResult execute(AgentStepDecision decision, Long userId, PageContextDTO pageContext) {
@@ -71,6 +74,24 @@ public class GeneralAgentActionExecutorImpl implements GeneralAgentActionExecuto
         }
 
         StringBuilder sb = new StringBuilder("记忆摘要：\n");
+
+        /*
+         * 常驻记忆先注入：用户画像 / 偏好**不走向量相似度**。
+         *
+         * 2026-10-13 实测：记忆向量仍留在旧 embedding 空间，与当前 query 向量 cos≈0.0125（近似正交），
+         * 纯向量召回恒空——"你说说你所了解的我"答"我还没有关于你的个人记忆记录"。
+         * 常驻通道与相似度无关，是召回链路失准时的兜底，且与普通聊天路径（buildMemoryPrompt 的
+         * listAlwaysPromptMemories）语义对齐。
+         */
+        try {
+            List<AiUserMemories> alwaysMemories = aiUserMemoryService.listPromptMemories(userId);
+            for (AiUserMemories memory : alwaysMemories) {
+                sb.append("- 常驻记忆(").append(memory.getMemoryType()).append(")：")
+                        .append(limit(memory.getContent(), TEXT_MAX)).append('\n');
+            }
+        } catch (Exception e) {
+            log.warn("Agent 常驻记忆读取失败，userId={}", userId, e);
+        }
 
         try {
             List<MemoryRagContext> memories = aiMemoryRetrieveService.retrieve(userId, query);

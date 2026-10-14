@@ -48,7 +48,7 @@ class ArticleAgentStateTests {
                 .doesNotContain("【目标】")
                 .doesNotContain("【步数】");
         assertThat(context).contains("【已确认目标文章】ID 12《Redis 缓存设计》");
-        assertThat(context).contains("【文章证据】");
+        assertThat(context).contains("【文章结构】");
         assertThat(context).contains("结构摘要：10 节 / 1.3 万字");
         assertThat(context).contains("已完成动作");
         assertThat(context).contains("已读文章结构");
@@ -72,7 +72,8 @@ class ArticleAgentStateTests {
         assertThat(context).contains("【仍缺的证据】");
         assertThat(context).contains("文章内容");
         assertThat(context).contains("查过「缓存击穿」但没找到");
-        assertThat(context).doesNotContain("【文章证据】");
+        assertThat(context).doesNotContain("【文章结构】");
+        assertThat(context).doesNotContain("【聚焦片段】");
     }
 
     @Test
@@ -83,7 +84,7 @@ class ArticleAgentStateTests {
                 articleResult("聚焦片段：互斥锁兜底", "缓存击穿", true));
 
         String context = state.decisionContext();
-        assertThat(context).contains("【文章证据】");
+        assertThat(context).contains("【聚焦片段】");
         assertThat(context).contains("聚焦片段：互斥锁兜底");
         assertThat(context).contains("已查「缓存击穿」");
     }
@@ -155,15 +156,77 @@ class ArticleAgentStateTests {
         assertThat(context).contains("QUERY_ARTICLE（失败）");
         assertThat(context).contains("【最近失败】");
         assertThat(context).contains("这篇文章不存在或已删除");
-        assertThat(context).doesNotContain("【文章证据】");
+        assertThat(context).doesNotContain("【文章结构】");
+        assertThat(context).doesNotContain("【聚焦片段】");
+    }
+
+    @Test
+    @DisplayName("★2026-10-11 回归：多轮 focus 补查后，文章结构摘要必须仍在（它被挤掉 = 证据门空转）")
+    void overviewSurvivesAfterMultipleFocusQueries() {
+        ArticleAgentState state = state();
+
+        // 真实数据：结构摘要 1889～2313 字符、单条聚焦片段上限 1200——合槽时一条片段就能占满槽位
+        String overview = "结构摘要：" + "节".repeat(900) + "|小标题：基础用法/原理/总结";
+        state.reduce(decision(AgentStepActionType.QUERY_ARTICLE), articleResult(overview, null, null));
+        state.reduce(decision(AgentStepActionType.QUERY_ARTICLE),
+                articleResult("聚焦片段：" + "基".repeat(1200), "基础用法", true));
+        state.reduce(decision(AgentStepActionType.QUERY_ARTICLE),
+                articleResult("聚焦片段：" + "总".repeat(1200), "总结", true));
+
+        String evidence = state.verificationEvidence();
+
+        assertThat(evidence)
+                .as("Verifier 判「文章里到底有没有这段内容」只能靠小标题结构——它一旦被片段挤掉，"
+                        + "就会连续判「需要全文确认」，最后 6 步耗尽且没有回答")
+                .contains("【文章结构】")
+                .contains("小标题：基础用法/原理/总结");
+        assertThat(evidence)
+                .as("最新的聚焦片段仍要在（局部细节最新优先）")
+                .contains("【聚焦片段】")
+                .contains("总".repeat(50));
+    }
+
+    @Test
+    @DisplayName("★2026-10-11 回归：同一缺失类型连续被拒达上限后，骨架必须放行草案")
+    void consecutiveSameTypeRejectionsExhaustVerifier() {
+        ArticleAgentState state = state();
+
+        assertThat(state.verifierRejectionExhausted())
+                .as("没被拒过不能触发放行")
+                .isFalse();
+
+        state.noteVerifierRejection(Verdict.MissingEvidence.ARTICLE_CONTENT);
+        assertThat(state.verifierRejectionExhausted())
+                .as("第一次拒绝是正常的促补查信号，仍要拦")
+                .isFalse();
+
+        state.noteVerifierRejection(Verdict.MissingEvidence.ARTICLE_CONTENT);
+        assertThat(state.verifierRejectionExhausted())
+                .as("连续第二次指向同一类缺失：再拦只会耗尽步数（实测 3 拦 / 6 步 / 18300 token 无回答）")
+                .isTrue();
+    }
+
+    @Test
+    @DisplayName("换缺失类型要重置连续计数——那是模型找到新方向，不算死路")
+    void rejectionTypeChangeResetsConsecutiveCount() {
+        ArticleAgentState state = state();
+
+        state.noteVerifierRejection(Verdict.MissingEvidence.ARTICLE_CONTENT);
+        state.noteVerifierRejection(Verdict.MissingEvidence.MEMORY);
+        assertThat(state.verifierRejectionExhausted()).isFalse();
+
+        state.noteVerifierRejection(Verdict.MissingEvidence.MEMORY);
+        assertThat(state.verifierRejectionExhausted())
+                .as("同一类型（MEMORY）连续两次才算死路")
+                .isTrue();
     }
 
     @Test
     @DisplayName("槽位超预算时**最新优先**保留（与 P0-a 修过的裁剪取向一致）")
     void slotKeepsNewestWhenOverBudget() {
         ArticleAgentState state = state();
-        String old = "旧".repeat(700);
-        String fresh = "新".repeat(700);
+        String old = "旧".repeat(1000);
+        String fresh = "新".repeat(1000);
 
         state.reduce(decision(AgentStepActionType.QUERY_ARTICLE),
                 articleResult(old, "第一处", true));
@@ -172,7 +235,8 @@ class ArticleAgentStateTests {
 
         String context = state.decisionContext();
 
-        // 文章证据槽位预算 1200：两条各 700 装不下，必须留下**最新**那条
+        // 聚焦片段槽位预算 1500：两条各 1000 装不下，必须留下**最新**那条。
+        // 结构摘要另有独立预算、不参与这里的淘汰（见 overviewSurvivesAfterMultipleFocusQueries）
         assertThat(context).contains("新".repeat(50));
         assertThat(context).doesNotContain("旧".repeat(50));
     }
@@ -457,9 +521,11 @@ class ArticleAgentStateTests {
         assertThat(structured.length())
                 .as("结构化上下文必须比 observation 重放短")
                 .isLessThan(replayed.length());
-        // 槽位预算守住上限：文章 1200 + 记忆 600 + 站内 800 + 动作 300 + 缺失 300 + 头部
+        // 槽位预算合计守住上限（2026-10-11 起文章域分槽）：
+        // 文章结构 2400 + 聚焦片段 1500 + 记忆 600 + 站内 800 + 已完成动作 300 + 缺失 300
+        // + 系统反馈 400 = 6300，再留槽位标题开销
         assertThat(structured.length())
                 .as("槽位预算必须真的兜住总量")
-                .isLessThan(4000);
+                .isLessThan(7000);
     }
 }

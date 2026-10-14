@@ -13,8 +13,8 @@ package com.hailin.blogsystem.ai.agent;
  * 由 {@link AbstractAgentRuntime#newRunState} 工厂产出。
  * 绝不能挂在单例 Runtime 的字段上：那会让并发请求互相污染状态。
  *
- * <p><b>第一版只对文章域启用</b>：基类 {@code newRunState} 默认返回 {@code null}，
- * 学习 / 通用 / 钱包域继续走 observation 重放——对它们是零行为变更。
+ * <p><b>按领域逐步启用</b>：文章域先接入，学习域随后接入；基类 {@code newRunState} 默认返回
+ * {@code null}，通用 / 钱包域继续走 observation 重放，直到各自完成结构化事实契约。
  *
  * <p><b>实现只消费 {@code payload}</b>：不解析中文 observation。
  * 命中与未命中都会返回一段文本，只有结构化字段能区分（这正是 §7.3 否掉「路 A」的原因）。
@@ -124,5 +124,26 @@ public interface AgentRunState {
      */
     default boolean hasEvidenceProgressSinceRejection() {
         return true;
+    }
+
+    /**
+     * 同一缺失证据类型是否已被**连续**拒绝到上限（2026-10-11）。
+     *
+     * <p>证据门的职责是促使补查，不是把 run 拖到步数耗尽。当它连续两次对**同一类缺失**
+     * 给出 NEED_MORE，说明补查没能满足该标尺（实测常见于"证据结构与该判据不匹配"）。
+     *
+     * <p>骨架**只在已经没有下一次机会时**（{@code nextStepNo >= maxSteps}）据此放行草案：
+     * 还有步数时继续让证据门工作（既有语义「拦后补查成功 → 到顶不保守」保持不变）；
+     * 最后一步再拦就只剩"没有回答"——正是 {@code ArticleEvidenceVerifier} 自己写下的
+     * 更坏结局（「证据不足的代价 &lt; 无回答的代价」）。
+     *
+     * <p><b>为什么不能复用 {@link #hasEvidenceProgressSinceRejection()}</b>：那个判据看"证据版本有没有涨"，
+     * 而每次换 focus 补查都会涨版本 → 永远算"有进展" → 拦截无限继续。实测一次真实请求里
+     * 连续被拦 3 次、6 步耗尽、18300 input token 全浪费，用户拿到的仍是"信息不足，先不硬答"。
+     *
+     * <p>默认 {@code false}：其他域保持原行为。
+     */
+    default boolean verifierRejectionExhausted() {
+        return false;
     }
 }

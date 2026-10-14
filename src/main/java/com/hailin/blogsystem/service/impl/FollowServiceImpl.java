@@ -2,6 +2,7 @@ package com.hailin.blogsystem.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.hailin.blogsystem.entity.NotificationType;
 import com.hailin.blogsystem.entity.UserFollows;
 import com.hailin.blogsystem.entity.Users;
 import com.hailin.blogsystem.entity.dto.ArticleInteractionAction;
@@ -10,6 +11,7 @@ import com.hailin.blogsystem.entity.dto.ArticleInteractionResultCode;
 import com.hailin.blogsystem.mapper.FollowMapper;
 import com.hailin.blogsystem.mapper.UsersMapper;
 import com.hailin.blogsystem.service.FollowService;
+import com.hailin.blogsystem.service.NotificationService;
 import com.hailin.blogsystem.utils.UserContext;
 import lombok.RequiredArgsConstructor;
 import org.springframework.cglib.core.Local;
@@ -18,6 +20,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Service
 @RequiredArgsConstructor
@@ -25,6 +28,7 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, UserFollows>
 implements FollowService {
 
     private final UsersMapper usersMapper;
+    private final NotificationService notificationService;
 
     @Override  //关注用户
     @Transactional
@@ -72,6 +76,12 @@ implements FollowService {
                         true);
             }
             incrementFollowCounters(userId, followingId);
+
+            // 通知被关注的人。接收者就是方法入参，**零额外查询**——所有挂点里最干净的一个。
+            // 与业务同事务；上面的 ALREADY_SATISFIED 分支已 return，能走到这里必是 APPLIED
+            notificationService.notify(followingId, userId,
+                    NotificationType.USER_FOLLOWED, followingId, null);
+
             return ArticleInteractionResult.success(
                     ArticleInteractionAction.FOLLOW_AUTHOR,
                     ArticleInteractionResultCode.APPLIED,
@@ -105,6 +115,17 @@ implements FollowService {
                     true);
         }
         incrementFollowCounters(userId, followingId);
+
+        /*
+         * 取关后重新关注（复活那条软删行）同样发一次。
+         *
+         * ⚠️ 它和首次关注的通知**唯一键完全相同**（receiver/actor/target 都没变），
+         * 所以只要上一条通知还在，这次插入会被唯一键静默忽略——即"取关再关注不会重复打扰"，
+         * 与点赞"取消再赞不重复通知"是同一个口径（设计稿 §6.1 的有意防刷，不是漏发）。
+         */
+        notificationService.notify(followingId, userId,
+                NotificationType.USER_FOLLOWED, followingId, null);
+
         return ArticleInteractionResult.success(
                 ArticleInteractionAction.FOLLOW_AUTHOR,
                 ArticleInteractionResultCode.APPLIED,
@@ -193,6 +214,23 @@ implements FollowService {
                     null);
         }
         return null;
+    }
+
+    @Override
+    public List<Long> listFollowingIds(Long followerId) {
+        if (followerId == null) {
+            return List.of();
+        }
+        return lambdaQuery()
+                .eq(UserFollows::getFollowerId, followerId)
+                // 取关走的是软删除（deleted_at 记的是取关时间），这里只要「当前还有效」的。
+                // 注意与 followUser 里那次查询的区别：那边特意**不带**这个条件，
+                // 因为它要判断「是否曾经关注过」来决定是新建还是恢复。
+                .isNull(UserFollows::getDeletedAt)
+                .list()
+                .stream()
+                .map(UserFollows::getFollowingId)
+                .toList();
     }
 
     private void incrementFollowCounters(Long userId, Long followingId) {

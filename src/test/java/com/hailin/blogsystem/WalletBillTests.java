@@ -1,15 +1,22 @@
 package com.hailin.blogsystem;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
 import com.hailin.blogsystem.ai.billing.BillingHandle;
+import com.hailin.blogsystem.entity.WalletTransaction;
 import com.hailin.blogsystem.entity.vo.PageVO;
 import com.hailin.blogsystem.entity.vo.WalletBillEntryVO;
+import com.hailin.blogsystem.entity.vo.WalletVO;
+import com.hailin.blogsystem.mapper.WalletTransactionMapper;
 import com.hailin.blogsystem.service.AiBillingService;
 import com.hailin.blogsystem.service.WalletService;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+
+import java.time.LocalDateTime;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -32,6 +39,9 @@ class WalletBillTests {
 
     @Autowired
     private AiBillingService aiBillingService;
+
+    @Autowired
+    private WalletTransactionMapper walletTransactionMapper;
 
     private final long userId = 9_500_000_000_000L + System.nanoTime() % 1_000_000_000L;
 
@@ -124,6 +134,73 @@ class WalletBillTests {
         // 1 条充值 + 3 条 AI = 4 条账单（原始流水是 1 + 6 = 7 行）
         assertThat(firstPage.getTotal()).isEqualTo(4);
         assertThat(firstPage.getList()).hasSize(2);
+    }
+
+    /**
+     * 在途预占必须**同时给出金额**，不能只给笔数。
+     *
+     * <p>这是「执行中看到额度突然负几千」那个问题的修复：预扣按该路径硬上限占款，
+     * 展示层要能把它加回去（`展示额度 = balance + pendingReserveCredit`），
+     * 才能让用户在任务执行期间看到的数字不跳、结束后一次性扣掉实际消费。
+     *
+     * <p>只给笔数做不到这件事——知道"有 1 笔在跑"但不知道占了多少，加不回去。
+     */
+    @Test
+    void pendingReserveExposesAmountSoDisplayCanAddItBack() {
+        recharge(10_000, "W-7");
+        BillingHandle handle = aiBillingService.reserve("WORKFLOW_ACTION", "WF:START:demo", userId, 8_000);
+
+        WalletVO wallet = walletService.getWallet(userId);
+
+        assertThat(wallet.getBalance())
+                .as("账务余额真的被占掉了")
+                .isEqualTo(2_000);
+        assertThat(wallet.getPendingReserveCount()).isEqualTo(1);
+        assertThat(wallet.getPendingReserveCredit()).isEqualTo(8_000);
+
+        assertThat(wallet.getBalance() + wallet.getPendingReserveCredit())
+                .as("展示口径加回在途预占后，应当回到预扣前的额度")
+                .isEqualTo(10_000);
+
+        aiBillingService.release(handle);
+
+        WalletVO afterRelease = walletService.getWallet(userId);
+        assertThat(afterRelease.getPendingReserveCredit()).isZero();
+        assertThat(afterRelease.getBalance()).isEqualTo(10_000);
+    }
+
+    /**
+     * 窗口外的账单**不展示，但一行都没删**。
+     *
+     * <p>同时锁两件事：① 时间窗口真的生效；② 它是**展示层**过滤——账本原样还在。
+     * 后者更重要：{@code wallet_transaction} 是按 {@code balance_seq} 连续编号的，
+     * 删掉任何一段，逐笔回放对账（{@code selectLedgerAnomalies} 的 LAG 检查）
+     * 都会报"漏流水"假警，把真正的账不平淹没掉。
+     */
+    @Test
+    void entriesOlderThanTheWindowAreHiddenButNotDeleted() {
+        recharge(10_000, "W-OLD");
+        // 把这次充值的流水挪到 30 天前，模拟老数据（默认窗口 7 天）
+        walletTransactionMapper.update(null, new LambdaUpdateWrapper<WalletTransaction>()
+                .eq(WalletTransaction::getUserId, userId)
+                .set(WalletTransaction::getCreatedAt, LocalDateTime.now().minusDays(30)));
+
+        assertThat(walletService.listBill(userId, 1, 10).getList())
+                .as("窗口外的不给用户看")
+                .isEmpty();
+
+        assertThat(walletTransactionMapper.selectCount(new LambdaQueryWrapper<WalletTransaction>()
+                        .eq(WalletTransaction::getUserId, userId)))
+                .as("但流水一行都没删——账本必须完整")
+                .isEqualTo(1L);
+    }
+
+    /** 窗口内的照常显示（顺带防止窗口条件写反，比如把 >= 写成 <=） */
+    @Test
+    void entriesInsideTheWindowAreStillListed() {
+        recharge(10_000, "W-NEW");
+
+        assertThat(walletService.listBill(userId, 1, 10).getList()).hasSize(1);
     }
 
     // ---------- helpers ----------

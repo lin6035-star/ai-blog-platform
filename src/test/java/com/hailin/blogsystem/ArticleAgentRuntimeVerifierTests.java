@@ -26,6 +26,7 @@ import com.hailin.blogsystem.mapper.AiAgentRunMapper;
 import com.hailin.blogsystem.mapper.AiAgentStepMapper;
 import com.hailin.blogsystem.service.ArticlesService;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -283,6 +284,67 @@ class ArticleAgentRuntimeVerifierTests {
         assertThat(result.usedSteps()).isEqualTo(6);
         assertThat(result.finalAnswer()).doesNotContain("不足以让我给出可靠结论");
         verify(decider, org.mockito.Mockito.atLeastOnce()).summarize(any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("★2026-10-11 回归：最后一次机会仍被同一类型拒绝时，交付草案而不是保守收尾（无回答）")
+    void exhaustedRejectionAtLastStepDeliversAnswerInsteadOfShutdown() {
+        // 真实数据（run 2109254775313997825「点赞 + 分析一下这篇文章」）：6 步里 3 份草案全被
+        // "缺 文章正文细节"拦掉，每份草案 ~7s、run 花掉 18300 input token，
+        // 最后用户只看到"目前收集到的信息还不足以让我给出可靠结论"。
+        // 与上一条测试的差别只在**最后一次机会落在哪**：
+        //   上一条 → 末步是补查（还有 summarize 的机会）
+        //   本条   → 末步仍是回答（再拦就彻底没有回答）
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(finalAnswer("草案一"))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
+                .thenReturn(finalAnswer("草案二"))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
+                .thenReturn(finalAnswer("草案三"));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》\n- 正文片段：第一处"))
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》\n- 正文片段：第二处"))
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》\n- 正文片段：第三处"));
+        when(verifier.verify(any(), any(), any(), any(), any()))
+                .thenReturn(Verdict.needMore(Verdict.MissingEvidence.ARTICLE_CONTENT, "缺细节"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "分析一下这篇文章",
+                articleContext("12"), AgentStepEmitter.noop());
+
+        assertThat(result.usedSteps()).isEqualTo(6);
+        assertThat(result.completionKind())
+                .as("最后一步再拦就只剩'没有回答'——证据门自己的原则是「证据不足的代价 < 无回答的代价」")
+                .isEqualTo(AgentCompletionKind.ANSWER);
+        assertThat(result.finalAnswer()).contains("草案三");
+    }
+
+    @Test
+    @DisplayName("★2026-10-11 回归：还有步数时不能提前放行（既有语义：拦后补查 → 到顶走 summarize）")
+    void notYetLastStepKeepsRejecting() {
+        // 与上一条同样的 mock 序列，只把末步从"回答"换成"补查"：
+        // 中间那次拒绝发生时连续计数已到 2，但它**不是最后一次机会**，必须继续拦。
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(finalAnswer("草案一"))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
+                .thenReturn(finalAnswer("草案二"))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
+                .thenReturn(finalAnswer("草案三"))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》\n- 正文片段：第一处"))
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》\n- 正文片段：第二处"))
+                .thenReturn(AgentActionResult.of("当前文章分析：\n- 标题：《Redis 缓存》\n- 正文片段：第三处"));
+        when(verifier.verify(any(), any(), any(), any(), any()))
+                .thenReturn(Verdict.needMore(Verdict.MissingEvidence.ARTICLE_CONTENT, "缺细节"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "分析一下这篇文章",
+                articleContext("12"), AgentStepEmitter.noop());
+
+        assertThat(result.usedSteps()).isEqualTo(6);
+        assertThat(result.completionKind())
+                .as("第 5 步时连续计数已到 2，但还有第 6 步可用 → 不放行，到顶后走 summarize")
+                .isEqualTo(AgentCompletionKind.MAX_STEPS_SUMMARY);
     }
 
     @Test

@@ -320,7 +320,8 @@ public abstract class AbstractAgentRuntime {
             String goal,
             List<String> observations,
             AgentStepEmitter emitter,
-            PageContextDTO pageContext
+            PageContextDTO pageContext,
+            TokenUsageAccumulator stepUsage
     ) {
         return null;
     }
@@ -496,7 +497,7 @@ public abstract class AbstractAgentRuntime {
                 // 领域扩展终态（学习域 SUGGEST_WRITE 在此处理）
                 int observedBefore = observations.size();
                 AgentRunResult extra = handleExtraTerminalAction(
-                        run, decision, effectiveGoal, observations, emitter, pageContext);
+                        run, decision, effectiveGoal, observations, emitter, pageContext, stepUsage);
                 syncFeedback(runState, decision, observations, observedBefore);
                 if (extra != null) {
                     return extra;
@@ -509,10 +510,20 @@ public abstract class AbstractAgentRuntime {
 
                 // 终态：FINAL_ANSWER
                 if (decision.actionType() == AgentStepActionType.FINAL_ANSWER) {
+                    // 同一缺失类型被连续拒绝到上限、**且已经用掉最后一次机会**时才放行（2026-10-11）：
+                    // 还有步数时继续让证据门工作（既有语义：拦后补查成功 → 到顶不保守）；
+                    // 但最后一步再拦就等于彻底放弃回答——实测「点赞 + 分析」6 步全被拦、
+                    // 18300 token 全浪费，用户拿到的只是"信息不足，先不硬答"。
+                    //
+                    // **必须排在下面那条"无进展收尾"之前**：那条的结局同样是"没有回答"。
+                    boolean lastChance = run.getMaxSteps() != null && nextStepNo >= run.getMaxSteps();
+                    boolean verifierExhausted = lastChance
+                            && runState != null && runState.verifierRejectionExhausted();
+
                     // 上次 Verifier 已明确缺某类证据，而此后对应证据版本没有变化：
                     // 再调一次 Verifier 只会重复同一结论，随后继续空转。
                     // 默认状态实现恒返回 true，所以只对启用结构化证据版本的文章域生效。
-                    if (runState != null && !runState.hasEvidenceProgressSinceRejection()) {
+                    if (!verifierExhausted && runState != null && !runState.hasEvidenceProgressSinceRejection()) {
                         String reason = "上次拒绝后没有新增证据";
                         emitter.emit(nextStepNo, "FINAL_ANSWER", AiAgentStepStatus.SKIPPED.name(),
                                 "没有新增证据，停止重复回答", null);
@@ -533,18 +544,26 @@ public abstract class AbstractAgentRuntime {
                     // 成本一直算不出来。实测 decider 一次 FINAL_ANSWER 要 ~30s（生成完整草案），
                     // 而拒绝发生在草案生成**之后**——真正贵的是被丢掉的那份草案，不是判定本身。
                     // outcome 记 verdict 类型，用 NEED_MORE 占比就能直接读出空转比例。
-                    AiStageTimer verifierTimer = AiStageTimer.start();
                     Verdict verdict;
-                    try {
-                        verdict = verifyBeforeFinalization(
-                                run, decision, observations, successfulActions, runState);
-                        log.info("[PERF-AI] stage=agent_verifier runId={} stepNo={} durationMs={} outcome={}",
-                                run.getId(), nextStepNo, verifierTimer.elapsedMillis(),
-                                verdict == null ? "none" : verdict.type());
-                    } catch (RuntimeException e) {
-                        log.info("[PERF-AI] stage=agent_verifier runId={} stepNo={} durationMs={} outcome=error",
-                                run.getId(), nextStepNo, verifierTimer.elapsedMillis());
-                        throw e;
+                    if (verifierExhausted) {
+                        // verdict = null 与原"该域没有验证器"同义：证据门未参与判定 → 走下面的放行分支。
+                        // 留一条可检索日志，便于从"被丢弃的草案数"反查证据门是否长期空转。
+                        log.warn("[AGENT] 证据门连续同类型拒绝达上限，本轮放行草案避免空转: runId={} stepNo={}",
+                                run.getId(), nextStepNo);
+                        verdict = null;
+                    } else {
+                        AiStageTimer verifierTimer = AiStageTimer.start();
+                        try {
+                            verdict = verifyBeforeFinalization(
+                                    run, decision, observations, successfulActions, runState);
+                            log.info("[PERF-AI] stage=agent_verifier runId={} stepNo={} durationMs={} outcome={}",
+                                    run.getId(), nextStepNo, verifierTimer.elapsedMillis(),
+                                    verdict == null ? "none" : verdict.type());
+                        } catch (RuntimeException e) {
+                            log.info("[PERF-AI] stage=agent_verifier runId={} stepNo={} durationMs={} outcome=error",
+                                    run.getId(), nextStepNo, verifierTimer.elapsedMillis());
+                            throw e;
+                        }
                     }
                     if (verdict != null && verdict.type() == Verdict.VerdictType.NEED_MORE) {
                         lastVerifierRejectionStep = nextStepNo;
@@ -1520,6 +1539,25 @@ public abstract class AbstractAgentRuntime {
                 run.getUsedSteps(),
                 run.getTotalTokens()
         );
+    }
+
+    /**
+     * 终态决策被后端拒绝且 run 立即失败时，补齐失败 step 的审计与 token。
+     *
+     * <p>普通拒绝会由调用方推进 usedSteps 后继续循环；这里是直接 FAILED 的分支，
+     * 所以辅助方法同时推进 run 进度，保证 step 表和 run 的步号一致。</p>
+     */
+    protected AgentRunResult markFailedAfterRejectedStep(
+            AiAgentRun run,
+            AgentStepDecision decision,
+            int stepNo,
+            TokenUsageAccumulator stepUsage,
+            String message
+    ) {
+        recordRejectedStep(run, decision, stepNo, message, stepUsage);
+        run.setCurrentStep(stepNo);
+        run.setUsedSteps(stepNo);
+        return markFailed(run, message);
     }
 
     /**

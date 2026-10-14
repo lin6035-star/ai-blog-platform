@@ -283,7 +283,7 @@ blog:
       handoff-recovery-stale-minutes: 15
     # 判断链模型（分类器 / Agent 决策器 / 证据验证器）：这些环节判错会让整条路走偏，
     # 建议绑一个稳的模型；留空则跟随 spring.ai.openai.chat.options.model（生成链模型）。
-    judge-model: ${AI_JUDGE_MODEL:qwen3.7-plus}
+    judge-model: ${AI_JUDGE_MODEL:qwen3.7-plus-2026-05-26}
     # 思考模式（enable_thinking）统一策略（2026-10-04）。设计说明见 BlogAiProperties.Thinking。
     #   disable=true（默认）：对**所有**模型的 chat 调用注入 enable_thinking=false，
     #     RestClient（非流式）与 WebClient（流式）两条管线都注入。
@@ -331,13 +331,30 @@ blog:
         embedding-model: ${spring.ai.embedding.options.model:qwen3.7-text-embedding}
         dimensions: ${spring.ai.vectorstore.elasticsearch.dimensions:1024}
         initialize-schema: false
+      # 词法检索。**按「要覆盖几篇文章」配，不是按「要多少片段」配**：
+      # chunk 级命中里同一篇文章的多个 chunk 会连续排在前面，取前 N 个片段经常只覆盖一两篇。
+      # 实测问"有没有关于 Java 的文章"：ES 里 51 个 chunk / 12 篇命中，而原来硬编码的 size=5
+      # 只捞回 5 个 chunk（且几乎同属一两篇），最终只喂给 LLM 一篇内容。
+      #   fetch-size 先多捞 → max-articles 摊开成几篇 → chunks-per-article 每篇留几个
+      keyword:
+        fetch-size: 60
+        max-articles: 8
+        chunks-per-article: 2
       rerank:
         enabled: true
         model: qwen3-vl-rerank
         workspace-id: ${ALIYUN_WORKSPACE_ID:}
-        top-n: 5
+        # ⚠️ top-n 是 **chunk 级**名额，而下游 parseRanked 会按 articleId 折叠成"篇"——
+        # 所以名额必须比"想要的篇数"多留余量，否则会被同一篇文章的多个 chunk 吃光。
+        # 实测（2026-10-13 问"有没有关于缓存的文章"）：candidate=14 → ranked=3，
+        # 5 个名额里有 3 个落在同一篇上，折叠后只剩 3 篇进 Gate；Java 那次是 candidate=3 → ranked=2。
+        # 表现就是"候选明明有 8~13 篇，最终只给 LLM 一篇"。
+        top-n: 8
         max-documents: 30
-        max-chunks-per-article: 2
+        # **每篇只送最佳 chunk**：送 2 个时一篇文章能占掉 2 个 top-n 名额，
+        # 而折叠成篇后这 2 个名额只换来 1 篇——名额被白白浪费。
+        # "找文章"这类场景，**篇数**比"同一篇的多个片段"重要。
+        max-chunks-per-article: 1
       gate:
         enabled: true
         # 阈值按 rerank 模型的实测分数标定，不是拍出来的——**换 rerank 模型必须重新标定**，
@@ -359,7 +376,10 @@ blog:
       enabled: true
       rebuild:
         enabled: true
-        allowed-user-ids: [ 1, 2 ]
+        # ⚠️ 必须是**雪花 ID**：2026-10-13 排查发现这里长期留着迁移前的旧值 [1, 2]，
+        # 而 users 表里 id IN (1,2) 命中数为 0 —— 等于把 rebuild / repair / reindex
+        # 全部锁成 403，Memory 向量重刷因此从未执行过。
+        allowed-user-ids: [ 2085218095032741891 ]
       async:
         core-size: 2
         max-size: 4

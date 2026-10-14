@@ -2,6 +2,7 @@ package com.hailin.blogsystem.ai.agent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.LogValues;
+import com.hailin.blogsystem.ai.TokenUsageAccumulator;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.dto.AgentStepActionType;
 import com.hailin.blogsystem.entity.dto.AiAgentRunStatus;
@@ -98,7 +99,8 @@ public class WalletAgentRuntime extends AbstractAgentRuntime implements AgentRun
     @Override
     protected AgentRunResult handleExtraTerminalAction(AiAgentRun run, AgentStepDecision decision,
                                                        String goal, List<String> observations,
-                                                       AgentStepEmitter emitter, PageContextDTO pageContext) {
+                                                       AgentStepEmitter emitter, PageContextDTO pageContext,
+                                                       TokenUsageAccumulator stepUsage) {
         if (decision.actionType() != AgentStepActionType.SUGGEST_WRITE) {
             // 非终态动作不归这里管，交回基类（FINAL_ANSWER / ASK_USER 会被基类的终态分支接走）
             return null;
@@ -111,17 +113,21 @@ public class WalletAgentRuntime extends AbstractAgentRuntime implements AgentRun
             // C0.2：actionType 是模型给的内部协议值，只进日志（用户可见文案保持稳定）
             log.warn("[AGENT] 写动作提案被拒（actionType 不在白名单）: runId={}, actionType={}",
                     run.getId(), LogValues.safe(actionType));
-            return markFailed(run, "Agent 写动作提案无效（不支持的写动作类型）");
+            return markFailedAfterRejectedStep(
+                    run, decision, run.getUsedSteps() + 1, stepUsage,
+                    "Agent 写动作提案无效（不支持的写动作类型）");
         }
 
         String payYuan = text(input.get("payYuan"));
         if (payYuan == null || payYuan.isBlank()) {
             // 决策器正常情况下不会给空金额，走到这里说明两边脱节了
             emitter.emit(run.getUsedSteps() + 1, "SUGGEST_WRITE", "FAILED", "提案缺少充值金额", null);
-            return markFailed(run, "Agent 写动作提案无效（缺少 payYuan）");
+            return markFailedAfterRejectedStep(
+                    run, decision, run.getUsedSteps() + 1, stepUsage,
+                    "Agent 写动作提案无效（缺少 payYuan）");
         }
 
-        return finishSuggestWrite(run, decision, observations, emitter, payYuan);
+        return finishSuggestWrite(run, decision, observations, emitter, stepUsage, payYuan);
     }
 
     /**
@@ -132,6 +138,7 @@ public class WalletAgentRuntime extends AbstractAgentRuntime implements AgentRun
      */
     private AgentRunResult finishSuggestWrite(AiAgentRun run, AgentStepDecision decision,
                                               List<String> observations, AgentStepEmitter emitter,
+                                              TokenUsageAccumulator stepUsage,
                                               String payYuan) {
         AgentWriteProposal proposal = new AgentWriteProposal(
                 AgentWriteProposal.TYPE_RECHARGE_WALLET,
@@ -142,7 +149,7 @@ public class WalletAgentRuntime extends AbstractAgentRuntime implements AgentRun
 
         emitter.emit(run.getUsedSteps() + 1, "SUGGEST_WRITE", "SUCCESS", "已准备充值方案",
                 decision.thoughtSummary());
-        recordTerminalStep(run, decision, run.getUsedSteps() + 1, null);
+        recordTerminalStep(run, decision, run.getUsedSteps() + 1, stepUsage);
         run.setStatus(AiAgentRunStatus.WAITING_WRITE_CONFIRM.name());
         run.setFinalAnswer(finalAnswer);
         run.setContextJson(toJson(Map.of(

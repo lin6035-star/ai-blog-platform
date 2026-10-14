@@ -4,6 +4,7 @@ import com.hailin.blogsystem.ai.memory.AiEpisodicMemoryRetrieveService;
 import com.hailin.blogsystem.ai.memory.AiMemoryRetrieveService;
 import com.hailin.blogsystem.ai.rag.ArticleRagSearchService;
 import com.hailin.blogsystem.config.BlogAiProperties;
+import com.hailin.blogsystem.entity.AiUserMemories;
 import com.hailin.blogsystem.entity.Articles;
 import com.hailin.blogsystem.entity.dto.ArticleRagContext;
 import com.hailin.blogsystem.entity.dto.ArticleRagSearchResult;
@@ -11,6 +12,7 @@ import com.hailin.blogsystem.entity.dto.AiIntent;
 import com.hailin.blogsystem.entity.dto.EpisodicMemoryRagContext;
 import com.hailin.blogsystem.entity.dto.MemoryRagContext;
 import com.hailin.blogsystem.entity.dto.PageContextDTO;
+import com.hailin.blogsystem.service.AiUserMemoryService;
 import com.hailin.blogsystem.service.ArticlesService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -47,6 +49,7 @@ public class ArticleAgentActionExecutorImpl implements ArticleAgentActionExecuto
     private final BlogAiProperties blogAiProperties;
     /** V3.12 手测修正：读权限单点（他人公开文章可读），与 QA 的 loadReadable 同口径。 */
     private final ArticleSessionAnchorService anchorService;
+    private final AiUserMemoryService aiUserMemoryService;
 
     @Override
     public AgentActionResult execute(AgentStepDecision decision, Long userId, PageContextDTO pageContext) {
@@ -477,6 +480,26 @@ public class ArticleAgentActionExecutorImpl implements ArticleAgentActionExecuto
         int hitCount = 0;
         boolean semanticOk = true;
         boolean episodicOk = true;
+
+        /*
+         * 常驻记忆：**不计入 hitCount**。
+         *
+         * 常驻是「永远有的背景」，不是检索命中——计入会让状态机的
+         * 「记忆里没有命中，不必再查」永不触发，模型会反复查同一件事。
+         * 读取失败也不改 semanticOk（它走 MySQL，与 ES 召回是两个故障域）。
+         *
+         * 2026-10-13 实测：记忆向量仍留在旧 embedding 空间，与当前 query 向量
+         * cos≈0.0125（近似正交），纯向量召回恒空；常驻通道与相似度无关，是兜底。
+         */
+        try {
+            List<AiUserMemories> alwaysMemories = aiUserMemoryService.listPromptMemories(userId);
+            for (AiUserMemories memory : alwaysMemories) {
+                sb.append("- 常驻记忆(").append(memory.getMemoryType()).append(")：")
+                        .append(limit(memory.getContent(), TEXT_MAX)).append('\n');
+            }
+        } catch (Exception e) {
+            log.warn("Agent 常驻记忆读取失败，userId={}", userId, e);
+        }
 
         try {
             List<MemoryRagContext> memories = aiMemoryRetrieveService.retrieve(userId, query);

@@ -93,6 +93,10 @@ public class SeckillLifecycleServiceImpl implements SeckillLifecycleService {
     @Override
     public int endDueActivities() {
         LocalDateTime now = LocalDateTime.now();
+
+        // 先收尾「窗口已过却还停在 DRAFT」的场次（见 endStaleDrafts 的注释）
+        int ended = endStaleDrafts(now);
+
         List<SeckillActivity> due = seckillActivityMapper.selectList(
                 new LambdaQueryWrapper<SeckillActivity>()
                         .eq(SeckillActivity::getStatus, ACTIVE)
@@ -100,8 +104,6 @@ public class SeckillLifecycleServiceImpl implements SeckillLifecycleService {
                                 .or()
                                 .apply("sold_count >= total_stock"))
                         .last("LIMIT " + BATCH));
-
-        int ended = 0;
         for (SeckillActivity activity : due) {
             boolean drained;
             try {
@@ -128,6 +130,46 @@ public class SeckillLifecycleServiceImpl implements SeckillLifecycleService {
             ended++;
             log.info("[SECKILL-LIFECYCLE] 活动 {} 结束（售罄 {}，已排空）",
                     activity.getId(), activity.getSoldCount() >= activity.getTotalStock());
+        }
+        return ended;
+    }
+
+    /**
+     * 把「窗口整体已过、却还停在 DRAFT」的场次收敛成 ENDED。
+     *
+     * <p><b>为什么必须有这一步</b>：{@link #activateDueActivities} 刻意不激活窗口已过的 DRAFT
+     * （激活它等于白建一批 7 天 TTL 的 key、下一轮又立刻结束掉），但**原先没人负责给它收尾**——
+     * 于是「服务在活动那半小时里没运行」就会永久留下一个 DRAFT 场次。本地开发（服务不常开）
+     * 必然踩到，线上停机也会，实测库里 10-04 / 10-05 / 10-08 / 10-10 / 10-12 五场都卡在这。
+     *
+     * <p>它不只是脏数据，会实打实地坏掉前端：
+     * <ul>
+     *   <li>{@code activityPhase} 见到 DRAFT 就返回「未开始」（不看时间）→ 今天那场结束了大半天
+     *       还写着未开始</li>
+     *   <li>「今天那场还没结束」⇒ 明天那场被判定为不该提前剧透 → <b>列表只剩一场</b>，
+     *       而正常应当是「今天已结束 + 明天未开始」两场</li>
+     *   <li>{@code scheduleRefresh} 判定「该开始却还没翻转」→ 每 3 秒重拉一次列表
+     *       → 骨架屏一直闪</li>
+     * </ul>
+     *
+     * <p>不需要像 ACTIVE 那样等排空：DRAFT 从未激活，抢购脚本会按 meta 里的 status 直接拒掉，
+     * 不可能有在途事件。
+     */
+    private int endStaleDrafts(LocalDateTime now) {
+        List<SeckillActivity> stale = seckillActivityMapper.selectList(
+                new LambdaQueryWrapper<SeckillActivity>()
+                        .eq(SeckillActivity::getStatus, DRAFT)
+                        .le(SeckillActivity::getEndAt, now)
+                        .last("LIMIT " + BATCH));
+
+        int ended = 0;
+        for (SeckillActivity activity : stale) {
+            if (seckillActivityMapper.casStatus(activity.getId(), DRAFT, ENDED) == 0) {
+                continue;   // 别人推过了（多实例 / 手工改），静默——定时任务是幂等的
+            }
+            ended++;
+            log.info("[SECKILL-LIFECYCLE] 活动 {} 窗口已过仍是 DRAFT（那段时间服务没运行），收敛为 ENDED",
+                    activity.getId());
         }
         return ended;
     }

@@ -37,6 +37,25 @@ public class WorkflowTokenRecorder {
     }
 
     /**
+     * 记录一次 LLM 流异常已经消耗的 usage。
+     *
+     * <p>正常返回由 handler 在拿到 {@link LlmStreamCaller.LlmStreamResult} 后调用
+     * {@link #accumulate(AiWorkflowRun, TokenUsageAccumulator)}；异常没有 result，
+     * 所以从携带 usage 的异常中取出同一份数据。run 级和当前 step 缓冲必须一起更新。</p>
+     */
+    public void accumulateFailure(AiWorkflowRun run, Throwable error) {
+        Throwable current = error;
+        int depth = 0;
+        while (current != null && depth++ < 10) {
+            if (current instanceof LlmStreamException streamException) {
+                accumulate(run, streamException.usage());
+                return;
+            }
+            current = current.getCause();
+        }
+    }
+
+    /**
      * 取走本步暂存的用量并清空。
      *
      * 调用方**必须每步都调**——哪怕这一步没有 LLM 调用、哪怕不落库（runId 为 null）：

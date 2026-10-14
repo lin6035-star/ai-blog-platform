@@ -8,6 +8,7 @@ import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -48,6 +49,7 @@ public interface WalletTransactionMapper extends BaseMapper<WalletTransaction> {
                        MAX(created_at)  AS created_at
                 FROM wallet_transaction
                 WHERE user_id = #{userId}
+                  AND created_at >= #{since}
                 GROUP BY biz_id
                 HAVING SUM(CASE WHEN type = 'AI_RESERVE' THEN 1 ELSE 0 END)
                      = SUM(CASE WHEN type = 'AI_REFUND' THEN 1 ELSE 0 END)
@@ -60,23 +62,34 @@ public interface WalletTransactionMapper extends BaseMapper<WalletTransaction> {
             LIMIT #{limit} OFFSET #{offset}
             """)
     List<WalletBillEntryVO> selectBillPage(@Param("userId") Long userId,
+                                           @Param("since") LocalDateTime since,
                                            @Param("limit") long limit,
                                            @Param("offset") long offset);
 
-    /** 账单总条数——口径必须与 {@link #selectBillPage} 的过滤条件完全一致 */
+    /**
+     * 账单总条数——口径必须与 {@link #selectBillPage} 的过滤条件**完全一致**
+     * （包括 {@code since} 时间窗口，否则分页会多出空页）。
+     *
+     * <p><b>时间窗口会把"跨窗口的半笔业务"整笔排除</b>：过滤发生在分组之前，
+     * 若某笔业务的预扣落在窗口外、退款落在窗口内，聚合后就只剩一半，
+     * {@code HAVING} 的「预扣数 = 退款数」不再成立，该笔不显示。
+     * 这是想要的语义——宁可少显示一笔，也不要显示一个算错的净额。
+     * 而实际上一次 AI 调用的预扣与结算相差**秒级**，跨天窗口的概率可以忽略。
+     */
     @Select("""
             SELECT COUNT(*)
             FROM (
                 SELECT biz_id
                 FROM wallet_transaction
                 WHERE user_id = #{userId}
+                  AND created_at >= #{since}
                 GROUP BY biz_id
                 HAVING SUM(CASE WHEN type = 'AI_RESERVE' THEN 1 ELSE 0 END)
                      = SUM(CASE WHEN type = 'AI_REFUND' THEN 1 ELSE 0 END)
                    AND SUM(amount) <> 0
             ) c
             """)
-    long countBill(@Param("userId") Long userId);
+    long countBill(@Param("userId") Long userId, @Param("since") LocalDateTime since);
 
     /**
      * 全表扫出一行都接不上的流水（对账用，设计稿 §7.3）。

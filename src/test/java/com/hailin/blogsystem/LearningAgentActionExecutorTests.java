@@ -1,15 +1,20 @@
 package com.hailin.blogsystem;
 
 import com.hailin.blogsystem.ai.agent.AgentStepDecision;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.LearningAgentActionExecutorImpl;
 import com.hailin.blogsystem.ai.memory.AiEpisodicMemoryRetrieveService;
 import com.hailin.blogsystem.ai.memory.AiMemoryRetrieveService;
 import com.hailin.blogsystem.ai.rag.ArticleRagSearchService;
 import com.hailin.blogsystem.config.BlogAiProperties;
 import com.hailin.blogsystem.entity.LearningPlans;
+import com.hailin.blogsystem.entity.dto.ArticleRagContext;
 import com.hailin.blogsystem.entity.dto.ArticleRagSearchResult;
 import com.hailin.blogsystem.entity.dto.ArticleRagSearchStrategy;
 import com.hailin.blogsystem.entity.dto.AgentStepActionType;
+import com.hailin.blogsystem.entity.dto.EpisodicMemoryRagContext;
+import com.hailin.blogsystem.entity.dto.MemoryRagContext;
+import com.hailin.blogsystem.service.AiUserMemoryService;
 import com.hailin.blogsystem.service.LearningPlansService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -34,6 +39,7 @@ class LearningAgentActionExecutorTests {
     private AiMemoryRetrieveService aiMemoryRetrieveService;
     private AiEpisodicMemoryRetrieveService aiEpisodicMemoryRetrieveService;
     private ArticleRagSearchService articleRagSearchService;
+    private AiUserMemoryService aiUserMemoryService;
     private LearningAgentActionExecutorImpl executor;
 
     @BeforeEach
@@ -42,6 +48,7 @@ class LearningAgentActionExecutorTests {
         aiMemoryRetrieveService = mock(AiMemoryRetrieveService.class);
         aiEpisodicMemoryRetrieveService = mock(AiEpisodicMemoryRetrieveService.class);
         articleRagSearchService = mock(ArticleRagSearchService.class);
+        aiUserMemoryService = mock(AiUserMemoryService.class);
 
         BlogAiProperties properties = new BlogAiProperties();
         executor = new LearningAgentActionExecutorImpl(
@@ -49,7 +56,8 @@ class LearningAgentActionExecutorTests {
                 aiMemoryRetrieveService,
                 aiEpisodicMemoryRetrieveService,
                 articleRagSearchService,
-                properties
+                properties,
+                aiUserMemoryService
         );
     }
 
@@ -102,15 +110,22 @@ class LearningAgentActionExecutorTests {
                 .thenReturn(List.of(plan));
         // getDetail 未 mock，返回 null：详情分支容错，不炸
 
-        String observation = executor.execute(
+        AgentActionResult result = executor.execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD)
                         .withInput(Map.of("planRef", "Redis")),
                 100L,
                 null
-        ).summary();
+        );
 
-        assertThat(observation).contains("目标计划");
-        assertThat(observation).contains("Redis 学习计划");
+        assertThat(result.summary()).contains("目标计划");
+        assertThat(result.summary()).contains("Redis 学习计划");
+        assertThat(result.payload())
+                .containsEntry("status", "SUCCESS")
+                .containsEntry("planRef", "Redis")
+                .containsEntry("planCount", 1)
+                .containsEntry("activePlanCount", 1)
+                .containsEntry("matchedCount", 1)
+                .containsEntry("selectedPlanId", 1L);
     }
 
     @Test
@@ -177,17 +192,24 @@ class LearningAgentActionExecutorTests {
         when(learningPlansService.matchPlansByMessage(eq(100L), any()))
                 .thenReturn(List.of());
 
-        String observation = executor.execute(
+        AgentActionResult result = executor.execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD)
                         .withInput(Map.of("planRef", "RocketMQ")),
                 100L,
                 null
-        ).summary();
+        );
 
-        assertThat(observation).contains("没有找到");
-        assertThat(observation).doesNotContain("目标计划");
+        assertThat(result.summary()).contains("没有找到");
+        assertThat(result.summary()).doesNotContain("目标计划");
         // 候选列表仍给出（Agent 下一步可 ASK_USER 让用户选）
-        assertThat(observation).contains("Redis 学习计划");
+        assertThat(result.summary()).contains("Redis 学习计划");
+        assertThat(result.payload())
+                .containsEntry("status", "SUCCESS")
+                .containsEntry("planRef", "RocketMQ")
+                .containsEntry("planCount", 1)
+                .containsEntry("activePlanCount", 1)
+                .containsEntry("matchedCount", 0)
+                .containsEntry("selectedPlanId", null);
     }
 
     @Test
@@ -196,14 +218,18 @@ class LearningAgentActionExecutorTests {
         when(aiEpisodicMemoryRetrieveService.retrieveForPrompt(eq(100L), any(), any()))
                 .thenReturn(List.of());
 
-        String observation = executor.execute(
+        AgentActionResult result = executor.execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY)
                         .withInput(Map.of("question", "学习偏好")),
                 100L,
                 null
-        ).summary();
+        );
 
-        assertThat(observation).contains("记忆摘要");
+        assertThat(result.summary()).contains("记忆摘要");
+        assertThat(result.payload())
+                .containsEntry("status", "SUCCESS")
+                .containsEntry("query", "学习偏好")
+                .containsEntry("hitCount", 0);
     }
 
     @Test
@@ -213,16 +239,41 @@ class LearningAgentActionExecutorTests {
         when(aiEpisodicMemoryRetrieveService.retrieveForPrompt(eq(100L), any(), any()))
                 .thenThrow(new RuntimeException("ES 连接失败"));
 
-        String observation = executor.execute(
+        AgentActionResult result = executor.execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY)
                         .withInput(Map.of("question", "学习偏好")),
                 100L,
                 null
-        ).summary();
+        );
 
         // 记忆检索失败不能炸掉 Agent Loop，返回带失败标记的摘要
-        assertThat(observation).contains("语义记忆检索失败");
-        assertThat(observation).contains("情景记忆检索失败");
+        assertThat(result.summary()).contains("语义记忆检索失败");
+        assertThat(result.summary()).contains("情景记忆检索失败");
+        assertThat(result.payload())
+                .containsEntry("status", "FAILED")
+                .containsEntry("query", "学习偏好")
+                .containsEntry("hitCount", 0);
+    }
+
+    @Test
+    void memoryPartialFailurePreservesSuccessfulHitsAndStatus() {
+        when(aiMemoryRetrieveService.retrieve(eq(100L), any()))
+                .thenReturn(List.of(new MemoryRagContext(1L, 100L, "PREFERENCE", "style", "回答直接一点", null, null)));
+        when(aiEpisodicMemoryRetrieveService.retrieveForPrompt(eq(100L), any(), any()))
+                .thenThrow(new RuntimeException("ES 连接失败"));
+
+        AgentActionResult result = executor.execute(
+                AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY)
+                        .withInput(Map.of("question", "学习偏好")),
+                100L,
+                null
+        );
+
+        assertThat(result.summary()).contains("回答直接一点");
+        assertThat(result.payload())
+                .containsEntry("status", "PARTIAL_FAILURE")
+                .containsEntry("query", "学习偏好")
+                .containsEntry("hitCount", 1);
     }
 
     @Test
@@ -241,14 +292,39 @@ class LearningAgentActionExecutorTests {
         when(articleRagSearchService.search(any(), any()))
                 .thenReturn(new ArticleRagSearchResult(ArticleRagSearchStrategy.EMPTY, List.of()));
 
-        String observation = executor.execute(
+        AgentActionResult result = executor.execute(
                 AgentStepDecision.of(AgentStepActionType.SEARCH_RAG)
                         .withInput(Map.of("keyword", "Redis 缓存击穿")),
                 100L,
                 null
-        ).summary();
+        );
 
-        assertThat(observation).contains("没有检索到");
+        assertThat(result.summary()).contains("没有检索到");
+        assertThat(result.payload())
+                .containsEntry("status", "SUCCESS")
+                .containsEntry("keyword", "Redis 缓存击穿")
+                .containsEntry("hitCount", 0);
+    }
+
+    @Test
+    void ragWithHitsReturnsStructuredFact() {
+        when(articleRagSearchService.search(any(), any()))
+                .thenReturn(new ArticleRagSearchResult(
+                        ArticleRagSearchStrategy.VECTOR,
+                        List.of(new ArticleRagContext(7L, "Redis 缓存", 0, "缓存击穿的处理方式"))));
+
+        AgentActionResult result = executor.execute(
+                AgentStepDecision.of(AgentStepActionType.SEARCH_RAG)
+                        .withInput(Map.of("keyword", "Redis 缓存击穿")),
+                100L,
+                null
+        );
+
+        assertThat(result.summary()).contains("Redis 缓存");
+        assertThat(result.payload())
+                .containsEntry("status", "SUCCESS")
+                .containsEntry("keyword", "Redis 缓存击穿")
+                .containsEntry("hitCount", 1);
     }
 
     @Test

@@ -53,6 +53,8 @@ public class AiEpisodicMemoryRetrieveService {
             );
 
             if (documents == null || documents.isEmpty()) {
+                log.info("Episodic Memory 召回完成，userId={}, projectKey={}, count=0（阈值 {} 下无命中）",
+                        userId, projectKey, PROMPT_SIMILARITY_THRESHOLD);
                 return List.of();
             }
 

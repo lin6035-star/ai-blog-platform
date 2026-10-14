@@ -1,6 +1,7 @@
 package com.hailin.blogsystem;
 
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
+import com.hailin.blogsystem.ai.workflow.LlmStreamException;
 import com.hailin.blogsystem.ai.workflow.AiWorkflowStepEmitter;
 import com.hailin.blogsystem.ai.workflow.WorkflowStepLogRecorder;
 import com.hailin.blogsystem.ai.workflow.WorkflowStepRunner;
@@ -177,6 +178,21 @@ class WorkflowStepTokenTests {
                 any(RuntimeException.class), captor.capture());
         assertThat(captor.getValue().getTotalTokens())
                 .as("失败步也要记上已经花掉的 token")
+                .isEqualTo(340);
+    }
+
+    @Test
+    void streamFailureUsageCanBeRecordedBeforeFailedStepIsLogged() {
+        WorkflowTokenRecorder tokenRecorder = new WorkflowTokenRecorder();
+        AiWorkflowRun run = run();
+        TokenUsageAccumulator usage = acc(300, 40, 340);
+
+        tokenRecorder.accumulateFailure(run,
+                new LlmStreamException("生成失败：网络中断", null, usage));
+
+        assertThat(run.getTotalTokens()).isEqualTo(340);
+        assertThat(tokenRecorder.drainStepBuffer().getTotalTokens())
+                .as("流异常携带的 usage 要进入失败 step 缓冲")
                 .isEqualTo(340);
     }
 

@@ -30,6 +30,11 @@ public interface WalletService extends IService<UserWallet> {
      * <p>按业务聚合：一次 AI 调用 = 一条净额，不暴露预扣 / 退回的中间态。
      * 原始流水仍完整保留在 {@code wallet_transaction} 里（逐笔回放对账要用），
      * 只是不面向用户展示——见 {@link com.hailin.blogsystem.entity.vo.WalletBillEntryVO}。
+     *
+     * <p><b>只含最近 {@code blog.wallet.bill-retention-days} 天（默认 7）</b>，
+     * 而且这个窗口**只在展示层**：数据一行不删。账本是按 {@code balance_seq}
+     * 连续编号的，删任何一段都会让逐笔对账报"漏流水"假警
+     * —— 详见 {@code BlogWalletProperties#billRetentionDays}。
      */
     PageVO<WalletBillEntryVO> listBill(Long userId, long page, long pageSize);
 

@@ -2,6 +2,7 @@ package com.hailin.blogsystem.ai.agent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.LogValues;
+import com.hailin.blogsystem.ai.TokenUsageAccumulator;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.LearningPlans;
 import com.hailin.blogsystem.entity.dto.AiAgentRunStatus;
@@ -119,6 +120,15 @@ public class LearningAgentRuntime extends AbstractAgentRuntime implements AgentR
         return ALLOWED_ACTIONS;
     }
 
+    /**
+     * P4.1：学习域使用 per-run 结构化状态，避免把计划 / 记忆 / RAG 的完整 observation 逐轮重放。
+     * 状态只存在本次 run 内，不能提升为 Runtime 字段，否则并发请求会互相污染。
+     */
+    @Override
+    protected AgentRunState newRunState(String goal, int maxSteps) {
+        return new LearningAgentState(goal, maxSteps);
+    }
+
     @Override
     protected Set<String> allowedSuggestWorkflowTypes() {
         return ALLOWED_SUGGEST_WORKFLOW_TYPES;
@@ -166,7 +176,8 @@ public class LearningAgentRuntime extends AbstractAgentRuntime implements AgentR
             String goal,
             List<String> observations,
             AgentStepEmitter emitter,
-            PageContextDTO pageContext
+            PageContextDTO pageContext,
+            TokenUsageAccumulator stepUsage
     ) {
         if (decision.actionType() != AgentStepActionType.SUGGEST_WRITE) {
             return null;
@@ -175,7 +186,7 @@ public class LearningAgentRuntime extends AbstractAgentRuntime implements AgentR
         if (observations.isEmpty()) {
             String rejectReason = "首轮零观察写动作提案被拒绝：必须先执行至少一个只读查询";
             emitter.emit(nextStepNo, "SUGGEST_WRITE", "FAILED", "提案被拒绝：需先完成一次查询", null);
-            recordRejectedStep(run, decision, nextStepNo, rejectReason, null);
+            recordRejectedStep(run, decision, nextStepNo, rejectReason, stepUsage);
             observations.add("系统提示：你在没有任何查询结果时尝试提案写动作，后端已拒绝。"
                     + "请先执行只读查询（QUERY_LEARNING_DASHBOARD / QUERY_MEMORY / SEARCH_RAG）再决策。");
             run.setCurrentStep(nextStepNo);
@@ -185,7 +196,7 @@ public class LearningAgentRuntime extends AbstractAgentRuntime implements AgentR
             runMapper.updateById(run);
             return null; // 循环继续，由下一轮决策收尾
         }
-        return suggestWrite(run, decision, observations, emitter);
+        return suggestWrite(run, decision, observations, emitter, stepUsage);
     }
 
     /**
@@ -202,13 +213,16 @@ public class LearningAgentRuntime extends AbstractAgentRuntime implements AgentR
             AiAgentRun run,
             AgentStepDecision decision,
             List<String> observations,
-            AgentStepEmitter emitter
+            AgentStepEmitter emitter,
+            TokenUsageAccumulator stepUsage
     ) {
         Map<String, Object> input = decision.input() == null ? Map.of() : decision.input();
         String taskTitle = text(input, "taskTitle");
         if (taskTitle == null || taskTitle.isBlank()) {
             emitter.emit(run.getUsedSteps() + 1, "SUGGEST_WRITE", "FAILED", "提案缺少任务标题", null);
-            return markFailed(run, "Agent 写动作提案无效（缺少 taskTitle）");
+            return markFailedAfterRejectedStep(
+                    run, decision, run.getUsedSteps() + 1, stepUsage,
+                    "Agent 写动作提案无效（缺少 taskTitle）");
         }
         String actionType = text(input, "actionType");
         // V3.3 归一化四分：blank/null → UPDATE（保旧模型）；UPDATE_TASK_DONE → UPDATE；
@@ -227,14 +241,18 @@ public class LearningAgentRuntime extends AbstractAgentRuntime implements AgentR
             // C0.2：actionType 是模型给的内部协议值，只进日志（用户可见文案保持稳定）
             log.warn("[AGENT] 写动作提案被拒（actionType 不在白名单）: runId={}, actionType={}",
                     run.getId(), LogValues.safe(actionType));
-            return markFailed(run, "Agent 写动作提案无效（不支持的写动作类型）");
+            return markFailedAfterRejectedStep(
+                    run, decision, run.getUsedSteps() + 1, stepUsage,
+                    "Agent 写动作提案无效（不支持的写动作类型）");
         }
 
         // RENAME 专属必填：显式改名但缺新名 → FAILED 绝不回落 UPDATE（回落 + done 缺省 true = 误勾选）
         String newTitle = text(input, "newTitle");
         if ("RENAME".equals(writeType) && (newTitle == null || newTitle.isBlank())) {
             emitter.emit(run.getUsedSteps() + 1, "SUGGEST_WRITE", "FAILED", "提案缺少新任务名", null);
-            return markFailed(run, "Agent 写动作提案无效（缺少 newTitle）");
+            return markFailedAfterRejectedStep(
+                    run, decision, run.getUsedSteps() + 1, stepUsage,
+                    "Agent 写动作提案无效（缺少 newTitle）");
         }
         // V3.1 补充：ADD 提案前预检目标阶段是否已存在同名任务——已存在则不弹确认卡，
         // FAILED step + observation 让 LLM 直接告知用户（原来要等 confirm 才报「已存在」，体验断裂）
@@ -246,7 +264,7 @@ public class LearningAgentRuntime extends AbstractAgentRuntime implements AgentR
                 int nextStepNo = run.getUsedSteps() + 1;
                 String rejectReason = "目标阶段已存在同名任务「" + taskTitle + "」，追加提案被拒绝";
                 emitter.emit(nextStepNo, "SUGGEST_WRITE", "FAILED", rejectReason, null);
-                recordRejectedStep(run, decision, nextStepNo, rejectReason, null);
+                recordRejectedStep(run, decision, nextStepNo, rejectReason, stepUsage);
                 observations.add("系统提示：目标阶段「" + stageTitle + "」已存在同名任务「" + taskTitle
                         + "」，后端拒绝了追加提案。请直接告知用户该任务已存在（不要生成追加提案，"
                         + "如用户确实要加可建议换成其他任务名或先查看现有任务）。");
@@ -272,7 +290,7 @@ public class LearningAgentRuntime extends AbstractAgentRuntime implements AgentR
             if (rejectReason != null) {
                 int nextStepNo = run.getUsedSteps() + 1;
                 emitter.emit(nextStepNo, "SUGGEST_WRITE", "FAILED", rejectReason, null);
-                recordRejectedStep(run, decision, nextStepNo, rejectReason, null);
+                recordRejectedStep(run, decision, nextStepNo, rejectReason, stepUsage);
                 observations.add("系统提示：" + rejectReason
                         + "。请直接告知用户（不要生成改名提案，如用户确实要改可建议换成其他任务名）。");
                 run.setCurrentStep(nextStepNo);
@@ -318,7 +336,7 @@ public class LearningAgentRuntime extends AbstractAgentRuntime implements AgentR
 
         emitter.emit(run.getUsedSteps() + 1, "SUGGEST_WRITE", "SUCCESS", actionLabel,
                 decision.thoughtSummary());
-        recordTerminalStep(run, decision, run.getUsedSteps() + 1, null);
+        recordTerminalStep(run, decision, run.getUsedSteps() + 1, stepUsage);
         run.setStatus(AiAgentRunStatus.WAITING_WRITE_CONFIRM.name());
         run.setFinalAnswer(finalAnswer);
         run.setContextJson(toJson(Map.of(

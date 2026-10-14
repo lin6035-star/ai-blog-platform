@@ -12,6 +12,7 @@ import com.hailin.blogsystem.constants.RedisConstants;
 import com.hailin.blogsystem.entity.ArticleComments;
 import com.hailin.blogsystem.entity.Articles;
 import com.hailin.blogsystem.entity.CommentLikes;
+import com.hailin.blogsystem.entity.NotificationType;
 import com.hailin.blogsystem.entity.Users;
 import com.hailin.blogsystem.entity.dto.CommentDTO;
 import com.hailin.blogsystem.entity.vo.CommentsVO;
@@ -22,8 +23,10 @@ import com.hailin.blogsystem.mapper.LikeCommentsMapper;
 import com.hailin.blogsystem.mapper.UsersMapper;
 import com.hailin.blogsystem.service.CommentsService;
 import com.hailin.blogsystem.service.IpLocationService;
+import com.hailin.blogsystem.service.NotificationService;
 import com.hailin.blogsystem.utils.UserContext;
 import lombok.RequiredArgsConstructor;
+import com.hailin.blogsystem.component.AfterCommitExecutor;
 import com.hailin.blogsystem.component.DelayedCacheEvictor;
 import com.hailin.blogsystem.component.CacheTtlSupport;
 import com.hailin.blogsystem.component.UserActivityTracker;
@@ -31,6 +34,7 @@ import com.hailin.blogsystem.component.UserSetCache;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -53,6 +57,8 @@ public class CommentsServiceImpl extends ServiceImpl<CommentsMapper, ArticleComm
     private final ObjectMapper objectMapper;
     private final UserSetCache userSetCache;
     private final UserActivityTracker userActivityTracker;
+    private final NotificationService notificationService;
+    private final AfterCommitExecutor afterCommitExecutor;
 
     @Override  //1.获取文章评论列表，游客可访问，每条主评论带前几条回复
     public PageVO<CommentsVO> getComments(Long articleId, Long page, Long pageSize, String sort) {
@@ -208,17 +214,34 @@ public class CommentsServiceImpl extends ServiceImpl<CommentsMapper, ArticleComm
     }
 
 
+    /**
+     * 发表评论 / 回复评论。
+     *
+     * <p><b>2026-10-11 补上 {@code @Transactional}</b>：原先这个方法体里是两次独立写
+     * （{@code save(评论)} + {@code comment_count + 1}），计数更新失败时评论已经落库、
+     * 计数永久少 1，而且没有任何补偿。现在"评论 / 计数 / 通知"三处写在同一个事务里。
+     *
+     * <p>顺带把 Redis 热榜加分挪进了 {@code AfterCommitExecutor}：一旦有了事务，
+     * 留在方法体里的 Redis 写就会变成"事务回滚了但热榜分数已经加上"的脏数据。
+     * 点赞 / 收藏早就是这个写法，评论这边先前没有事务，所以没暴露。
+     */
     @Override  //3.发表评论或回复评论，登录用户可访问
+    @Transactional
     public void postComment(Long articleId, CommentDTO commentDTO, String clientIp,
                             String cloudflareCountryCode) {
         ArticleComments articleComments = new ArticleComments();
         BeanUtil.copyProperties(commentDTO,articleComments);
 
+        /*
+         * parentComment **提到了方法级**（原先声明在 else 块内，出块即销毁）：
+         * 通知"评论被回复"需要它的作者 id 作为接收者。
+         */
         Long parentId = commentDTO.getParentId();
+        ArticleComments parentComment = null;
         if (parentId == null) {
             articleComments.setRootId(null);
         } else {
-            ArticleComments parentComment = getById(parentId);
+            parentComment = getById(parentId);
             if (parentComment == null) {
                 throw new IllegalArgumentException("父评论不存在");
             }
@@ -233,9 +256,10 @@ public class CommentsServiceImpl extends ServiceImpl<CommentsMapper, ArticleComm
             );
         }
 
+        Long commenterId = UserContext.get();
         articleComments.setArticleId(articleId);
         articleComments.setCreatedAt(LocalDateTime.now());
-        articleComments.setUserId(UserContext.get());
+        articleComments.setUserId(commenterId);
         articleComments.setLikeCount(0L);
         articleComments.setIp(clientIp);
         articleComments.setIpLocation(ipLocationService.getLocation(clientIp, cloudflareCountryCode));
@@ -247,9 +271,11 @@ public class CommentsServiceImpl extends ServiceImpl<CommentsMapper, ArticleComm
                         .eq(Articles::getId, articleId)
                         .setSql("comment_count = comment_count + 1"));
 
-        //评论成功后，文章加入对应的score
-        stringRedisTemplate.opsForZSet().incrementScore(RedisConstants.ARTICLE_HOT_KEY,
-                String.valueOf(articleId),RedisConstants.ARTICLE_COMMENT_HOT_SCORE);
+        //评论成功后，文章加入对应的score。
+        //**必须 afterCommit**：本方法现在有事务，写在事务内的 Redis 副作用会在回滚后残留
+        afterCommitExecutor.execute(() -> stringRedisTemplate.opsForZSet().incrementScore(
+                RedisConstants.ARTICLE_HOT_KEY,
+                String.valueOf(articleId),RedisConstants.ARTICLE_COMMENT_HOT_SCORE));
 
         evictArticleDetailCache(articleId);
 
@@ -257,6 +283,40 @@ public class CommentsServiceImpl extends ServiceImpl<CommentsMapper, ArticleComm
 
         // 发表评论是强活跃信号（浏览可能只是路过，评论一定是有意为之）
         userActivityTracker.markActiveToday();
+
+        notifyComment(articleId, articleComments.getId(), commenterId, parentComment);
+    }
+
+    /**
+     * 评论 / 回复产生的通知（设计稿 §5）。
+     *
+     * <p><b>两条规则，别弄反</b>：
+     * <ol>
+     *   <li><b>回复优先</b>：回复场景先通知**被回复的人**（父评论作者）</li>
+     *   <li><b>同一件事只打扰一次</b>：文章作者也要知道"有人评论了"，
+     *       但若他**恰好就是被回复的那个人**，上面那条已经通知过他了——
+     *       这里必须显式跳过。**不能指望 {@code notify} 的"不给自己发"去重**：
+     *       那条判的是"接收者 == 触发者"，与"两个接收者是同一人"根本不是一回事</li>
+     * </ol>
+     *
+     * <p>接收者需要文章作者，故多一次 {@code selectById}。文章查不到（理论上不该发生）
+     * 就只是不发通知，**不影响评论本身**——这里刻意不新增"文章必须存在"的校验，保持原行为。
+     */
+    private void notifyComment(Long articleId, Long commentId, Long commenterId,
+                               ArticleComments parentComment) {
+        Articles article = articlesMapper.selectById(articleId);
+        Long authorId = article == null ? null : article.getAuthorId();
+        Long replyToUserId = parentComment == null ? null : parentComment.getUserId();
+
+        if (replyToUserId != null) {
+            notificationService.notify(replyToUserId, commenterId,
+                    NotificationType.COMMENT_REPLIED, commentId, articleId);
+        }
+
+        if (authorId != null && !authorId.equals(replyToUserId)) {
+            notificationService.notify(authorId, commenterId,
+                    NotificationType.ARTICLE_COMMENTED, commentId, articleId);
+        }
     }
 
 
@@ -311,8 +371,9 @@ public class CommentsServiceImpl extends ServiceImpl<CommentsMapper, ArticleComm
 
     private void deleteCommentListCache(Long articleId) {
         // SCAN 游标迭代 + UNLINK：原 KEYS 会阻塞 Redis 服务端单线程。
-        // 走 DelayedCacheEvictor：本类当前无事务（等价于立即执行），
-        // 但"缓存的失效时机"这件事应该由统一的出口决定，而不是靠调用方自觉
+        // 走 DelayedCacheEvictor：**本类 2026-10-11 起 postComment 带事务了**（发通知要与评论同生共死），
+        // 于是这里的失效从"立即执行"变成"提交后 + 延迟重放"——这正是延迟双删的设计意图，
+        // 不需要因为加了事务而改这个出口
         delayedCacheEvictor.evictPattern(RedisConstants.COMMENT_LIST_KEY_PREFIX + articleId + ":*");
     }
 

@@ -20,6 +20,7 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.HashMap;
@@ -148,12 +149,19 @@ public class SeckillServiceImpl implements SeckillService {
 
     @Override
     public List<SeckillActivityVO> listActivities(Long userId) {
+        // 列表口径 = 「今天和明天的场次」：
+        //   · 今天那场**结束后仍然留在列表上**（灰态卡片）——否则 10:30 到明天开场之间列表是空的
+        //   · 明天那场提前建好，今天一结束就接上，用户也能提前知道明天几点开抢
+        // 用时间窗而不是 status 判：status 两头都不可靠——排空门期间活动仍是 ACTIVE
+        // （到点了但 PEL 没清），也有被手工改过 end_at 的异常行（ENDED 但 end_at 在未来）。
+        LocalDate today = LocalDate.now();
+        LocalDateTime windowStart = today.atStartOfDay();
+        LocalDateTime windowEnd = today.plusDays(2).atStartOfDay();
+
         List<SeckillActivity> activities = seckillActivityMapper.selectList(
                 new LambdaQueryWrapper<SeckillActivity>()
-                        // 过滤口径 = 「现在还能不能抢」，与抢购脚本 Lua 里的 now < endAt 同构。
-                        // 刻意不用 status != 'ENDED'：排空门期间活动仍然是 ACTIVE（到点了但 PEL 没清），
-                        // 那样会把它以「已结束」的置灰卡片漏在列表上
-                        .gt(SeckillActivity::getEndAt, LocalDateTime.now())
+                        .gt(SeckillActivity::getEndAt, windowStart)
+                        .lt(SeckillActivity::getEndAt, windowEnd)
                         // 最快结束的排最前。原来是 startAt DESC，但列表语义已经从「历史流水」
                         // 变成「接下来能抢什么」——DESC 会把最晚开始的排最前，而配合 LIMIT
                         // 截掉的恰好是最老开始的那批，也就是今天正在跑、此刻唯一能抢的那场

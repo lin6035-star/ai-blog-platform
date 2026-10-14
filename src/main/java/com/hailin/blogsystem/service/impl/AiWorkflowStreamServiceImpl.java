@@ -1,10 +1,14 @@
 package com.hailin.blogsystem.service.impl;
 
+import com.hailin.blogsystem.ai.billing.AiRequestBillingSupport;
+import com.hailin.blogsystem.ai.billing.BillingHandle;
 import com.hailin.blogsystem.ai.task.AiOrchestrationTaskAdmission;
 import com.hailin.blogsystem.ai.task.AiTaskRequest;
 import com.hailin.blogsystem.ai.task.AiTaskType;
 import com.hailin.blogsystem.ai.workflow.AiWorkflowStepEmitter;
+import com.hailin.blogsystem.ai.workflow.WorkflowRunManager;
 import com.hailin.blogsystem.entity.AiChatEventType;
+import com.hailin.blogsystem.entity.AiWorkflowRun;
 import com.hailin.blogsystem.entity.vo.AiChatEventVO;
 import com.hailin.blogsystem.entity.vo.AiWorkflowRunVO;
 import com.hailin.blogsystem.entity.vo.AiWorkflowStepLogVO;
@@ -25,6 +29,7 @@ import reactor.core.publisher.Mono;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
@@ -37,6 +42,9 @@ public class AiWorkflowStreamServiceImpl implements AiWorkflowStreamService {
     private final AiWorkflowRunService aiWorkflowRunService;
     private final ObjectProvider<Tracer> tracerProvider;
     private final AiOrchestrationTaskAdmission admission;
+    /** AI 计费（Workflow 动作路径）：审计与方案见 docs/计费覆盖审计.md */
+    private final AiRequestBillingSupport billingSupport;
+    private final WorkflowRunManager workflowRunManager;
 
 
     @Override
@@ -153,7 +161,30 @@ public class AiWorkflowStreamServiceImpl implements AiWorkflowStreamService {
                 AtomicBoolean firstContentLogged =
                         new AtomicBoolean(false);
 
+                BillingHandle billingHandle = null;
+                long beforeInputTokens = 0L;
+                long beforeOutputTokens = 0L;
+
                 try {
+                    /*
+                     * AI 计费：预扣必须发生在本次动作的任何 LLM 调用之前。
+                     *
+                     * 放在 worker 内而不是方法体（那里已有 admission.precheck），是因为**预扣有副作用**：
+                     * 方法体里的预扣一旦遇上 Flux 未被订阅，就会留下一条悬挂的 RESERVE 单，
+                     * 只能等 30 分钟超时兜底释放。放在 worker 内，预扣与执行同生共死——
+                     * 下面的 finally 必然把它结算或释放掉。
+                     *
+                     * 代价：余额不足时前端拿到的是 SSE 异常事件，而不是 HTTP 402
+                     * （异常在订阅后抛出，状态码已经发出去了）。方案对比见 docs/计费覆盖审计.md §5.4。
+                     */
+                    AiWorkflowRun snapshot = workflowRunManager.getOwnedRun(id, userId);
+                    beforeInputTokens = tokensOf(snapshot.getInputTokens());
+                    beforeOutputTokens = tokensOf(snapshot.getOutputTokens());
+                    billingHandle = billingSupport.reserve(
+                            AiRequestBillingSupport.BIZ_WORKFLOW_ACTION,
+                            "WF:" + id + ":" + action + ":" + UUID.randomUUID(),
+                            userId);
+
                     AiWorkflowStepEmitter emitter = new AiWorkflowStepEmitter() {
                         @Override
                         public void emit(String step, String status, String message) {
@@ -234,9 +265,52 @@ public class AiWorkflowStreamServiceImpl implements AiWorkflowStreamService {
                                 action
                         );
                     }
+                } finally {
+                    settleBilling(billingHandle, id, userId, action,
+                            beforeInputTokens, beforeOutputTokens);
                 }
             });
         });
+    }
+
+    /**
+     * 结算本次 Workflow 动作：用**执行前后 run 的 token 差量**。
+     *
+     * <p>为什么必须用差量：run 是跨请求持久化的（启动 / approve / reject / retry 各是一次 HTTP 请求），
+     * 直接读 {@code totalTokens} 会把这个 run 之前所有动作的用量重复计一遍。
+     *
+     * <p>三类边界：
+     * <ul>
+     *   <li>差量为 0（幂等重放命中缓存 / 首步即失败）→ 全额退回，见
+     *       {@link AiRequestBillingSupport#close}</li>
+     *   <li>动作失败但已经烧了 token → 按实际扣（token 是真花的）</li>
+     *   <li>读不到 run → 按零消耗释放：宁可少收一笔，也不能让预扣悬挂到超时兜底</li>
+     * </ul>
+     */
+    private void settleBilling(BillingHandle handle, Long id, Long userId, String action,
+                               long beforeInputTokens, long beforeOutputTokens) {
+        if (handle == null) {
+            return;
+        }
+        try {
+            AiWorkflowRun after = workflowRunManager.getOwnedRun(id, userId);
+            long deltaInput = tokensOf(after.getInputTokens()) - beforeInputTokens;
+            long deltaOutput = tokensOf(after.getOutputTokens()) - beforeOutputTokens;
+
+            log.info("[BILLING] workflow 动作结算 runId={} action={} deltaInput={} deltaOutput={} orderNo={}",
+                    id, action, deltaInput, deltaOutput, handle.orderNo());
+            // 观测字段：从计费单能反查回 run
+            billingSupport.bindResource(handle, String.valueOf(id));
+            billingSupport.close(handle, deltaInput, deltaOutput);
+        } catch (Exception e) {
+            log.warn("[BILLING] 读取 workflow 用量失败，按零消耗释放：runId={} action={} orderNo={}",
+                    id, action, handle.orderNo(), e);
+            billingSupport.abort(handle);
+        }
+    }
+
+    private long tokensOf(Integer tokens) {
+        return tokens == null ? 0L : tokens;
     }
 
     /** Workflow 动作 → 任务类型（准入观测与拒绝文案用）。 */

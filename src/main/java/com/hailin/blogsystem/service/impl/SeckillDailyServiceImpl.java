@@ -43,13 +43,21 @@ public class SeckillDailyServiceImpl implements SeckillDailyService {
     @Override
     public boolean ensureUpcomingActivity() {
         BlogSeckillProperties.Daily daily = blogSeckillProperties.getDaily();
+        LocalDate today = LocalDate.now();
 
-        // 今天的窗口还没过就保今天，过了就预告明天。于是 10:30 那一刻，
-        // 今天的卡被列表的 end_at 过滤掉、明天的卡同时建出来——列表无缝衔接、永不空
+        // 今天那场还没到结束时刻就保今天，过了就保明天
         LocalDate target = LocalTime.now().isBefore(daily.getEndTime())
-                ? LocalDate.now()
-                : LocalDate.now().plusDays(1);
-        return createForDate(target);
+                ? today
+                : today.plusDays(1);
+        boolean created = createForDate(target);
+
+        // 顺带把明天也建出来（幂等，已存在直接返回 false）。
+        //
+        // 这一步专门消掉「10:30 空窗」：列表口径是「今天 + 明天」，今天那场过了 end_at 就被
+        // 窗口滤掉，如果明天那场要等下一轮（本任务 60 秒一轮）才建，用户正好在那几十秒里
+        // 打开就会看到空列表。提前建好之后，今天那场一翻灰态，明天那场立刻接上。
+        created |= createForDate(today.plusDays(1));
+        return created;
     }
 
     @Override

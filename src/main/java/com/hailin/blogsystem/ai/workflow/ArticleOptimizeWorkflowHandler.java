@@ -609,6 +609,7 @@ public class ArticleOptimizeWorkflowHandler extends AbstractWorkflowHandler {
         } catch (RuntimeException e) {
             //LLM 失败不静默兜底：抛给 runStep 记 FAILED，Service 层 markFailed → 前端可重试；
             //消息分类成友好文案，原始堆栈由 Service 层日志保留
+            workflowTokenRecorder.accumulateFailure(run, e);
             throw LlmErrorClassifier.wrap("优化方案生成失败：", e);
         } catch (Exception e) {
             throw new RuntimeException("优化方案生成失败：" + LlmErrorClassifier.friendlyMessage(e), e);
@@ -646,6 +647,7 @@ public class ArticleOptimizeWorkflowHandler extends AbstractWorkflowHandler {
         } catch (RuntimeException e) {
             //LLM 失败不静默兜底：抛给 runStep 记 FAILED，Service 层 markFailed → 前端可重试；
             //消息分类成友好文案，原始堆栈由 Service 层日志保留
+            workflowTokenRecorder.accumulateFailure(run, e);
             throw LlmErrorClassifier.wrap("文章重写失败：", e);
         } catch (Exception e) {
             throw new RuntimeException("文章重写失败：" + LlmErrorClassifier.friendlyMessage(e), e);

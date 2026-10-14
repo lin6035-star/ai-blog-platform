@@ -16,6 +16,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -99,7 +101,10 @@ public class TaskPlanner {
             // 依赖引用无法解析时不能静默删除，否则 requires 会退化成无条件执行，
             // after 也会丢失用户明确表达的顺序约束。只接受 sN 且指向另一候选。
             if (hasInvalidDependencyReference(goal, i, goals.size())) {
-                log.info("[TASK-PLAN] 依赖引用无法解析，按未覆盖处理: candidate=s{}", i + 1);
+                // 必须打出原始引用：排查这次问题的最大障碍就是日志只说"解析失败"、
+                // 不说模型到底写了什么，只能靠猜。脱敏后照原样落盘。
+                log.info("[TASK-PLAN] 依赖引用无法解析，按未覆盖处理: candidate=s{}, refs={}",
+                        i + 1, LogValues.safe(dependencyRefs(goal).toList().toString()));
                 continue;
             }
 
@@ -207,10 +212,11 @@ public class TaskPlanner {
     /**
      * 依赖映射（C0.1 修订）。
      *
-     * <p>候选里的 {@code after}/{@code requires} 是**模型自由文本**——只有 {@code sN} 形式能与步骤
-     * 建立可靠映射（"第一步" / 类型名这类无从确定指向，现状也是被丢弃的）。
+     * <p>候选里的 {@code after}/{@code requires} 是**模型自由文本**：这里先归一化成标准
+     * {@code sN} 再交给下游——{@code TaskOrchestrator} 按 {@code sN} 匹配上下游，
+     * 不归一化的话 {@code "s2、s3"} 会因为对不上而被**静默丢掉依赖**。
      *
-     * <p>与修订前的关键差别：进来时 {@code accepted} 已保证**被引用的候选一定可承接**——
+     * <p>进来时 {@code accepted} 已保证**被引用的候选一定可承接**——
      * 引用不可承接候选的步骤在上一轮已被连带拒绝。所以这里不再承担"丢弃失效引用"的职责，
      * 也就不会再把依赖硬约束静默降级成无条件执行。
      */
@@ -223,8 +229,8 @@ public class TaskPlanner {
             }
         }
 
-        List<String> after = goal.after().stream().map(String::trim).filter(valid::contains).toList();
-        List<String> requires = goal.requires().stream().map(String::trim).filter(valid::contains).toList();
+        List<String> after = normalizeStepRefs(goal.after(), valid);
+        List<String> requires = normalizeStepRefs(goal.requires(), valid);
         // 第一遍扫描已保证：能走到这里的目标，onFailure 一定可解析（无法解析的已按未覆盖处理）
         OnFailure onFailure = parseOnFailureOrNull(goal.onFailure());
         if (onFailure == null) {
@@ -238,41 +244,118 @@ public class TaskPlanner {
     }
 
     /**
-     * 候选是否依赖了「被拒绝的候选」——只识别 {@code sN} 形式。
+     * 自由文本引用 → 标准 {@code sN}，并滤掉指向"未被接受候选"的引用。
+     *
+     * <p>归一是必须的：下游按 {@code sN} 字符串匹配上下游，{@code "s2、s3"} 原样透传会因为对不上
+     * 而被当成"没有依赖"——那等于把用户明确说的顺序**静默丢掉**。
+     *
+     * <p>能走到这里的目标，其引用已过 {@link #hasInvalidDependencyReference} 校验，
+     * 所以过滤只会滤掉"被连带拒绝的候选"那一类，而那种情况下该目标自己也已经被标成未覆盖了。
+     */
+    private static List<String> normalizeStepRefs(List<String> refs, Set<String> validStepIds) {
+        return refs.stream()
+                .flatMap(ref -> candidateIndexesFromTaskRef(ref).stream())
+                .map(index -> "s" + index)
+                .filter(validStepIds::contains)
+                .distinct()
+                .toList();
+    }
+
+    /**
+     * 候选是否依赖了「被拒绝的候选」。
      *
      * <p>这类引用**能识别就必须处理**：静默丢弃会让步骤从"等前置数据"变成"无条件执行"，
      * 而它等的可能是一个参数非法、根本不该跑的步骤。
      */
     private boolean dependsOnRejected(TaskPlanCandidate.CandidateGoal goal, boolean[] accepted) {
-        return Stream.concat(goal.after().stream(), goal.requires().stream())
-                .map(TaskPlanner::candidateIndexFromTaskRef)
+        return dependencyRefs(goal)
+                .flatMap(ref -> candidateIndexesFromTaskRef(ref).stream())
                 .anyMatch(idx -> idx >= 1 && idx <= accepted.length && !accepted[idx - 1]);
     }
 
     private boolean hasInvalidDependencyReference(TaskPlanCandidate.CandidateGoal goal,
                                                    int candidateIndex,
                                                    int candidateCount) {
-        return Stream.concat(goal.after().stream(), goal.requires().stream())
-                .filter(ref -> ref != null && !ref.isBlank())
-                .map(TaskPlanner::candidateIndexFromTaskRef)
-                .anyMatch(index -> index < 1 || index > candidateCount || index == candidateIndex + 1);
+        for (String ref : dependencyRefs(goal).toList()) {
+            if (ref == null || ref.isBlank()) {
+                continue;
+            }
+            List<Integer> indexes = candidateIndexesFromTaskRef(ref);
+            // 一个序号都抽不出来 = 无法建立可靠映射 → 仍然非法。
+            // 这条是底线：静默丢弃会让 requires 退化成无条件执行（见 candidateIndexesFromTaskRef 的注释）
+            if (indexes.isEmpty()) {
+                return true;
+            }
+            for (int index : indexes) {
+                if (index < 1 || index > candidateCount || index == candidateIndex + 1) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
-    /** {@code "s2"} → 2；其他形式（类型名 / 自然语言 / null）→ -1（无法建立可靠映射） */
-    private static int candidateIndexFromTaskRef(String ref) {
-        if (ref == null) {
-            return -1;
-        }
-        String trimmed = ref.trim();
-        if (trimmed.length() < 2 || (trimmed.charAt(0) != 's' && trimmed.charAt(0) != 'S')) {
-            return -1;
-        }
-        try {
-            return Integer.parseInt(trimmed.substring(1));
-        } catch (NumberFormatException e) {
-            return -1;
-        }
+    /** {@code after} + {@code requires} 的原始引用串（模型自由文本） */
+    private static Stream<String> dependencyRefs(TaskPlanCandidate.CandidateGoal goal) {
+        return Stream.concat(goal.after().stream(), goal.requires().stream());
     }
+
+    /**
+     * 引用 → 步骤序号（2026-10-12 放宽格式）。
+     *
+     * <p><b>为什么放宽</b>：原先只认规整的 {@code "s2"}——模型一旦写成 {@code "s2、s3"} /
+     * {@code "第2步"} / {@code "step 2"}，就被判成"无法建立可靠映射"，进而**整条请求什么都做不了**。
+     * 实测代价：「取消点赞并收藏这篇文章，再搜一下 Java 相关文章，并比较各篇文章」因为这种写法被拒，
+     * 而语义相同的「…并横向分析一下各篇文章」能正常跑——**一个格式问题升级成了功能不可用**。
+     *
+     * <p><b>放宽的是格式，不是约束</b>：抽出来的序号仍然逐个校验"在候选范围内、不是自己"；
+     * 一个序号都抽不出来时依旧判非法——那正是"顺序约束退化成无条件执行"的来源，不能碰。
+     *
+     * <p>一个引用里允许写多个步骤：{@code s2、s3} / {@code s2,s3} / {@code s2 和 s3}。
+     */
+    private static List<Integer> candidateIndexesFromTaskRef(String ref) {
+        if (ref == null || ref.isBlank()) {
+            return List.of();
+        }
+        List<Integer> indexes = new ArrayList<>();
+        for (String part : ref.trim().split("[,，、;；/\\s]+|和|与")) {
+            Integer index = candidateIndexFromSingleRef(part);
+            if (index != null) {
+                indexes.add(index);
+            }
+        }
+        return indexes;
+    }
+
+    /**
+     * 单个引用片段 → 序号。
+     *
+     * <p>刻意只认三种有明确步骤语义的写法，**不从长文本里 grep 数字**：
+     * 否则 {@code "articleId 2085208555163787269"} 这类参数会被误读成步骤引用。
+     *
+     * <p>裸数字（{@code "2"}）接受，因为模型有时只写序号；误判方向也是**更保守**的
+     * ——多出一个依赖只会让顺序更严格，不会让约束消失。越界的裸数字照样判非法。
+     */
+    private static Integer candidateIndexFromSingleRef(String part) {
+        if (part == null || part.isBlank()) {
+            return null;
+        }
+        String normalized = part.trim().toLowerCase(Locale.ROOT);
+
+        Matcher prefixed = STEP_REF_WITH_PREFIX.matcher(normalized);
+        if (prefixed.matches()) {
+            return Integer.parseInt(prefixed.group(1));
+        }
+        Matcher bare = STEP_REF_BARE.matcher(normalized);
+        return bare.matches() ? Integer.parseInt(bare.group(1)) : null;
+    }
+
+    /** {@code s2} / {@code step 2} / {@code 第2步} / {@code 步骤2} */
+    private static final Pattern STEP_REF_WITH_PREFIX =
+            Pattern.compile("^(?:s|step|第|步骤)\\s*(\\d+)\\s*步?$");
+
+    /** 裸序号：{@code "2"} 也当作第二步 */
+    private static final Pattern STEP_REF_BARE = Pattern.compile("^(\\d+)$");
 
     /**
      * 解析 {@code onFailure}（C0 收尾）。

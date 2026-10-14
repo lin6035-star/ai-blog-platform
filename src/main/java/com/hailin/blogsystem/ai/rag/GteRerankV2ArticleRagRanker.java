@@ -110,8 +110,19 @@ public class GteRerankV2ArticleRagRanker implements ArticleRagRanker{
                 return defaultArticleRagRanker.rankWithEvidence(question, contexts);
             }
 
-                log.info("gte-rerank-v2 排序成功，candidate={}, ranked={}",
-                        limited.size(), ranked.size());
+                /*
+                 * 刻意打出**明细**（articleId@分数），而不只是数量：
+                 * 定位"某一篇为什么没进 prompt"时，只有数量根本区分不出两种情况——
+                 *   · 它压根不在 ranked 里          → 是 rerank 名额的问题（top-n / 每篇 chunk 数）
+                 *   · 它在 ranked 里但分数低于阈值  → 是 Gate 的问题
+                 * 这两种的修法完全不同，没有明细就只能猜。
+                 */
+                log.info("gte-rerank-v2 排序成功，candidate={}, ranked={}, 明细={}",
+                        limited.size(), ranked.size(),
+                        ranked.stream()
+                                .map(candidate -> candidate.context().articleId()
+                                        + "@" + candidate.relevanceScore())
+                                .toList());
 
                 outcome = "applied";
                 return new ArticleRagRankResult(ArticleRagRankResult.Status.MODEL_APPLIED, ranked);

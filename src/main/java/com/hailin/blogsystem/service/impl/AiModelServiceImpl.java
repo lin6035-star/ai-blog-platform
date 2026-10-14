@@ -70,12 +70,12 @@ public class AiModelServiceImpl implements AiModelService {
         TokenUsageAccumulator usage = usageAccumulator == null ? new TokenUsageAccumulator() : usageAccumulator;
 
         // 单次流式调用的 usage 跟踪：只记峰值，流结束时统一提交一次（原因见 TokenUsageAccumulator.trackPeak）
-        AtomicReference<Usage> peakUsage = new AtomicReference<>();
+        AtomicReference<Usage> streamingPeakUsage = new AtomicReference<>();
         // 提交只做一次：doOnComplete 负责正常路径，doFinally 兜底 cancel
         AtomicBoolean usageCommitted = new AtomicBoolean(false);
         Runnable commitUsage = () -> {
             if (usageCommitted.compareAndSet(false, true)) {
-                usage.add(peakUsage.get());
+                usage.add(streamingPeakUsage.get());
             }
         };
 
@@ -101,7 +101,7 @@ public class AiModelServiceImpl implements AiModelService {
                     // 只记峰值，**不在这里累加**：同一个"累计 usage"会出现在多个 chunk 里
                     // （OpenAI 规范只在流末尾补一个收尾 chunk，兼容实现常常多给一个），
                     // 逐 chunk 累加会把结果成倍放大（实测 ×2）。累计值单调不减，取峰值即取最终值
-                    TokenUsageAccumulator.trackPeak(peakUsage, usageOf(response));
+                    TokenUsageAccumulator.trackPeak(streamingPeakUsage, usageOf(response));
                     // 工具调用轮 result 可能没有文本（getText() 为 null），
                     // Reactor map 不允许 null 值，必须归一为 ""（后续 filter 会去掉）。
                     String text = response.getResult() == null
@@ -117,7 +117,10 @@ public class AiModelServiceImpl implements AiModelService {
                         // toolName/toolInput 为空触发断言炸流。此时 LLM 尚未输出任何文本（第一轮全是工具调用），
                         // 降级非流式重跑：工具循环在非流式路径正常，最终文本切块模拟流式，用户无感知。
                         log.warn("流式工具调用聚合失败，降级非流式重跑: {}", e.getMessage());
-                        return retryNonStreamingWithTools(prompt, peakUsage, toolContext);
+                        // 首次流式请求已经消耗的 token 与重跑是两次独立请求，不能等重跑
+                        // 覆盖共享峰值；先提交首次调用，再让重跑直接累加自己的 usage。
+                        commitUsage.run();
+                        return retryNonStreamingWithTools(prompt, usage, toolContext);
                     }
                     log.error("AI 流式调用失败", e);
                     return Flux.just(fallbackMessage(e));
@@ -173,7 +176,7 @@ public class AiModelServiceImpl implements AiModelService {
     //非流式重跑：tool_calls 在非流式响应里是完整 JSON，无分片聚合问题。
     // 拿到最终全文后按固定长度切块 emit，保持 SSE 流式输出形态（前端无感知）。
     private Flux<String> retryNonStreamingWithTools(AiPrompt prompt,
-                                                    AtomicReference<Usage> peakUsage, Map<String, Object> toolContext) {
+                                                    TokenUsageAccumulator usage, Map<String, Object> toolContext) {
         try {
             Object[] tools = buildTools(prompt);
 
@@ -188,9 +191,8 @@ public class AiModelServiceImpl implements AiModelService {
                     .call()
                     .chatResponse();
 
-            // 只记峰值，由外层的 doFinally 统一提交。
-            // **这里不能直接 add**：降级重跑的 Flux 会正常完成，外层 doFinally 也会执行，那样就加两次
-            TokenUsageAccumulator.trackPeak(peakUsage, usageOf(response));
+            // 这是与首次流式调用独立的一次请求，直接累加；外层提交只负责首次流式调用。
+            usage.add(usageOf(response));
 
             String content = response.getResult() == null || response.getResult().getOutput() == null
                     ? "" : response.getResult().getOutput().getText();

@@ -17,13 +17,13 @@ public class ArticlesController {
 
     private final ArticlesService articlesService;
 
-    @GetMapping("/articles")  //1.获取公开文章列表
-    public Result<PageVO<ArticleDetailVO>> getArticles(@RequestParam(defaultValue = "1") Long page,
+    @GetMapping("/articles")  //1.获取公开文章列表（游标分页，语义见 ArticlesService#getArticles）
+    public Result<PageVO<ArticleDetailVO>> getArticles(@RequestParam(required = false) String cursor,
                                                        @RequestParam(defaultValue = "10") Long pageSize,
                                                        @RequestParam(required = false) String keyword,
                                                        @RequestParam(required = false) Long categoryId,
                                                        @RequestParam(defaultValue = "latest") String sort){
-        PageVO<ArticleDetailVO> data = articlesService.getArticles(page,pageSize,keyword,categoryId,sort);
+        PageVO<ArticleDetailVO> data = articlesService.getArticles(cursor,pageSize,keyword,categoryId,sort);
 
         return Result.success(data);
     }

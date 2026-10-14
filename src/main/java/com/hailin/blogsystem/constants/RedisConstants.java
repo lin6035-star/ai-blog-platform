@@ -64,11 +64,14 @@ public class RedisConstants
     //UV key 保留天数：当天 + 往前的历史。留 8 天是为了"近 7 天 UV"这类合并查询有余量
     public static final long ARTICLE_UV_TTL_DAYS = 8;
 
-    //用户日活跃位图（Bitmap）：active:user:{yyyyMMdd}，offset = userId，活跃当天置 1
-    //为什么用 Bitmap 而不是 Set：统计只需要回答"这个用户在不在"，不需要知道"是谁"。
-    //一个用户 1 bit，1 亿用户的日活 = 12.5MB；换成 Set 至少要几个 GB
+    //用户日活跃集合（Set）：active:user:{yyyyMMdd}，成员 = userId
+    //**为什么不用 Bitmap**：位图要求 offset = userId，而本项目 users.id 是**雪花**
+    //（19 位、量级 2^63），远超单 key 512MB 对应的 2^32 上限——根本进不了位图。
+    //曾按「自增主键」的假设实现过一版，配了 1 千万的 offset 防线，结果**真实用户全被拦掉、
+    //这个功能从未产出过数据**（界面一直显示 0，且无任何日志留痕）。
+    //Set 没有 offset 概念；每天几百个活跃用户的开销可以忽略
     public static final String USER_ACTIVE_KEY_PREFIX = "active:user:";
-    //活跃位图保留天数：够算"近 30 天活跃"与留存对比，再久也没有查询会用到
+    //活跃集合保留天数：够算「近 30 天活跃」与留存对比，再久也没有查询用到
     public static final long USER_ACTIVE_TTL_DAYS = 90;
 
     //防止缓存穿透

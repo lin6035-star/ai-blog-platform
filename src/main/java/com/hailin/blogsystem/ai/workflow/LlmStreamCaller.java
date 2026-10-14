@@ -92,12 +92,19 @@ public class LlmStreamCaller {
     ) {
         // 已输出字符数：跨重试持有，用来判定「还能不能重试」（见 shouldRetryStream）
         AtomicInteger emittedChars = new AtomicInteger();
+        TokenUsageAccumulator totalUsage = new TokenUsageAccumulator();
 
         for (int attempt = 1; ; attempt++) {
             try {
-                return callOnce(stepPrefix, step, field, emitter,
+                LlmStreamResult result = callOnce(stepPrefix, step, field, emitter,
                         systemPrompt, userPrompt, maxTokens, jsonMode, emittedChars);
+                totalUsage.add(result.usage());
+                return new LlmStreamResult(result.content(), totalUsage);
             } catch (RuntimeException e) {
+                if (e instanceof LlmStreamException streamException) {
+                    totalUsage.add(streamException.usage());
+                    e = streamException.withUsage(totalUsage);
+                }
                 if (!shouldRetryStream(step, attempt, emittedChars, e)) {
                     throw e;
                 }
@@ -183,13 +190,14 @@ public class LlmStreamCaller {
         AtomicReference<String> responseModel = new AtomicReference<>();
         Set<String> finishReasons = ConcurrentHashMap.newKeySet();
         Set<String> generationMetadataKeys = ConcurrentHashMap.newKeySet();
+        TokenUsageAccumulator usage = new TokenUsageAccumulator();
+        AtomicReference<Usage> peakUsage = new AtomicReference<>();
+        AtomicBoolean usageCommitted = new AtomicBoolean(false);
 
         try {
             StringBuilder content = new StringBuilder();
-            TokenUsageAccumulator usage = new TokenUsageAccumulator();
             String effectiveSystemPrompt = PromptTrustBoundary.append(systemPrompt);
             // 单次流式调用只记峰值，流结束后提交一次（原因见 TokenUsageAccumulator.trackPeak）
-            AtomicReference<Usage> peakUsage = new AtomicReference<>();
 
             int systemPromptChars =
                     effectiveSystemPrompt.length();
@@ -284,7 +292,7 @@ public class LlmStreamCaller {
                     .blockLast();
 
             // 流已正常结束（blockLast 是同步阻塞的），提交本次调用含工具调用多轮的最终累计用量
-            usage.add(peakUsage.get());
+            commitUsage(usage, peakUsage, usageCommitted);
 
             long llmDurationMs =
                     System.currentTimeMillis() - llmStart;
@@ -319,6 +327,7 @@ public class LlmStreamCaller {
 
             return new LlmStreamResult(content.toString(), usage);
         } catch (RuntimeException e) {
+            commitUsage(usage, peakUsage, usageCommitted);
             log.warn(
                     "[PERF-WORKFLOW] llm_failed step={} durationMs={} firstChunkMs={} error={}",
                     step,
@@ -326,8 +335,10 @@ public class LlmStreamCaller {
                     firstChunkDelayMs.get(),
                     e.getMessage()
             );
-            throw LlmErrorClassifier.wrap(stepPrefix, e);
+            RuntimeException wrapped = LlmErrorClassifier.wrap(stepPrefix, e);
+            throw new LlmStreamException(wrapped.getMessage(), wrapped, usage);
         } catch (Exception e) {
+            commitUsage(usage, peakUsage, usageCommitted);
             log.warn(
                     "[PERF-WORKFLOW] llm_failed step={} durationMs={} firstChunkMs={} error={}",
                     step,
@@ -335,7 +346,19 @@ public class LlmStreamCaller {
                     firstChunkDelayMs.get(),
                     e.getMessage()
             );
-            throw new RuntimeException(stepPrefix + LlmErrorClassifier.friendlyMessage(e), e);
+            RuntimeException wrapped =
+                    new RuntimeException(stepPrefix + LlmErrorClassifier.friendlyMessage(e), e);
+            throw new LlmStreamException(wrapped.getMessage(), wrapped, usage);
+        }
+    }
+
+    private void commitUsage(
+            TokenUsageAccumulator usage,
+            AtomicReference<Usage> peakUsage,
+            AtomicBoolean usageCommitted
+    ) {
+        if (usageCommitted.compareAndSet(false, true)) {
+            usage.add(peakUsage.get());
         }
     }
 }

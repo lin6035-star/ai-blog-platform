@@ -3,6 +3,7 @@ package com.hailin.blogsystem.service.impl;
 import cn.hutool.core.bean.BeanUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.conditions.query.LambdaQueryChainWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -22,7 +23,9 @@ import com.hailin.blogsystem.entity.vo.PageVO;
 import com.hailin.blogsystem.mapper.*;
 import com.hailin.blogsystem.search.ArticleSearchService;
 import com.hailin.blogsystem.service.ArticlesService;
+import com.hailin.blogsystem.service.FollowService;
 import com.hailin.blogsystem.entity.vo.ArticleDetailVO;
+import com.hailin.blogsystem.utils.CursorCodec;
 import com.hailin.blogsystem.utils.UserContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -34,8 +37,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -163,20 +168,56 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
     /** 站内搜索：keyword 非空时走 ES 全文检索，ES 不可用则降级回原本的 LIKE。 */
     private final ArticleSearchService articleSearchService;
 
-    @Override  //1.获取公开文章列表
-    public PageVO<ArticleDetailVO> getArticles(Long page, Long pageSize, String keyword, Long categoryId, String sort) {  //1.获取公开文章列表
+    /** 首页「关注」流要用它拿「我关注了谁」。方向是 Articles → Follow，不会成环 */
+    private final FollowService followService;
+
+    /** 排序档位：按浏览量。 */
+    private static final String SORT_RECOMMEND = "recommend";
+
+    /**
+     * 排序档位：只看我关注的人。
+     *
+     * <p>排序键与 `latest` **完全相同**（`published_at DESC, id DESC`）——多个作者的文章
+     * 因此天然按时间交替出现，而不是「看完一个人的全部再看下一个」；游标机制也原样复用。
+     */
+    private static final String SORT_FOLLOWING = "following";
+
+    @Override  //1.获取公开文章列表（游标分页 / keyset，语义见接口 Javadoc）
+    public PageVO<ArticleDetailVO> getArticles(String cursor, Long pageSize, String keyword, Long categoryId, String sort) {
 
         String normalizedKeyword = keyword == null || keyword.isBlank() ? null : keyword;
-        String normalizedSort = "recommend".equals(sort) ? "recommend" : "latest";
+        String normalizedSort = normalizeSort(sort);
+        boolean firstPage = cursor == null || cursor.isBlank();
+
+        // 「关注」流：先把作者范围取出来。**空集合必须在这里短路**——
+        // 放进 SQL 会生成 `IN ()`（语法错误），或者被当成"无条件"，
+        // 那样这个 tab 就变成全站最新了，用户还以为自己在看关注流。
+        // 未登录也走这条：首页游客可见，那个 tab 显示空状态即可，不该报错。
+        List<Long> authorScope = null;
+        if (SORT_FOLLOWING.equals(normalizedSort)) {
+            authorScope = followService.listFollowingIds(UserContext.get());
+            if (authorScope.isEmpty()) {
+                return emptyPage();
+            }
+        }
+        /*
+         * 单页上限。游标分页下 pageSize **直接就是 LIMIT**，客户端可控的 LIMIT 必须有天花板。
+         * （offset 分页同样暴露，只是那时 page 和 pageSize 一起传进来更显眼。）
+         * 50 沿用项目里同类接口的口径，见 AgentRunInspectionService。
+         */
+        long safeSize = pageSize == null || pageSize < 1 ? 10L : Math.min(pageSize, 50L);
 
         // 有关键词 → 优先走 ES 全文检索（标题 + 摘要 + 正文，带相关性排序与高亮）。
-        // 无关键词 → 完全走下面的 DB + 缓存路径，一行不动。
+        // 无关键词 → 走下面的 DB + 缓存路径。
         //
         // 为什么用「keyword 非空」而不是「整体替换」：无关键词的列表页是**热路径且有缓存**，
         // 走 ES 只会平白多一次网络往返；而关键词查询本来就不走缓存（缓存 key 里没有 keyword）。
-        if (normalizedKeyword != null) {
+        //
+        // ⚠️ 关注流**不进 ES**：它的排序档位只有推荐/最新两套，塞 following 进去没有对应语义。
+        // 它退回 DB 的 `title LIKE + author_id IN`——关注流本来就是个小集合，够用。
+        if (normalizedKeyword != null && !SORT_FOLLOWING.equals(normalizedSort)) {
             PageVO<ArticleDetailVO> esResult =
-                    searchByEs(page, pageSize, normalizedKeyword, categoryId, normalizedSort);
+                    searchByEs(cursor, safeSize, normalizedKeyword, categoryId, normalizedSort);
             if (esResult != null) {
                 return esResult;
             }
@@ -184,13 +225,30 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
             log.warn("[SEARCH] ES 不可用，降级到 LIKE 查询：keyword={}", normalizedKeyword);
         }
 
-        boolean cacheable = normalizedKeyword == null;
-        String cacheKey = cacheable ? buildArticleListCacheKey(page,pageSize,categoryId,normalizedSort) : null;
+        /*
+         * 只缓存第一页，深页不缓存。
+         *
+         * 游标分页下深页**缓存不了**：cursor 是每个调用方各自的位置，变不出稳定的 key。
+         * 但也不需要——keyset 是"索引定位 + 取 N 行"，代价与翻到多深无关，回源不疼。
+         *
+         * 顺带把老问题消掉了：原来 key 是 `page:N`，翻多少页就有多少 key，
+         * 而任何一次文章变更都要 `SCAN article:list:*` 全删 + 延迟重删。
+         * 现在 key 数量是「分类数 × 排序数」，与翻页深度无关。
+         *
+         * ⚠️ 关注流**不进缓存**：key 里没有 userId，而它是每个用户各自的私有视图——
+         * 缓存了就是 A 用户读到 B 用户的关注流（不是性能问题，是数据泄露）。
+         * 它低频、私有，且 keyset 本身便宜，不缓存不亏。
+         */
+        boolean cacheable = normalizedKeyword == null && firstPage
+                && !SORT_FOLLOWING.equals(normalizedSort);
+        String cacheKey = cacheable
+                ? buildArticleListCacheKey(safeSize, categoryId, normalizedSort)
+                : null;
 
-        if(cacheable){
+        if (cacheable) {
             PageVO<ArticleDetailVO> cachedPage = getArticleListFromCache(cacheKey);
 
-            if(cachedPage != null){
+            if (cachedPage != null) {
                 fillArticleLiked(cachedPage.getList());
                 fillArticleFavorited(cachedPage.getList());
                 fillArticleViewCount(cachedPage.getList());
@@ -198,30 +256,30 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
             }
         }
 
-        Page<Articles> pageResult = lambdaQuery()
+        LambdaQueryChainWrapper<Articles> query = lambdaQuery()
                 .eq(Articles::getStatus, BlogConstants.ArticlesStatus.PUBLISHED)
                 .like(normalizedKeyword != null, Articles::getTitle, normalizedKeyword)
                 .eq(categoryId != null, Articles::getCategoryId, categoryId)
-                .orderByDesc("recommend".equals(normalizedSort), Articles::getViewCount)
-                .orderByDesc(!"recommend".equals(normalizedSort), Articles::getPublishedAt)
-                .orderByDesc(Articles::getId)
-                .page(new Page<>(page,pageSize));
+                // 关注流：只要这些作者的文章。authorScope 为 null 时这个条件整个不生效
+                .in(authorScope != null, Articles::getAuthorId, authorScope);
 
-        List<ArticleDetailVO> list = pageResult.getRecords()
-                .stream()
+        applySortAndCursor(query, normalizedSort, firstPage ? null : cursor);
+
+        // searchCount=false：游标分页不需要 total，省掉一条 COUNT(*)。
+        // 这里恒取"第 1 页"——位移由游标条件表达，查询里不再出现 OFFSET。
+        Page<Articles> pageResult = query.page(new Page<>(1, safeSize, false));
+
+        List<Articles> records = pageResult.getRecords();
+        List<ArticleDetailVO> list = records.stream()
                 .map(ArticleDetailVO::from)
                 .toList();
         fillArticleMeta(list);
 
-        PageVO<ArticleDetailVO> result = new PageVO<>(
-                list,
-                pageResult.getTotal(),
-                page,
-                pageSize
-        );
+        PageVO<ArticleDetailVO> result = new PageVO<>(list, null, null, safeSize);
+        result.setNextCursor(buildNextCursor(records, safeSize, normalizedSort));
 
-        if(cacheable){
-            saveArticleListToCache(cacheKey,result);
+        if (cacheable) {
+            saveArticleListToCache(cacheKey, result);
         }
 
         fillArticleLiked(list);
@@ -232,19 +290,119 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
     }
 
     /**
+     * 排序档位归一化。
+     *
+     * <p>白名单而不是直接用入参：未知值静默退回「最新」，
+     * 免得客户端传来的任意字符串进入后面的分支判断。
+     */
+    private static String normalizeSort(String sort) {
+        if (SORT_RECOMMEND.equals(sort)) {
+            return SORT_RECOMMEND;
+        }
+        if (SORT_FOLLOWING.equals(sort)) {
+            return SORT_FOLLOWING;
+        }
+        // 未知值静默退回「最新」——白名单而不是直接用入参，免得把客户端字符串带进分支判断
+        return "latest";
+    }
+
+    /** 空页。关注流在「未登录 / 一个都没关注」时直接返回它，不查库 */
+    private static PageVO<ArticleDetailVO> emptyPage() {
+        PageVO<ArticleDetailVO> empty = new PageVO<>();
+        empty.setList(List.of());
+        empty.setNextCursor(null);
+        return empty;
+    }
+
+    /**
+     * 排序 + 游标条件。
+     *
+     * <p><b>为什么用行值比较 {@code (view_count, id) < (?, ?)}，而不是
+     * {@code view_count < ? OR (view_count = ? AND id < ?)}</b>：两者语义完全等价，
+     * 但 MySQL 8.0 对行值构造器有专门的 range 优化，能直接走
+     * {@code (status, deleted_at, view_count, id)} 定位；OR 展开则要优化器自己推，
+     * 更容易退化成"扫一段再回表过滤"。**改之前先在真实数据上 EXPLAIN，别凭写法判断。**
+     *
+     * <p>{@code id} 必须参与比较，它保证**全序**：只按浏览量取游标时，
+     * 浏览量并列的那几行会被整段跳过或重复。
+     *
+     * <p>⚠️ {@code following} **故意落进**下面 `latest` 这一支：它的排序键与「最新」完全相同
+     * （{@code published_at DESC, id DESC}），差别只在调用方多带了一个
+     * {@code author_id IN (...)} 过滤。所以游标格式天然通用、不需要第三套编解码，
+     * 多个作者的文章也因此按时间交替出现。
+     */
+    private void applySortAndCursor(LambdaQueryChainWrapper<Articles> query, String sort, String cursor) {
+        if (SORT_RECOMMEND.equals(sort)) {
+            query.orderByDesc(Articles::getViewCount).orderByDesc(Articles::getId);
+            if (cursor != null) {
+                List<String> parts = CursorCodec.decode(cursor);
+                query.apply("(view_count, id) < ({0}, {1})",
+                        CursorCodec.toLong(parts.get(0)), CursorCodec.toLong(parts.get(1)));
+            }
+            return;
+        }
+
+        query.orderByDesc(Articles::getPublishedAt).orderByDesc(Articles::getId);
+        if (cursor != null) {
+            List<String> parts = CursorCodec.decode(cursor);
+            query.apply("(published_at, id) < ({0}, {1})",
+                    toLocalDateTime(CursorCodec.toLong(parts.get(0))), CursorCodec.toLong(parts.get(1)));
+        }
+    }
+
+    /**
+     * 生成下一页游标：**只在本页取满时才给**，取不满就说明后面没有了。
+     *
+     * <p>代价是"最后一页刚好取满"会多发一次请求（拿到空列表 + null 游标）。
+     * 用"多取一条"能消掉这一次，但那条多出来的数据要额外剥掉（缓存里也一样），
+     * 权衡后选了简单的那侧——前端的"加载失败重试"分支本来就要处理空响应，不引入新状态。
+     */
+    private String buildNextCursor(List<Articles> records, Long pageSize, String sort) {
+        if (records == null || records.isEmpty() || records.size() < pageSize) {
+            return null;
+        }
+        Articles last = records.get(records.size() - 1);
+
+        if (SORT_RECOMMEND.equals(sort)) {
+            return CursorCodec.encode(
+                    String.valueOf(safe(last.getViewCount())), String.valueOf(last.getId()));
+        }
+
+        if (last.getPublishedAt() == null) {
+            // 已发布文章理论上都有发布时间。真为空就停在这一页——不要生成一个语义不明的游标，
+            // 那会让下一页从头开始，变成"永远翻不到底"
+            return null;
+        }
+        long epochMilli = last.getPublishedAt()
+                .atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+        return CursorCodec.encode(String.valueOf(epochMilli), String.valueOf(last.getId()));
+    }
+
+    /**
+     * 游标里的 {@code publishedAt} 存的是 **epoch 毫秒**而不是格式化字符串：
+     * 字符串带 {@code :} 会和游标的分段分隔符打架，还会引入时区歧义。按系统时区还原，
+     * 与写入游标时用的是同一套时区。
+     */
+    private static LocalDateTime toLocalDateTime(long epochMilli) {
+        return LocalDateTime.ofInstant(Instant.ofEpochMilli(epochMilli), ZoneId.systemDefault());
+    }
+
+    /**
      * ES 检索路径。**返回 null 表示 ES 不可用**，调用方据此降级到 LIKE。
      *
-     * <p>返回的 { @code total } 用 ES 的命中总数（不是本页条数）——分页要靠它。
+     * <p>分页方式与 DB 路径一致：ES 侧用 {@code search_after}，游标语义见
+     * {@link ArticleSearchService#search}。{@code total} 仍是 ES 的命中总数（只作展示），
+     * **不参与"有没有下一页"的判断**——那看 {@code nextCursor}。
      */
-    private PageVO<ArticleDetailVO> searchByEs(Long page, Long pageSize, String keyword,
+    private PageVO<ArticleDetailVO> searchByEs(String cursor, Long pageSize, String keyword,
                                                Long categoryId, String sort) {
         ArticleSearchService.SearchHits hits =
-                articleSearchService.search(keyword, categoryId, sort, page, pageSize);
+                articleSearchService.search(keyword, categoryId, sort, cursor, pageSize);
         if (hits == null) {
             return null;
         }
         if (hits.articleIds().isEmpty()) {
-            return new PageVO<>(List.of(), 0L, page, pageSize);
+            return new PageVO<>(List.of(), null, null, pageSize);
         }
 
         /*
@@ -266,7 +424,13 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
                 continue;
             }
             ArticleDetailVO vo = ArticleDetailVO.from(article);
-            vo.setHighlight(hits.highlights().get(id));
+            // 标题高亮与片段高亮分开透出：只命中标题时 fragment 为 null，
+            // 由前端两处各自决定回退（见 ArticleSearchService.Highlight）
+            ArticleSearchService.Highlight highlight = hits.highlights().get(id);
+            if (highlight != null) {
+                vo.setHighlightTitle(highlight.title());
+                vo.setHighlight(highlight.fragment());
+            }
             list.add(vo);
         }
 
@@ -275,14 +439,19 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
         fillArticleFavorited(list);
         fillArticleViewCount(list);
 
-        return new PageVO<>(list, hits.total(), page, pageSize);
+        PageVO<ArticleDetailVO> result = new PageVO<>(list, hits.total(), null, pageSize);
+        result.setNextCursor(hits.nextCursor());
+        return result;
     }
 
-    private String buildArticleListCacheKey(Long page, Long pageSize, Long categoryId, String sort) {
+    /**
+     * 列表缓存 key。**只给第一页用**——游标分页下深页没有稳定 key 可建，
+     * 所以 key 段是 {@code first} 而不是页码。
+     */
+    private String buildArticleListCacheKey(Long pageSize, Long categoryId, String sort) {
         String categoryPart = categoryId == null ? "all" : String.valueOf(categoryId);
         return RedisConstants.ARTICLE_LIST_KEY_PREFIX
-                + "page:" + page
-                + ":size:" + pageSize
+                + "first:size:" + pageSize
                 + ":category:" + categoryPart
                 + ":sort:" + sort;
     }
@@ -1406,7 +1575,8 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
             return null;
         }
 
-        ArticleDetailVO vo = ArticleDetailVO.from(articles);
+        // 详情路径必须用 fromDetail：缓存里的 VO 要带正文，否则读缓存时详情页是空的
+        ArticleDetailVO vo = ArticleDetailVO.fromDetail(articles);
 
         fillArticleMeta(vo);
 

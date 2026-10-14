@@ -75,7 +75,14 @@ class ArticleRagSearchServiceTests {
 
         when(retrieveService.retrieve("有没有关于 Redis 的文章")).thenReturn(vectorContexts);
         when(keywordRetriever.retrieve("Redis")).thenReturn(keywordContexts);
-        when(ranker.rankWithEvidence("Redis", rankedContexts)).thenReturn(modelResult(rankedContexts, 0.90D));
+        /*
+         * ⚠️ rerank 收到的是**完整问题**，不是削过的关键词。
+         * 这一条曾经是 "Redis"——因为那时 rankQuestion 取 lexicalQuery（停用词表削出来的），
+         * 结果是"缓存"这类两字 query 让所有候选分数被摊平，Gate 只放得过 top1。
+         * 现在锁的就是"用完整问题打分"这个契约。
+         */
+        when(ranker.rankWithEvidence("有没有关于 Redis 的文章", rankedContexts))
+                .thenReturn(modelResult(rankedContexts, 0.90D));
         when(articlesService.listByIds(List.of(1L, 2L))).thenReturn(publishedArticles(1L, 2L));
 
         ArticleRagSearchResult result = searchService.search("有没有关于 Redis 的文章", intent);
@@ -84,7 +91,7 @@ class ArticleRagSearchServiceTests {
         assertThat(result.contexts()).containsExactlyElementsOf(rankedContexts);
         verify(retrieveService).retrieve("有没有关于 Redis 的文章");
         verify(keywordRetriever).retrieve("Redis");
-        verify(ranker).rankWithEvidence("Redis", rankedContexts);
+        verify(ranker).rankWithEvidence("有没有关于 Redis 的文章", rankedContexts);
     }
 
     @Test
@@ -100,9 +107,10 @@ class ArticleRagSearchServiceTests {
         when(retrieveService.retrieve("有没有关于 Redis 缓存 的文章")).thenReturn(List.of());
         when(keywordRetriever.retrieve("Redis 缓存")).thenReturn(List.of());
         when(keywordRetriever.retrieveFallback("Redis 缓存")).thenReturn(fallbackContexts);
-        when(ranker.rankWithEvidence("Redis 缓存", List.of()))
+        // rerank 两轮（首轮空 / 兜底轮）拿到的都是**完整问题**，不是关键词
+        when(ranker.rankWithEvidence("有没有关于 Redis 缓存 的文章", List.of()))
                 .thenReturn(ArticleRagRankResult.empty());
-        when(ranker.rankWithEvidence("Redis 缓存", fallbackContexts))
+        when(ranker.rankWithEvidence("有没有关于 Redis 缓存 的文章", fallbackContexts))
                 .thenReturn(modelResult(fallbackContexts, 0.90D));
         when(articlesService.listByIds(List.of(2L))).thenReturn(publishedArticles(2L));
 
@@ -112,7 +120,7 @@ class ArticleRagSearchServiceTests {
         assertThat(result.contexts()).containsExactlyElementsOf(fallbackContexts);
         verify(keywordRetriever).retrieve("Redis 缓存");
         verify(keywordRetriever).retrieveFallback("Redis 缓存");
-        verify(ranker).rankWithEvidence("Redis 缓存", fallbackContexts);
+        verify(ranker).rankWithEvidence("有没有关于 Redis 缓存 的文章", fallbackContexts);
     }
 
     @Test
@@ -124,7 +132,7 @@ class ArticleRagSearchServiceTests {
 
         when(retrieveService.retrieve("Redis 和 MySQL 哪个适合剪辑视频")).thenReturn(List.of(unrelated));
         when(keywordRetriever.retrieve("Redis MySQL 剪辑视频")).thenReturn(List.of(unrelated));
-        when(ranker.rankWithEvidence("Redis MySQL 剪辑视频", List.of(unrelated)))
+        when(ranker.rankWithEvidence("Redis 和 MySQL 哪个适合剪辑视频", List.of(unrelated)))
                 .thenReturn(modelResult(List.of(unrelated), 0.72D));
         when(articlesService.getArticles(any(), any(), any(), any(), any()))
                 .thenReturn(new PageVO<>(List.of(), 0L, 1L, 3L));

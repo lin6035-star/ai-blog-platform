@@ -12,6 +12,7 @@ import com.hailin.blogsystem.entity.Articles;
 import com.hailin.blogsystem.entity.dto.AgentStepActionType;
 import com.hailin.blogsystem.entity.dto.PageContextDTO;
 import com.hailin.blogsystem.service.AiSessionService;
+import com.hailin.blogsystem.service.AiUserMemoryService;
 import com.hailin.blogsystem.service.ArticlesService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -49,7 +50,8 @@ class ArticleAgentActionExecutorTests {
                 mock(AiEpisodicMemoryRetrieveService.class),
                 mock(ArticleRagSearchService.class),
                 new BlogAiProperties(),
-                anchorService
+                anchorService,
+                mock(AiUserMemoryService.class)
         );
     }
 

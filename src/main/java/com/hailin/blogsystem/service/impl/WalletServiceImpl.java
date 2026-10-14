@@ -21,6 +21,7 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -55,18 +56,45 @@ public class WalletServiceImpl extends ServiceImpl<UserWalletMapper, UserWallet>
         WalletVO vo = new WalletVO();
         // 钱包行不存在 == 余额 0（懒创建），读路径不写库
         vo.setBalance(wallet == null ? 0L : wallet.getBalance());
-        vo.setPendingReserveCount(aiBillingOrderMapper.selectCount(
+
+        /*
+         * 在途预扣：一次查询同时拿「笔数」与「总额」。
+         *
+         * 没有用 selectCount + 一次 SUM——在途预扣每用户天然只有个位数（长任务每用户上限 2），
+         * 多一次 SQL 不如少一次；这里捞整行是为了同时算出金额。
+         */
+        List<AiBillingOrder> pendingReserves = aiBillingOrderMapper.selectList(
                 new LambdaQueryWrapper<AiBillingOrder>()
                         .eq(AiBillingOrder::getUserId, userId)
-                        .eq(AiBillingOrder::getStatus, BILLING_STATUS_RESERVED)));
+                        .eq(AiBillingOrder::getStatus, BILLING_STATUS_RESERVED));
+
+        vo.setPendingReserveCount((long) pendingReserves.size());
+        vo.setPendingReserveCredit(pendingReserves.stream()
+                .mapToLong(order -> order.getReservedCredit() == null ? 0L : order.getReservedCredit())
+                .sum());
+        // 给前端渲染"仅显示最近 N 天"用，省得它把 7 硬编码一遍
+        vo.setBillRetentionDays(blogWalletProperties.getBillRetentionDays());
         return vo;
     }
 
     @Override
     public PageVO<WalletBillEntryVO> listBill(Long userId, long page, long pageSize) {
         long offset = Math.max(0L, (page - 1) * pageSize);
-        List<WalletBillEntryVO> list = walletTransactionMapper.selectBillPage(userId, pageSize, offset);
-        long total = walletTransactionMapper.countBill(userId);
+
+        /*
+         * 只展示最近 N 天（默认 7）。**数据一行不删**——wallet_transaction 是按 balance_seq
+         * 连续编号的账本，逐笔回放对账（selectLedgerAnomalies 的 LAG 检查）依赖这个连续性，
+         * 删掉任何一段，巡检都会报"漏流水"假警，把真正的账不平淹没掉。
+         * 所以"只看最近几天"在展示层解决，改配置就能放开。
+         */
+        // 下限 1 天：配置写成 0 或负数的话，窗口会退化成"只剩此刻"，
+        // 用户打开账单看到的是空的、还会以为数据丢了——配置错误不该以"看起来像数据丢失"的方式表现
+        long retentionDays = Math.max(1L, blogWalletProperties.getBillRetentionDays());
+        LocalDateTime since = LocalDateTime.now().minusDays(retentionDays);
+
+        List<WalletBillEntryVO> list =
+                walletTransactionMapper.selectBillPage(userId, since, pageSize, offset);
+        long total = walletTransactionMapper.countBill(userId, since);
         return new PageVO<>(list, total, page, pageSize);
     }
 

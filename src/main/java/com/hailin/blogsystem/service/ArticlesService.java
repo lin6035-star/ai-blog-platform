@@ -18,7 +18,23 @@ public interface ArticlesService extends IService<Articles>{
      */
     ArticleDetailVO getPublicArticleById(Long id, String clientIp);
 
-    PageVO<ArticleDetailVO> getArticles(Long page, Long pageSize, String keyword, Long categoryId, String sort);
+    /**
+     * 公开文章列表（**游标分页 / keyset**）。
+     *
+     * <p><b>为什么不是 page/pageSize</b>：首页是无限滚动。offset 分页在深页要跳过前 N 行，
+     * 而"滚动"这个交互恰恰会让用户一直往下滑、offset 一直涨——两者天生冲突。
+     * 游标分页的代价是 {@code O(log N + size)}，与深度无关；它换来的是"不能跳页"，
+     * 而无限滚动本来就不跳页，所以这个代价在这里等于零。
+     *
+     * <p>代价的另一面：{@code total} 不再计算（游标不需要它），返回里为 {@code null}。
+     * 调用方判断"还有没有下一页"要看 {@link PageVO#getNextCursor()}，不要看 total。
+     *
+     * @param cursor   {@code null} 或空 = 第一页；否则把上一页返回的 {@code nextCursor} 原样带回。
+     *                 它是**不透明 token**，调用方不要解析其内容；格式非法会抛
+     *                 {@link IllegalArgumentException}（全局 handler 转 40001）
+     * @param pageSize 单页条数
+     */
+    PageVO<ArticleDetailVO> getArticles(String cursor, Long pageSize, String keyword, Long categoryId, String sort);
 
     ArticleDetailVO getArticlesById(Long id);
 

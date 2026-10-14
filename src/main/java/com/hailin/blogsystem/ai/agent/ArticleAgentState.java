@@ -21,13 +21,36 @@ import java.util.*;
 public final class ArticleAgentState implements AgentRunState {
 
     /** §7.4 槽位预算：先按语义槽位整理，再按槽位裁剪（不是把总预算简单调小） */
-    private static final int ARTICLE_BUDGET = 1200;
+    /**
+     * 文章**结构摘要**预算（2026-10-11 修正）。
+     *
+     * <p>原先结构摘要与聚焦片段共用一个 1200 预算，而实测单条结构摘要 1889～2313 字符、
+     * 单条聚焦片段上限 1200——**一条片段就能占满整个槽位**，新片段必然把结构摘要整体挤掉。
+     * 后果不是"少看一点"，而是 Verifier 失去判断「文章里到底有没有这段内容」的唯一依据
+     * （它只能靠小标题结构回答），于是连续判 NEED_MORE → 补查 → 证据更窄 → 步数耗尽。
+     *
+     * <p>现在结构摘要**单独成槽且常驻**：2400 可完整容纳实测最长的结构摘要（2313）。
+     */
+    private static final int OVERVIEW_BUDGET = 2400;
+    /**
+     * 聚焦片段预算：片段之间仍按**最新优先**淘汰（局部细节里最新的最相关），
+     * 但不再与结构摘要互相挤占。
+     */
+    private static final int FOCUS_BUDGET = 1500;
     private static final int MEMORY_BUDGET = 600;
     private static final int RAG_BUDGET = 800;
     private static final int ACTION_BUDGET = 300;
     private static final int MISSING_BUDGET = 300;
     /** 反馈同样占预算——不设上限的话「上下文约 3200」就不成立 */
     private static final int FEEDBACK_BUDGET = 400;
+
+    /**
+     * 同一缺失类型连续被拒到几次就放行草案（2026-10-11）。
+     *
+     * <p>取 2：第一次拒绝是正常的"促补查"信号；第二次仍指向同一类缺失，说明补查没能满足
+     * 该标尺（实测常见于"证据结构与该判据不匹配"），第三次再拦只会把步数耗光。
+     */
+    private static final int MAX_CONSECUTIVE_SAME_TYPE_REJECTIONS = 2;
 
     private final String goal;
     private final int maxSteps;
@@ -40,7 +63,13 @@ public final class ArticleAgentState implements AgentRunState {
     private Boolean owned;
 
     // ---- evidence（§7.5：键去重，同键新内容替换旧内容）----
-    private final Map<String, String> articleEvidence = new LinkedHashMap<>();
+    /**
+     * 文章结构摘要（无 focus 的那次查询）——判断「全文结构 / 文中是否包含某内容」的唯一依据。
+     * 常驻，不被聚焦片段淘汰（见 {@link #OVERVIEW_BUDGET}）。
+     */
+    private final Map<String, String> articleOverview = new LinkedHashMap<>();
+    /** 聚焦片段（带 focus 的查询）：同一 focus 新结果替换旧的，不同 focus 允许并存（受预算限制） */
+    private final Map<String, String> articleFocus = new LinkedHashMap<>();
     private final Map<String, String> memories = new LinkedHashMap<>();
     private final Map<String, String> ragFacts = new LinkedHashMap<>();
     private final Set<String> articleEmptyQueries = new HashSet<>();
@@ -50,6 +79,8 @@ public final class ArticleAgentState implements AgentRunState {
             new EnumMap<>(Verdict.MissingEvidence.class);
     private Verdict.MissingEvidence rejectedEvidenceType;
     private long rejectedAtRevision;
+    /** 同一缺失类型被**连续**拒绝的次数（换类型即重置） */
+    private int consecutiveSameTypeRejections;
 
     // ---- actions ----
     private final List<String> completedActions = new ArrayList<>();
@@ -106,10 +137,14 @@ public final class ArticleAgentState implements AgentRunState {
                 : (focusHit ? "已查「" + focus + "」" : "查过「" + focus + "」但没找到"));
 
         if (noFocus || focusHit) {
+            // 分槽（2026-10-11）：结构摘要与聚焦片段各占独立预算，不再互相挤占。
+            // 合槽时"单条片段 ≥ 槽位预算"是常态（片段上限 1200 = 原槽位预算 1200），
+            // 新片段必然把结构摘要整体挤掉——而 Verifier 判「文章里有没有这段」恰恰要靠结构。
+            Map<String, String> slot = noFocus ? articleOverview : articleFocus;
             // 键含 focus：不同 focus 允许并存（受槽位预算限制），同一个 focus 的新结果替换旧的
-            String key = "QUERY_ARTICLE|" + articleId + "|" + (noFocus ? "" : focus);
-            lastStepHadNewEvidence = !Objects.equals(result.summary(), articleEvidence.get(key));
-            articleEvidence.put(key, result.summary());
+            String key = noFocus ? "结构" : focus;
+            lastStepHadNewEvidence = !Objects.equals(result.summary(), slot.get(key));
+            slot.put(key, result.summary());
             incrementEvidenceIfNew(Verdict.MissingEvidence.ARTICLE_CONTENT, lastStepHadNewEvidence);
             missingEvidence.removeIf(entry -> entry.startsWith("文章内容"));
             // 正文补到了：指向「文章内容」的旧反馈（如 Verifier 的"缺正文细节"）必须一起清，
@@ -204,8 +239,29 @@ public final class ArticleAgentState implements AgentRunState {
 
     @Override
     public void noteVerifierRejection(Verdict.MissingEvidence type) {
-        rejectedEvidenceType = type == null ? Verdict.MissingEvidence.OTHER : type;
+        Verdict.MissingEvidence normalized = type == null ? Verdict.MissingEvidence.OTHER : type;
+        // 连续计数只在**同一缺失类型**上累加：换了类型说明模型找到了新方向，不该算死路
+        consecutiveSameTypeRejections = (normalized == rejectedEvidenceType)
+                ? consecutiveSameTypeRejections + 1
+                : 1;
+        rejectedEvidenceType = normalized;
         rejectedAtRevision = evidenceRevision(rejectedEvidenceType);
+    }
+
+    /**
+     * 同一缺失类型连续被拒到上限（2026-10-11）。
+     *
+     * <p>骨架**只在已经没有下一次机会时**（{@code nextStepNo >= maxSteps}）据此放行草案——
+     * 还有步数时继续让证据门工作。
+     *
+     * <p>为什么不能只靠 {@link #hasEvidenceProgressSinceRejection()}：那个判据看的是"证据版本有没有涨"，
+     * 而每次换 focus 补查都会涨版本 → 永远算"有进展" → 拦截无限继续。
+     * 实测「点赞 + 分析」在一次真实请求里连续被拦 3 次、6 步耗尽、18300 token 全浪费，
+     * 最终给用户的却是"信息不足，先不硬答"——正是 Verifier 自己写的那个更坏的结果。
+     */
+    @Override
+    public boolean verifierRejectionExhausted() {
+        return consecutiveSameTypeRejections >= MAX_CONSECUTIVE_SAME_TYPE_REJECTIONS;
     }
 
     @Override
@@ -257,7 +313,8 @@ public final class ArticleAgentState implements AgentRunState {
             sb.append('\n');
         }
 
-        appendSlot(sb, "文章证据", articleEvidence.values(), ARTICLE_BUDGET);
+        appendSlot(sb, "文章结构", articleOverview.values(), OVERVIEW_BUDGET);
+        appendSlot(sb, "聚焦片段", articleFocus.values(), FOCUS_BUDGET);
         appendSlot(sb, "记忆证据", memories.values(), MEMORY_BUDGET);
         appendSlot(sb, "站内知识", ragFacts.values(), RAG_BUDGET);
         appendSlot(sb, "仍缺的证据", missingEvidence, MISSING_BUDGET);
@@ -365,7 +422,8 @@ public final class ArticleAgentState implements AgentRunState {
 
     /** 还没有任何可带去决策的事实（第 1 步之前，或所有动作都没产出结构化事实） */
     private boolean isEmpty() {
-        return articleId == null && articleEvidence.isEmpty() && memories.isEmpty()
+        return articleId == null && articleOverview.isEmpty() && articleFocus.isEmpty()
+                && memories.isEmpty()
                 && ragFacts.isEmpty() && completedActions.isEmpty() && latestError == null
                 // 反馈也算事实，而且是最该优先看到的那种：只有一条"你被拒了、因为什么"时，
                 // 判成空上下文等于让模型两眼一抹黑（这个漏洞是被 Runtime 上下文测试抓出来的）
@@ -373,7 +431,8 @@ public final class ArticleAgentState implements AgentRunState {
     }
 
     private boolean isVerificationEvidenceEmpty() {
-        return articleId == null && articleEvidence.isEmpty() && memories.isEmpty()
+        return articleId == null && articleOverview.isEmpty() && articleFocus.isEmpty()
+                && memories.isEmpty()
                 && ragFacts.isEmpty() && missingEvidence.isEmpty();
     }
 

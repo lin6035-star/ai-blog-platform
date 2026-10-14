@@ -5,9 +5,11 @@ import com.hailin.blogsystem.component.UserSetCache;
 import com.hailin.blogsystem.constants.RedisConstants;
 import com.hailin.blogsystem.entity.ArticleComments;
 import com.hailin.blogsystem.entity.CommentLikes;
+import com.hailin.blogsystem.entity.NotificationType;
 import com.hailin.blogsystem.mapper.CommentsMapper;
 import com.hailin.blogsystem.mapper.LikeCommentsMapper;
 import com.hailin.blogsystem.service.LikeCommentsService;
+import com.hailin.blogsystem.service.NotificationService;
 import com.hailin.blogsystem.utils.UserContext;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -21,6 +23,7 @@ public class LikeCommentsServiceImpl extends ServiceImpl<LikeCommentsMapper, Com
 
     private final CommentsMapper commentsMapper;
     private final UserSetCache userSetCache;
+    private final NotificationService notificationService;
 
     @Override  //1.点赞评论，登录用户可访问
     @Transactional
@@ -50,6 +53,17 @@ public class LikeCommentsServiceImpl extends ServiceImpl<LikeCommentsMapper, Com
         Long userId = UserContext.get();
         userSetCache.addIfLoaded(
                 RedisConstants.COMMENT_LIKED_USER_KEY_PREFIX + userId, String.valueOf(commentId));
+
+        /*
+         * 通知**评论作者**——注意与"文章被评论"是两条不同的通知：
+         * 文章作者收"有人评论了你的文章"，评论作者收"有人赞了你的评论"。
+         *
+         * 与业务同事务；能走到这里一定是真的点上了（重复点赞在上面就抛异常了）。
+         * 赞自己的评论由 notify 的"不给自己发"兜住。
+         * 接收者与文章 id 都来自上面那次 selectById —— **零额外查询**。
+         */
+        notificationService.notify(comment.getUserId(), userId,
+                NotificationType.COMMENT_LIKED, commentId, comment.getArticleId());
     }
 
 

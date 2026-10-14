@@ -1,17 +1,13 @@
 package com.hailin.blogsystem;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.TokenUsageAccumulator;
 import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentStepDecision;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentStepDecider;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.AgentRunResult;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.LearningAgentActionExecutor;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.LearningAgentRuntime;
-import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.LearningPlanAnchorService;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.AiAgentStep;
@@ -25,7 +21,9 @@ import com.hailin.blogsystem.service.LearningPlansService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.ai.chat.metadata.Usage;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -142,6 +140,39 @@ class LearningAgentRuntimeTests {
         // observation 进上下文
         AiAgentRun saved = captureRun();
         assertThat(saved.getContextJson()).contains("Redis 学习计划");
+    }
+
+    @Test
+    void secondDecisionUsesStructuredLearningStateInsteadOfFullObservation() {
+        List<String> contexts = new ArrayList<>();
+        String longObservation = "完整计划展示文本，不应进入下一轮决策上下文。".repeat(120);
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenAnswer(invocation -> {
+                    contexts.add(invocation.getArgument(1));
+                    return contexts.size() == 1
+                            ? AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD)
+                            : AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                            .withInput(Map.of("answer", "根据计划继续学习"));
+                });
+        when(executor.execute(any(), any(), any())).thenReturn(
+                AgentActionResult.of(longObservation)
+                        .with("status", "SUCCESS")
+                        .with("planRef", "Redis")
+                        .with("planCount", 2)
+                        .with("activePlanCount", 1)
+                        .with("matchedCount", 1)
+                        .with("selectedPlanId", 11L));
+
+        AgentRunResult result = runtime.run(100L, 200L, "帮我安排今天学什么");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(contexts).hasSize(2);
+        assertThat(contexts.get(0)).isEmpty();
+        assertThat(contexts.get(1))
+                .contains("【学习计划】")
+                .contains("selectedPlanId=11")
+                .doesNotContain("完整计划展示文本")
+                .hasSizeLessThan(longObservation.length());
     }
 
     @Test
@@ -323,6 +354,32 @@ class LearningAgentRuntimeTests {
     }
 
     @Test
+    void writeProposalTerminalStepKeepsDecisionTokenUsage() {
+        Usage suggestUsage = mockUsage(150, 15, 165);
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
+                .thenAnswer(inv -> {
+                    inv.getArgument(4, TokenUsageAccumulator.class).add(suggestUsage);
+                    return AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                            .withInput(Map.of(
+                                    "taskTitle", "缓存击穿",
+                                    "stageTitle", "阶段一",
+                                    "done", "true"));
+                });
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划。\n- 阶段《阶段一》：缓存击穿；"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "帮我把缓存击穿勾掉");
+
+        assertThat(result.totalTokens()).isEqualTo(165);
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps).hasSize(2);
+        assertThat(steps.get(1).getActionType()).isEqualTo("SUGGEST_WRITE");
+        assertThat(steps.get(1).getInputTokens()).isEqualTo(150);
+        assertThat(steps.get(1).getOutputTokens()).isEqualTo(15);
+    }
+
+    @Test
     void addTaskProposalWithObservationMarksWaitingWriteConfirm() {
         // V3.1：内层 actionType=ADD_LEARNING_TASK（外层仍是 SUGGEST_WRITE，双层同名字段分层语义）
         when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
@@ -476,17 +533,23 @@ class LearningAgentRuntimeTests {
     void renameProposalWithUnknownActionTypeFailsRun() {
         // V3.3（Codex 评审收紧）：非空但不认识的 actionType（模型幻觉 DELETE/MOVE 等）→ FAILED 不生成提案，
         // 绝不回落 UPDATE_TASK_DONE（回落 + done 缺省 true = 误勾选任务）
+        Usage rejectedUsage = mockUsage(170, 17, 187);
         when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
                 .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
-                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
-                        .withInput(Map.of(
-                                "actionType", "DELETE_LEARNING_TASK",
-                                "taskTitle", "缓存击穿")));
+                .thenAnswer(invocation -> {
+                    invocation.getArgument(4, TokenUsageAccumulator.class).add(rejectedUsage);
+                    return AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                            .withInput(Map.of(
+                                    "actionType", "DELETE_LEARNING_TASK",
+                                    "taskTitle", "缓存击穿"));
+                });
         when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划"));
 
         AgentRunResult result = runtime.run(100L, 200L, "把缓存击穿任务删掉");
 
         assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
+        assertThat(result.totalTokens()).isEqualTo(187);
+        assertThat(result.usedSteps()).isEqualTo(2);
         AiAgentRun saved = captureRun();
         assertThat(saved.getErrorMessage()).contains("不支持的写动作类型");
         // C0.2：模型给的内部协议值只进日志，不进用户可见文案（原先这里断言的是"含 actionType 原文"）
@@ -494,6 +557,11 @@ class LearningAgentRuntimeTests {
         assertThat(result.pendingWriteAction()).isNull();
         // markFailed 终局：run 落 FAILED，不再产出 WAITING_WRITE_CONFIRM 提案（无 pendingWriteAction 落库）
         assertThat(saved.getContextJson()).doesNotContain("pendingWriteAction");
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps).hasSize(2);
+        assertThat(steps.get(1).getStatus()).isEqualTo("FAILED");
+        assertThat(steps.get(1).getInputTokens()).isEqualTo(170);
+        assertThat(steps.get(1).getOutputTokens()).isEqualTo(17);
     }
 
     private LearningPlans activePlan(Long id, String title) {
@@ -644,5 +712,13 @@ class LearningAgentRuntimeTests {
         ArgumentCaptor<AiAgentStep> captor = ArgumentCaptor.forClass(AiAgentStep.class);
         verify(stepMapper, atLeastOnce()).insert(captor.capture());
         return captor.getAllValues();
+    }
+
+    private static Usage mockUsage(int prompt, int completion, int total) {
+        Usage usage = mock(Usage.class);
+        when(usage.getPromptTokens()).thenReturn(prompt);
+        when(usage.getCompletionTokens()).thenReturn(completion);
+        when(usage.getTotalTokens()).thenReturn(total);
+        return usage;
     }
 }

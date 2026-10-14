@@ -6,6 +6,7 @@ import com.hailin.blogsystem.ai.memory.AiEpisodicMemoryRetrieveService;
 import com.hailin.blogsystem.ai.memory.AiMemoryRetrieveService;
 import com.hailin.blogsystem.ai.rag.ArticleRagSearchService;
 import com.hailin.blogsystem.config.BlogAiProperties;
+import com.hailin.blogsystem.entity.AiUserMemories;
 import com.hailin.blogsystem.entity.dto.ArticleRagContext;
 import com.hailin.blogsystem.entity.dto.ArticleRagSearchResult;
 import com.hailin.blogsystem.entity.dto.ArticleRagSearchStrategy;
@@ -13,6 +14,7 @@ import com.hailin.blogsystem.entity.dto.AgentStepActionType;
 import com.hailin.blogsystem.entity.dto.EpisodicMemoryRagContext;
 import com.hailin.blogsystem.entity.dto.MemoryRagContext;
 import com.hailin.blogsystem.entity.dto.PageContextDTO;
+import com.hailin.blogsystem.service.AiUserMemoryService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -36,6 +38,7 @@ class GeneralAgentActionExecutorTests {
     private AiMemoryRetrieveService aiMemoryRetrieveService;
     private AiEpisodicMemoryRetrieveService aiEpisodicMemoryRetrieveService;
     private ArticleRagSearchService articleRagSearchService;
+    private AiUserMemoryService aiUserMemoryService;
     private GeneralAgentActionExecutorImpl executor;
 
     @BeforeEach
@@ -43,11 +46,13 @@ class GeneralAgentActionExecutorTests {
         aiMemoryRetrieveService = mock(AiMemoryRetrieveService.class);
         aiEpisodicMemoryRetrieveService = mock(AiEpisodicMemoryRetrieveService.class);
         articleRagSearchService = mock(ArticleRagSearchService.class);
+        aiUserMemoryService = mock(AiUserMemoryService.class);
         executor = new GeneralAgentActionExecutorImpl(
                 aiMemoryRetrieveService,
                 aiEpisodicMemoryRetrieveService,
                 articleRagSearchService,
-                new BlogAiProperties()
+                new BlogAiProperties(),
+                aiUserMemoryService
         );
     }
 
@@ -92,6 +97,44 @@ class GeneralAgentActionExecutorTests {
         // 无检索词时默认「用户情况」召回，不炸 Loop
         assertThat(observation).contains("记忆摘要");
         verify(aiMemoryRetrieveService).retrieve(eq(100L), eq("用户情况"));
+    }
+
+    /**
+     * 常驻记忆通道：向量召回全空时也必须带出用户画像/偏好。
+     *
+     * 2026-10-13 线上回归——记忆向量仍留在旧 embedding 空间，与当前 query 向量近似正交
+     * （实测 cos≈0.0125），纯向量召回恒空，"你说说你所了解的我"只能答"我还没有关于你的
+     * 个人记忆记录"。常驻通道不依赖相似度，是这条链路的兜底。
+     */
+    @Test
+    void alwaysOnMemoriesSurviveEmptyVectorRecall() {
+        when(aiMemoryRetrieveService.retrieve(eq(100L), any())).thenReturn(List.of());
+        when(aiEpisodicMemoryRetrieveService.retrieveForPrompt(eq(100L), any(), any()))
+                .thenReturn(List.of());
+        when(aiUserMemoryService.listPromptMemories(eq(100L))).thenReturn(List.of(
+                alwaysMemory(1L, "PROFILE", "2028届计算机本科学生"),
+                alwaysMemory(2L, "PREFERENCE", "回答直接一点，不要铺垫")
+        ));
+
+        String observation = executor.execute(
+                AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY)
+                        .withInput(Map.of("question", "用户背景信息")),
+                100L,
+                null
+        ).summary();
+
+        assertThat(observation).contains("常驻记忆(PROFILE)");
+        assertThat(observation).contains("2028届计算机本科学生");
+        assertThat(observation).contains("常驻记忆(PREFERENCE)");
+        assertThat(observation).contains("回答直接一点，不要铺垫");
+    }
+
+    private static AiUserMemories alwaysMemory(Long id, String memoryType, String content) {
+        AiUserMemories memory = new AiUserMemories();
+        memory.setId(id);
+        memory.setMemoryType(memoryType);
+        memory.setContent(content);
+        return memory;
     }
 
     @Test

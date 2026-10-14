@@ -6,6 +6,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.AiStageTimer;
 import com.hailin.blogsystem.ai.TokenUsageAccumulator;
+import com.hailin.blogsystem.ai.billing.AiRequestBillingSupport;
 import com.hailin.blogsystem.ai.billing.BillingHandle;
 import com.hailin.blogsystem.ai.billing.ChatReserveCalculator;
 import com.hailin.blogsystem.ai.agent.AgentAnswerStreamException;
@@ -40,6 +41,7 @@ import com.hailin.blogsystem.ai.workflow.CreateArticleWorkflowHandler;
 import com.hailin.blogsystem.ai.workflow.LearningProgressHandoffResolver;
 import com.hailin.blogsystem.ai.workflow.WorkflowContextSupport;
 import com.hailin.blogsystem.ai.workflow.WorkflowHandlerRegistry;
+import com.hailin.blogsystem.ai.workflow.WorkflowRunManager;
 import com.hailin.blogsystem.entity.dto.AiWorkflowLearningPlanDTO;
 import com.hailin.blogsystem.ai.rag.ArticleRagPromptBuilder;
 import com.hailin.blogsystem.ai.rag.ArticleRagSearchService;
@@ -130,6 +132,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
     private final ObjectProvider<Tracer> tracerProvider;
     private final AiBillingService aiBillingService;
     private final ChatReserveCalculator chatReserveCalculator;
+    /** B2：Workflow 启动路径的计费（审计见 docs/计费覆盖审计.md） */
+    private final AiRequestBillingSupport billingSupport;
+    private final WorkflowRunManager workflowRunManager;
 
     private static final String ROLE_USER = "user";
     private static final String ROLE_ASSISTANT = "assistant";
@@ -408,7 +413,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         pageContext,
                         rawPageContextJson,
                         userId,
-                        sessionId
+                        sessionId,
+                        routeUsage
                 ));
             }
 
@@ -420,7 +426,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         pageContext,
                         rawPageContextJson,
                         userId,
-                        sessionId
+                        sessionId,
+                        routeUsage
                 ));
             }
 
@@ -434,7 +441,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                                 rawPageContextJson,
                                 userId,
                                 sessionId,
-                                requestId
+                                requestId,
+                                routeUsage
                         );
 
                 if (routed.isPresent()) {
@@ -462,7 +470,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                                 rawPageContextJson,
                                 userId,
                                 sessionId,
-                                requestId
+                                requestId,
+                                routeUsage
                         );
 
                 if (routed.isPresent()) {
@@ -479,7 +488,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         rawPageContextJson,
                         userId,
                         sessionId,
-                        requestId
+                        requestId,
+                        routeUsage
                 );
             }
 
@@ -492,7 +502,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         rawPageContextJson,
                         userId,
                         sessionId,
-                        requestId
+                        requestId,
+                        routeUsage
                 ));
             }
         }
@@ -656,14 +667,25 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                 ))
                 .build();
 
+        /*
+         * B3：编排路径计费预扣。
+         *
+         * 与 Agent 路径同一理由（放在流构建之前，余额不足才能返回 402）；
+         * 而 runOrchestrationBody 可能跑在准入 worker 线程上，所以 handle 在这里建好后传进去。
+         */
+        BillingHandle billingHandle = reserveOrchestrationRequest(userMessage.getId(), userId);
+        AtomicBoolean billed = new AtomicBoolean(false);
+
         Flux<AiChatEventVO> events = Flux.create(sink -> {
             if (taskRequest != null) {
                 // 权威准入：原子占用户名额 + 进有界池。submit 失败由 Reactor 转成流内错误（与 Agent 路径一致）
                 admission.submit(taskRequest, () -> runOrchestrationBody(
-                        sink, plan, sessionId, userId, pageContext, rawPageContextJson, routeUsage));
+                        sink, plan, sessionId, userId, pageContext, rawPageContextJson, routeUsage,
+                        billingHandle, billed));
             } else {
                 // 纯确定性计划：秒级完成，走快路径、不占长任务池
-                runOrchestrationBody(sink, plan, sessionId, userId, pageContext, rawPageContextJson, routeUsage);
+                runOrchestrationBody(sink, plan, sessionId, userId,
+                        pageContext, rawPageContextJson, routeUsage, billingHandle, billed);
             }
         });
 
@@ -686,7 +708,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             Long userId,
             PageContextDTO pageContext,
             String rawPageContextJson,
-            TokenUsageAccumulator routeUsage
+            TokenUsageAccumulator routeUsage,
+            BillingHandle billingHandle,
+            AtomicBoolean billed
     ) {
         // 计划事件：让前端先把"要做哪几件事"渲染出来，而不是等结果
         emitIfOpen(sink, AiChatEventVO.builder()
@@ -796,6 +820,15 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             if (needUpdate) {
                 updateById(assistantMessage);
             }
+
+            /*
+             * B3：按根 run 的子树总量结算——与上面 message.token_count 里的编排部分同源，
+             * 但不含分类器（分类器是平台开销，与聊天口径一致）。
+             */
+            billingSupport.close(billingHandle, taskOrchestrationService.subtreeTokens(outcome.agentRunId()));
+            billingSupport.bindResource(billingHandle, String.valueOf(outcome.agentRunId()));
+            billed.set(true);
+
             if (outcome.paused() && outcome.agentRunId() != null) {
                 try {
                     taskOrchestrationService.recordMessageRoutingTokens(
@@ -842,6 +875,11 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                     .eventData(eventData)
                     .build());
             completeIfOpen(sink);
+        } finally {
+            // B3：异常路径全额退回（与 Agent / 聊天同一政策）；正常路径上面已结算
+            if (!billed.get()) {
+                billingSupport.abort(billingHandle);
+            }
         }
     }
 
@@ -1340,6 +1378,16 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
         userMessage.setCreatedAt(LocalDateTime.now());
         save(userMessage);
 
+        /*
+         * B3：Agent 域计费预扣。
+         *
+         * 位置与聊天路径一致——**流构建之前、请求线程**：余额不足要能返回 HTTP 402，
+         * 而不是等 worker 里抛出来再落到"AI 助手暂时不可用"那句兜底文案
+         * （那是故障话术，会把「欠费」说成「系统坏了」）。
+         */
+        BillingHandle billingHandle = reserveAgentRequest(userMessage.getId(), userId);
+        AtomicBoolean billed = new AtomicBoolean(false);
+
         AiChatEventVO paramEvent = AiChatEventVO.builder()
                 .eventType(AiChatEventType.PARAM.getValue())
                 .eventData(Map.of(
@@ -1477,6 +1525,11 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         updateById(assistantMessage);
                     }
 
+                    // B3：按 Agent run 循环的真实用量结算（不含分类器，分类器算平台开销）
+                    billingSupport.close(billingHandle, result.totalTokens());
+                    billingSupport.bindResource(billingHandle, String.valueOf(result.agentRunId()));
+                    billed.set(true);
+
                     aiMemoryCandidateExtractorService.extractAfterChat(
                             userId,
                             sessionId,
@@ -1534,6 +1587,11 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                     AiMessages assistantMessage = saveStreamAssistantMessage(
                             sessionId, userId, rawPageContextJson, failureReply
                     );
+                    long routeTokens = routeUsage == null ? 0 : routeUsage.getTotalTokens();
+                    if (routeTokens > 0) {
+                        assistantMessage.setTokenCount(routeTokens);
+                        updateById(assistantMessage);
+                    }
                     Map<String, Object> eventData = new HashMap<>();
                     eventData.put("session", AiSessionVO.from(getOwnedSession(sessionId, userId)));
                     eventData.put("assistantMessage", AiMessageVO.from(assistantMessage));
@@ -1545,6 +1603,12 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                             .eventData(eventData)
                             .build());
                     completeIfOpen(sink);
+                } finally {
+                    // B3：异常路径全额退回（用户没拿到回答，与聊天同一政策）；
+                    // 正常路径已在上面结算过，billed=true 时这里空转
+                    if (!billed.get()) {
+                        billingSupport.abort(billingHandle);
+                    }
                 }
             });
         });
@@ -1571,7 +1635,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             String message,
             String rawPageContextJson,
             Long userId,
-            Long sessionId
+            Long sessionId,
+            TokenUsageAccumulator routeUsage
     ) {
         AiMessages userMessage = new AiMessages();
         userMessage.setSessionId(sessionId);
@@ -1589,6 +1654,10 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                 rawPageContextJson,
                 reply
         );
+        if (routeUsage != null && routeUsage.getTotalTokens() > 0) {
+            assistantMessage.setTokenCount((long) routeUsage.getTotalTokens());
+            updateById(assistantMessage);
+        }
 
         AiSessions updatedSession = getOwnedSession(sessionId, userId);
 
@@ -1620,7 +1689,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             PageContextDTO pageContext,
             String rawPageContextJson,
             Long userId,
-            Long sessionId
+            Long sessionId,
+            TokenUsageAccumulator routeUsage
     ) {
         // 准入前置：放在方法最开头——既在任何 Flux 构造之前（响应一旦按 200 SSE 提交，
         // 状态码就改不动了），也在下面 save(userMessage) 之前（否则拒绝后会留下孤立消息）。
@@ -1658,7 +1728,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
 
         Flux<AiChatEventVO> workflowEvents = Flux.create(sink ->
                 admission.submit(workflowTaskRequest, () -> {
+                    BillingHandle billingHandle = null;
                     try {
+                        billingHandle = reserveWorkflowStart(userMessage.getId(), userId);
                         AtomicReference<Long> workflowRunId = new AtomicReference<>();
                         AiWorkflowStepEmitter emitter = new AiWorkflowStepEmitter() {
                             @Override
@@ -1713,6 +1785,10 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                                 buildOptimizeWorkflowAssistantContent(workflow),
                                 Long.valueOf(workflow.getId())
                         );
+                        if (routeUsage != null && routeUsage.getTotalTokens() > 0) {
+                            assistantMessage.setTokenCount((long) routeUsage.getTotalTokens());
+                            updateById(assistantMessage);
+                        }
 
                         AiSessions updatedSession = getOwnedSession(sessionId, userId);
 
@@ -1730,7 +1806,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         completeIfOpen(sink);
                     } catch (Throwable e) {
                         emitRejectedOrError(sink, sessionId, userId, rawPageContextJson,
-                                AiWorkflowType.OPTIMIZE_ARTICLE.name(), e);
+                                AiWorkflowType.OPTIMIZE_ARTICLE.name(), e, routeUsage);
+                    } finally {
+                        settleWorkflowStartBilling(billingHandle, sessionId, userId);
                     }
                 })
         );
@@ -1769,7 +1847,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             Long userId,
             String rawPageContextJson,
             String workflowType,
-            Throwable e
+            Throwable e,
+            TokenUsageAccumulator routeUsage
     ) {
         String friendly = workflowHandlerRegistry.get(workflowType).buildRejectedMessage(e);
         if (friendly == null) {
@@ -1786,6 +1865,10 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                 friendly,
                 null
         );
+        if (routeUsage != null && routeUsage.getTotalTokens() > 0) {
+            assistantMessage.setTokenCount((long) routeUsage.getTotalTokens());
+            updateById(assistantMessage);
+        }
 
         AiSessions updatedSession = getOwnedSession(sessionId, userId);
 
@@ -1809,7 +1892,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             String rawPageContextJson,
             Long userId,
             Long sessionId,
-            String requestId
+            String requestId,
+            TokenUsageAccumulator routeUsage
     ) {
         // 分类器在理解阶段就从「该用户真实计划列表」里选定了目标（learningPlanId 为后端映射所得，
         // 越界已在分类器内丢弃）。命中即直达，不再做字符串匹配——这是「说了 c++ 却被反问选哪个」的修复点。
@@ -1823,7 +1907,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                     rawPageContextJson,
                     userId,
                     sessionId,
-                    requestId
+                    requestId,
+                    routeUsage
             ));
         }
 
@@ -1837,7 +1922,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                     rawPageContextJson,
                     userId,
                     sessionId,
-                    requestId
+                    requestId,
+                    routeUsage
             ));
         }
 
@@ -1854,7 +1940,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                             rawPageContextJson,
                             userId,
                             sessionId,
-                            requestId
+                            requestId,
+                            routeUsage
                     )
             ));
         }
@@ -1869,7 +1956,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                     rawPageContextJson,
                     userId,
                     sessionId,
-                    requestId
+                    requestId,
+                    routeUsage
             ));
         }
         if (actives.size() > 1) {
@@ -1884,7 +1972,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                     rawPageContextJson,
                     userId,
                     sessionId,
-                    requestId
+                    requestId,
+                    routeUsage
             ));
         }
 
@@ -1899,7 +1988,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             String rawPageContextJson,
             Long userId,
             Long sessionId,
-            String requestId
+            String requestId,
+            TokenUsageAccumulator routeUsage
     ) {
         // 同 routeLearningAssistWorkflow：分类器选定的权威计划优先，命中即直达，不再做字符串匹配
         LearningPlans authoritative = loadAuthoritativePlan(userId, intent);
@@ -1912,7 +2002,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                     rawPageContextJson,
                     userId,
                     sessionId,
-                    requestId
+                    requestId,
+                    routeUsage
             ));
         }
 
@@ -1926,7 +2017,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                     rawPageContextJson,
                     userId,
                     sessionId,
-                    requestId
+                    requestId,
+                    routeUsage
             ));
         }
 
@@ -1952,7 +2044,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                             rawPageContextJson,
                             userId,
                             sessionId,
-                            requestId
+                            requestId,
+                            routeUsage
                     )
             ));
         }
@@ -1967,7 +2060,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                     rawPageContextJson,
                     userId,
                     sessionId,
-                    requestId
+                    requestId,
+                    routeUsage
             ));
         }
         if (actives.size() > 1) {
@@ -1982,7 +2076,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                     rawPageContextJson,
                     userId,
                     sessionId,
-                    requestId
+                    requestId,
+                    routeUsage
             ));
         }
 
@@ -2137,13 +2232,87 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                 .toList();
     }
 
+    /**
+     * B2：Workflow **启动**路径的预扣（审计与方案见 docs/计费覆盖审计.md）。
+     *
+     * <p>bizId 用用户消息 id：启动请求此刻唯一已落库、能标识「这次调用」的记录就是它，
+     * 与普通聊天同一个思路（那边也用 userMessageId）。
+     */
+    private BillingHandle reserveWorkflowStart(Long userMessageId, Long userId) {
+        return billingSupport.reserve(
+                AiRequestBillingSupport.BIZ_WORKFLOW_ACTION,
+                "WF:START:" + userMessageId,
+                userId);
+    }
+
+    /**
+     * B3：Agent 域（学习 / 文章 / 通用 / 钱包）的预扣。
+     *
+     * <p>bizId 与聊天、Workflow 启动同一个键族（都落在「这次用户消息」上），对账时能直接对到那条消息。
+     */
+    private BillingHandle reserveAgentRequest(Long userMessageId, Long userId) {
+        return billingSupport.reserve(
+                AiRequestBillingSupport.BIZ_AGENT,
+                "AG:" + userMessageId,
+                userId);
+    }
+
+    /** B3：任务编排（多目标：写动作 + 分析）的预扣。 */
+    private BillingHandle reserveOrchestrationRequest(Long userMessageId, Long userId) {
+        return billingSupport.reserve(
+                AiRequestBillingSupport.BIZ_AGENT,
+                "TASK:" + userMessageId,
+                userId);
+    }
+
+    /**
+     * B2：Workflow **启动**路径的结算。
+     *
+     * <p>与 approve / retry 的差别：那条路径跨请求，必须用 token 差量；
+     * 这里 run 是本次请求新建的，run 上的全量就是本次用量。
+     *
+     * <p>runId 从 session 的 activeWorkflowRunId 取，而不是去接 create 的返回值——
+     * 五个启动分支的局部变量结构并不一致（两个自己持有 AtomicReference、
+     * 三个共用 {@code buildLearningWorkflowEmitter}），统一从 session 取，
+     * 每处只需改两行，不会因为漏改某个分支而静默免费。
+     *
+     * <p>取不到 run（create 没成功）→ 全额退：没建起来就没有产出。
+     */
+    private void settleWorkflowStartBilling(BillingHandle handle, Long sessionId, Long userId) {
+        if (handle == null) {
+            return;
+        }
+        try {
+            AiSessions session = getOwnedSession(sessionId, userId);
+            Long runId = session == null ? null : session.getActiveWorkflowRunId();
+            if (runId == null) {
+                billingSupport.abort(handle);
+                return;
+            }
+            AiWorkflowRun run = workflowRunManager.getOwnedRun(runId, userId);
+            // 观测字段：从计费单能反查回 run（真流程探针抓到过这里漏写）
+            billingSupport.bindResource(handle, String.valueOf(runId));
+            billingSupport.close(handle,
+                    safeTokens(run.getInputTokens()), safeTokens(run.getOutputTokens()));
+        } catch (Exception e) {
+            log.warn("[BILLING] 启动 Workflow 的用量读取失败，按零消耗释放：sessionId={} orderNo={}",
+                    sessionId, handle.orderNo(), e);
+            billingSupport.abort(handle);
+        }
+    }
+
+    private long safeTokens(Integer tokens) {
+        return tokens == null ? 0L : tokens;
+    }
+
     private Flux<AiChatEventVO> streamCreateArticleWorkflowFromIntent(
             String message,
             AiIntent intent,
             PageContextDTO pageContext,
             String rawPageContextJson,
             Long userId,
-            Long sessionId
+            Long sessionId,
+            TokenUsageAccumulator routeUsage
     ) {
         // 准入前置：放在方法最开头——既在任何 Flux 构造之前（响应一旦按 200 SSE 提交，
         // 状态码就改不动了），也在下面 save(userMessage) 之前（否则拒绝后会留下孤立消息）。
@@ -2193,7 +2362,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
 
         Flux<AiChatEventVO> workflowEvents = Flux.create(sink ->
                 admission.submit(workflowTaskRequest, () -> {
+                    BillingHandle billingHandle = null;
                     try {
+                        billingHandle = reserveWorkflowStart(userMessage.getId(), userId);
                         AtomicReference<Long> workflowRunId = new AtomicReference<>();
                         AiWorkflowStepEmitter emitter = new AiWorkflowStepEmitter() {
                             @Override
@@ -2249,6 +2420,10 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                                 buildWorkflowAssistantContent(workflow),
                                 Long.valueOf(workflow.getId())
                         );
+                        if (routeUsage != null && routeUsage.getTotalTokens() > 0) {
+                            assistantMessage.setTokenCount((long) routeUsage.getTotalTokens());
+                            updateById(assistantMessage);
+                        }
 
                         AiSessions updatedSession = getOwnedSession(sessionId, userId);
 
@@ -2266,7 +2441,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         completeIfOpen(sink);
                     } catch (Throwable e) {
                         emitRejectedOrError(sink, sessionId, userId, rawPageContextJson,
-                                AiWorkflowType.CREATE_ARTICLE.name(), e);
+                                AiWorkflowType.CREATE_ARTICLE.name(), e, routeUsage);
+                    } finally {
+                        settleWorkflowStartBilling(billingHandle, sessionId, userId);
                     }
                 })
         );
@@ -2282,7 +2459,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             String rawPageContextJson,
             Long userId,
             Long sessionId,
-            String requestId
+            String requestId,
+            TokenUsageAccumulator routeUsage
     ) {
         // 准入前置：放在方法最开头——既在任何 Flux 构造之前（响应一旦按 200 SSE 提交，
         // 状态码就改不动了），也在下面 save(userMessage) 之前（否则拒绝后会留下孤立消息）。
@@ -2317,7 +2495,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
 
         Flux<AiChatEventVO> workflowEvents = Flux.create(sink ->
                 admission.submit(workflowTaskRequest, () -> {
+                    BillingHandle billingHandle = null;
                     try {
+                        billingHandle = reserveWorkflowStart(userMessage.getId(), userId);
                         AiWorkflowStepEmitter emitter = buildLearningWorkflowEmitter(AiWorkflowType.LEARNING_PLAN, sink);
 
                         // ServiceImpl 的 create 内部会绑定 session 的 activeWorkflowRunId
@@ -2331,6 +2511,10 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                                 buildLearningPlanAssistantContent(workflow),
                                 Long.valueOf(workflow.getId())
                         );
+                        if (routeUsage != null && routeUsage.getTotalTokens() > 0) {
+                            assistantMessage.setTokenCount((long) routeUsage.getTotalTokens());
+                            updateById(assistantMessage);
+                        }
 
                         AiSessions updatedSession = getOwnedSession(sessionId, userId);
 
@@ -2348,7 +2532,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         completeIfOpen(sink);
                     } catch (Throwable e) {
                         emitRejectedOrError(sink, sessionId, userId, rawPageContextJson,
-                                AiWorkflowType.LEARNING_PLAN.name(), e);
+                                AiWorkflowType.LEARNING_PLAN.name(), e, routeUsage);
+                    } finally {
+                        settleWorkflowStartBilling(billingHandle, sessionId, userId);
                     }
                 })
         );
@@ -2407,7 +2593,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             String rawPageContextJson,
             Long userId,
             Long sessionId,
-            String requestId
+            String requestId,
+            TokenUsageAccumulator routeUsage
     ) {
         // 准入前置：放在方法最开头——既在任何 Flux 构造之前（响应一旦按 200 SSE 提交，
         // 状态码就改不动了），也在下面 save(userMessage) 之前（否则拒绝后会留下孤立消息）。
@@ -2451,7 +2638,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
 
         Flux<AiChatEventVO> workflowEvents = Flux.create(sink ->
                 admission.submit(workflowTaskRequest, () -> {
+                    BillingHandle billingHandle = null;
                     try {
+                        billingHandle = reserveWorkflowStart(userMessage.getId(), userId);
                         AiWorkflowStepEmitter emitter = buildLearningWorkflowEmitter(AiWorkflowType.LEARNING_PROGRESS, sink);
 
                         // ServiceImpl 的 create 内部会绑定 session 的 activeWorkflowRunId
@@ -2465,6 +2654,10 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                                 buildLearningProgressAssistantContent(workflow),
                                 Long.valueOf(workflow.getId())
                         );
+                        if (routeUsage != null && routeUsage.getTotalTokens() > 0) {
+                            assistantMessage.setTokenCount((long) routeUsage.getTotalTokens());
+                            updateById(assistantMessage);
+                        }
 
                         AiSessions updatedSession = getOwnedSession(sessionId, userId);
 
@@ -2482,7 +2675,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         completeIfOpen(sink);
                     } catch (Throwable e) {
                         emitRejectedOrError(sink, sessionId, userId, rawPageContextJson,
-                                AiWorkflowType.LEARNING_PROGRESS.name(), e);
+                                AiWorkflowType.LEARNING_PROGRESS.name(), e, routeUsage);
+                    } finally {
+                        settleWorkflowStartBilling(billingHandle, sessionId, userId);
                     }
                 })
         );
@@ -2499,7 +2694,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             String rawPageContextJson,
             Long userId,
             Long sessionId,
-            String requestId
+            String requestId,
+            TokenUsageAccumulator routeUsage
     ) {
         // 准入前置：放在方法最开头——既在任何 Flux 构造之前（响应一旦按 200 SSE 提交，
         // 状态码就改不动了），也在下面 save(userMessage) 之前（否则拒绝后会留下孤立消息）。
@@ -2536,7 +2732,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
 
         Flux<AiChatEventVO> workflowEvents = Flux.create(sink ->
                 admission.submit(workflowTaskRequest, () -> {
+                    BillingHandle billingHandle = null;
                     try {
+                        billingHandle = reserveWorkflowStart(userMessage.getId(), userId);
                         AiWorkflowStepEmitter emitter = buildLearningWorkflowEmitter(AiWorkflowType.LEARNING_ASSIST, sink);
 
                         // ServiceImpl 的 create 内部会绑定 session 的 activeWorkflowRunId
@@ -2550,6 +2748,10 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                                 buildLearningAssistAssistantContent(workflow),
                                 Long.valueOf(workflow.getId())
                         );
+                        if (routeUsage != null && routeUsage.getTotalTokens() > 0) {
+                            assistantMessage.setTokenCount((long) routeUsage.getTotalTokens());
+                            updateById(assistantMessage);
+                        }
 
                         AiSessions updatedSession = getOwnedSession(sessionId, userId);
 
@@ -2567,7 +2769,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         completeIfOpen(sink);
                     } catch (Throwable e) {
                         emitRejectedOrError(sink, sessionId, userId, rawPageContextJson,
-                                AiWorkflowType.LEARNING_ASSIST.name(), e);
+                                AiWorkflowType.LEARNING_ASSIST.name(), e, routeUsage);
+                    } finally {
+                        settleWorkflowStartBilling(billingHandle, sessionId, userId);
                     }
                 })
         );
@@ -2891,7 +3095,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         pageContext,
                         rawPageContextJson,
                         userId,
-                        sessionId
+                        sessionId,
+                        routeUsage
                 );
             }
 
@@ -2905,7 +3110,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         pageContext,
                         rawPageContextJson,
                         userId,
-                        sessionId
+                        sessionId,
+                        routeUsage
                 );
             }
 
@@ -2919,7 +3125,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                                 rawPageContextJson,
                                 userId,
                                 sessionId,
-                                requestId
+                                requestId,
+                                routeUsage
                         );
 
                 if (routed.isPresent()) {
@@ -2952,7 +3159,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                                 rawPageContextJson,
                                 userId,
                                 sessionId,
-                                requestId
+                                requestId,
+                                routeUsage
                         );
 
                 if (routed.isPresent()) {
@@ -2973,7 +3181,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         rawPageContextJson,
                         userId,
                         sessionId,
-                        requestId
+                        requestId,
+                        routeUsage
                 );
             }
 
@@ -2988,7 +3197,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                         rawPageContextJson,
                         userId,
                         sessionId,
-                        requestId
+                        requestId,
+                        routeUsage
                 );
             }
         }
@@ -3074,6 +3284,17 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
 
         appendExtraPromptContext(prompt, extraPromptContext);
 
+        /*
+         * B4：这条回退分支与主聊天路径**同构**（同一个 streamChat、同样落 token_count），
+         * 但此前漏了计费——审计见 docs/计费覆盖审计.md。
+         * 口径与主路径一致：只按正文生成（replyUsage）计费，分类器算平台开销。
+         */
+        BillingHandle billingHandle = aiBillingService.reserve(
+                ChatReserveCalculator.BIZ_TYPE,
+                String.valueOf(userMessage.getId()),
+                userId,
+                chatReserveCalculator.estimate(prompt.getFinalPromptContext()));
+
         StringBuilder fullReply = new StringBuilder();
 
         AiSessions updatedSession = getOwnedSession(sessionId, userId);
@@ -3086,9 +3307,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                 ))
                 .build();
 
-        // 复用调用方传来的累加器，让意图分类的消耗也算进这条消息；没传就自己开一个
-        TokenUsageAccumulator usage = routeUsage == null ? new TokenUsageAccumulator() : routeUsage;
-        Flux<AiChatEventVO> dataEvents = aiModelService.streamChat(prompt, requestId, usage)
+        // 正文用量单独记（计费依据）；分类器那份仍并进 token_count 供成本观测
+        TokenUsageAccumulator replyUsage = new TokenUsageAccumulator();
+        Flux<AiChatEventVO> dataEvents = aiModelService.streamChat(prompt, requestId, replyUsage)
                 .doOnNext(fullReply::append)
                 .map(chunk -> AiChatEventVO.builder()
                         .eventType(AiChatEventType.DATA.getValue())
@@ -3098,11 +3319,17 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
         Mono<AiChatEventVO> stopEvent = Mono.fromSupplier(() -> {
             AiMessages assistantMessage = saveStreamAssistantMessage(
                     sessionId, userId, rawPageContextJson, fullReply.toString());
-            //token 用量落库（含工具调用多轮累计）
-            if (usage.getTotalTokens() > 0) {
-                assistantMessage.setTokenCount((long) usage.getTotalTokens());
+            //token 用量落库（含工具调用多轮累计 + 意图分类）
+            long messageTokens = replyUsage.getTotalTokens()
+                    + (routeUsage == null ? 0 : routeUsage.getTotalTokens());
+            if (messageTokens > 0) {
+                assistantMessage.setTokenCount(messageTokens);
                 updateById(assistantMessage);
             }
+
+            // 结算：按正文生成的实际用量扣，退回预扣差额
+            aiBillingService.settle(billingHandle, replyUsage);
+            aiBillingService.bindResource(billingHandle, String.valueOf(assistantMessage.getId()));
 
             AiSessions updated = getOwnedSession(sessionId, userId);
 
@@ -3121,7 +3348,16 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                 Flux.just(paramEvent),
                 dataEvents,
                 stopEvent
-        ).doFinally(signalType -> aiToolActionRegistry.clear(requestId));
+        ).doFinally(signalType -> {
+            /*
+             * 计费释放：取消 / 流异常时全额退回预扣（与主聊天路径同一政策）。
+             * 正常完成时结算已经做过，release 会因 status 不再是 RESERVED 而空转。
+             */
+            if (signalType == SignalType.CANCEL || signalType == SignalType.ON_ERROR) {
+                aiBillingService.release(billingHandle);
+            }
+            aiToolActionRegistry.clear(requestId);
+        });
     }
 
     //Agent 决策追踪：只做观测，记录失败绝不能影响正常聊天和 Workflow

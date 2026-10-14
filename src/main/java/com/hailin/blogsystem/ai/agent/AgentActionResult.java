@@ -13,13 +13,13 @@ import java.util.Map;
  * 解析中文 observation（脆弱，且与项目「不让 LLM 改写的摘要成为权威文本」的既有原则冲突），
  * 或者把执行结果本身变成结构化的。这里是后者。
  *
- * <p><b>兼容策略（第一版只改文章域）</b>：{@code summary} 仍是现有的展示文本——
+ * <p><b>兼容策略（按领域迁移）</b>：{@code summary} 仍是现有的展示文本——
  * 历史 {@code outputJson.summary}、开发者面板、观察流**全部不变**；
- * {@code payload} 是新增的结构化事实，第一版只由文章域填充，其余域返回空 map。
- * 所以这次迁移对学习 / 通用 / 钱包域是**零行为变更**。
+ * {@code payload} 是新增的结构化事实，文章域与学习域逐步填充，其余域仍可返回空 map。
+ * 没有 payload 的旧执行器不会被状态对象通过解析 summary 的方式反向兼容。
  *
- * <p><b>它不是给 LLM 看的</b>：payload 只喂 Reducer。模型仍只看裁剪后的展示文本，
- * 直到 P2.2 后半段把决策上下文切到 {@code ArticleAgentState}。
+ * <p><b>payload 不是原始 prompt 材料</b>：它只交给领域 Reducer，Reducer 再按槽位预算
+ * 生成决策上下文；模型不会直接收到完整 payload 或原始展示摘要。
  *
  * @param summary 展示摘要（原 observation 文本；null 视为空串）
  * @param payload 结构化事实；无结构化事实时为空 map（不是 null）
@@ -35,7 +35,7 @@ public record AgentActionResult(String summary, Map<String, Object> payload) {
                 : Collections.unmodifiableMap(new LinkedHashMap<>(payload));
     }
 
-    /** 只有展示文本——尚未提供结构化事实的动作（学习域 / 通用域 / 钱包域，以及文章域的失败分支） */
+    /** 只有展示文本——尚未提供结构化事实的动作（通用域 / 钱包域，以及文章域的失败分支） */
     public static AgentActionResult of(String summary) {
         return new AgentActionResult(summary, Map.of());
     }

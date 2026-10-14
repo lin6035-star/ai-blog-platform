@@ -64,19 +64,45 @@ public class MemoryRagReindexService {
                         .eq(AiUserMemories::getEnabled, 1));
         List<AiEpisodicMemories> episodicMemories = aiEpisodicMemoryMapper.selectList(null);
 
+        int failed = 0;
         for (AiUserMemories memory : userMemories) {
-            aiMemoryIndexService.indexMemory(memory);
+            if (!reindexOne(() -> aiMemoryIndexService.indexMemory(memory),
+                    USER_MEMORY_SOURCE, memory.getId())) {
+                failed++;
+            }
         }
         for (AiEpisodicMemories memory : episodicMemories) {
-            aiEpisodicMemoryIndexService.indexMemory(memory);
+            if (!reindexOne(() -> aiEpisodicMemoryIndexService.indexMemory(memory),
+                    EPISODIC_MEMORY_SOURCE, memory.getId())) {
+                failed++;
+            }
         }
 
         int purged = purgeOrphans(USER_MEMORY_SOURCE, this::userMemoryStillActive)
                 + purgeOrphans(EPISODIC_MEMORY_SOURCE, this::episodicMemoryStillExists);
 
-        log.info("[MEMORY-REINDEX] 记忆向量重刷完成：userMemories={}, episodicMemories={}, purgedOrphans={}",
-                userMemories.size(), episodicMemories.size(), purged);
-        return new ReindexOutcome(userMemories.size(), episodicMemories.size(), purged);
+        log.info("[MEMORY-REINDEX] 记忆向量重刷完成：userMemories={}, episodicMemories={}, purgedOrphans={}, failed={}",
+                userMemories.size(), episodicMemories.size(), purged, failed);
+        return new ReindexOutcome(userMemories.size(), episodicMemories.size(), purged, failed);
+    }
+
+    /**
+     * 单条重刷 + 异常隔离。
+     *
+     * <p>{@code indexMemory} 内部是「先按 memoryId 删旧文档、再写入」，**不是事务**：
+     * 一条失败（限流 / 超时 / 供应商异常）会中断整个循环，而失败的那条**已经删了却没重建**
+     * —— MySQL 还在、ES 已无，表现就是「这条记忆再也召回不到」，且没有任何机制能发现。
+     * 所以单条失败只跳过并计数，其余照常重刷；失败项重跑本接口即可补齐（幂等）。
+     */
+    private boolean reindexOne(Runnable action, String source, Long memoryId) {
+        try {
+            action.run();
+            return true;
+        } catch (Exception e) {
+            log.warn("[MEMORY-REINDEX] 单条重刷失败已跳过，重跑本接口可补齐：source={}, memoryId={}",
+                    source, memoryId, e);
+            return false;
+        }
     }
 
     /**
@@ -159,7 +185,12 @@ public class MemoryRagReindexService {
         }
     }
 
-    /** 重刷统计；接口返回体不引入新的前端协议。 */
-    public record ReindexOutcome(int userMemories, int episodicMemories, int purgedOrphans) {
+    /**
+     * 重刷统计；接口返回体不引入新的前端协议。
+     *
+     * <p>{@code failed} = 单条重刷失败数（见 {@link #reindexOne}）。**非 0 就说明有记忆
+     * 在 ES 里缺失**，重跑一次接口即可补齐——不要只看 200 就当成功。
+     */
+    public record ReindexOutcome(int userMemories, int episodicMemories, int purgedOrphans, int failed) {
     }
 }

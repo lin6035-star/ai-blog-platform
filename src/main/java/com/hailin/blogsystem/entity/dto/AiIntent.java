@@ -1,5 +1,6 @@
 package com.hailin.blogsystem.entity.dto;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import lombok.Data;
 
 import java.util.List;
@@ -42,6 +43,27 @@ public class AiIntent {
     private String categoryName;  //文章指定类型，默认为随笔
     private String requirements;  //用户补充要求
 
+    /**
+     * 搜索关键词（ARTICLE_SEARCH）。
+     *
+     * <p>⚠️ <b>JSON 字段名与 Java 字段名不一致，靠 {@link JsonAlias} 兜住</b>：
+     * 分类器提示词的指令区要求模型输出 {@code keyword}（见 {@code ClassifierPromptBlocks}），
+     * 而这个字段叫 {@code keyWord}。没有别名时 Jackson 把它当**未知字段静默丢弃**
+     * （Boot 默认 {@code FAIL_ON_UNKNOWN_PROPERTIES=false}），于是它**一直是 null**。两个后果：
+     * <ul>
+     *   <li>{@code ArticleRagSearchService.getArticleSearchKeyword} 用不上分类器给的关键词，
+     *       只能拿原问题去套停用词表——"有没有关于 Java 的文章"被削成 "Java"（无区分度）</li>
+     *   <li>{@code buildMysqlFallbackContexts} 见到 null 直接返回空，
+     *       <b>整条 MySQL 兜底从未执行过</b></li>
+     * </ul>
+     *
+     * <p>保留 {@code keyWord} 作为主名、{@code keyword} 作为别名，是只做加法的兼容写法
+     * （两个拼写都能接住）。<b>不要"顺手"删掉这个注解</b>——删了会静默退回到上面的状态。
+     *
+     * <p>⚠️ 还有一半没修：提示词的**输出示例**里没有 {@code keyword} 字段（只有指令区提了），
+     * 模型未必会主动输出。若实测仍是 null，需要在示例里补上——那属于改 prompt，要走评测门。
+     */
+    @JsonAlias("keyword")
     private String keyWord;
 
     private String learningPlanRef;  //学习计划名称或关键词，只能来自用户原话

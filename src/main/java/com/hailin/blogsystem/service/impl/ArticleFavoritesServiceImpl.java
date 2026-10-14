@@ -8,12 +8,14 @@ import com.hailin.blogsystem.component.UserSetCache;
 import com.hailin.blogsystem.constants.RedisConstants;
 import com.hailin.blogsystem.entity.ArticleFavorites;
 import com.hailin.blogsystem.entity.Articles;
+import com.hailin.blogsystem.entity.NotificationType;
 import com.hailin.blogsystem.entity.dto.ArticleInteractionAction;
 import com.hailin.blogsystem.entity.dto.ArticleInteractionResult;
 import com.hailin.blogsystem.entity.dto.ArticleInteractionResultCode;
 import com.hailin.blogsystem.mapper.ArticleFavoritesMapper;
 import com.hailin.blogsystem.mapper.ArticlesMapper;
 import com.hailin.blogsystem.service.ArticleFavoritesService;
+import com.hailin.blogsystem.service.NotificationService;
 import com.hailin.blogsystem.utils.UserContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -34,6 +36,7 @@ public class ArticleFavoritesServiceImpl extends ServiceImpl<ArticleFavoritesMap
     private final UserSetCache userSetCache;
     private final DelayedCacheEvictor delayedCacheEvictor;
     private final AfterCommitExecutor afterCommitExecutor;
+    private final NotificationService notificationService;
 
     @Override  //1.收藏文章
     @Transactional
@@ -55,7 +58,9 @@ public class ArticleFavoritesServiceImpl extends ServiceImpl<ArticleFavoritesMap
     @Override
     @Transactional
     public ArticleInteractionResult favoriteArticle(Long userId, Long articleId) {
-        if (articlesMapper.selectById(articleId) == null) {
+        // 同点赞：接住实体而不是只判 null——通知要拿文章作者当接收者
+        Articles article = articlesMapper.selectById(articleId);
+        if (article == null) {
             return ArticleInteractionResult.failure(
                     ArticleInteractionAction.FAVORITE_ARTICLE,
                     ArticleInteractionResultCode.TARGET_NOT_FOUND,
@@ -109,6 +114,14 @@ public class ArticleFavoritesServiceImpl extends ServiceImpl<ArticleFavoritesMap
                 RedisConstants.ARTICLE_FAVORITED_USER_KEY_PREFIX + userId, String.valueOf(articleId));
 
         evictArticleDetailCache(articleId);
+
+        /*
+         * 通知文章作者。与业务同事务；走到这里一定是 APPLIED
+         * （重复收藏的两个分支都在上面 return 了）。
+         */
+        notificationService.notify(article.getAuthorId(), userId,
+                NotificationType.ARTICLE_FAVORITED, articleId, articleId);
+
         return ArticleInteractionResult.success(
                 ArticleInteractionAction.FAVORITE_ARTICLE,
                 ArticleInteractionResultCode.APPLIED,

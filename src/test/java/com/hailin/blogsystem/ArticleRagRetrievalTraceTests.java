@@ -58,7 +58,9 @@ class ArticleRagRetrievalTraceTests {
 
         when(retrieveService.retrieve("有没有关于 Redis 缓存的文章")).thenReturn(List.of(vector));
         when(keywordRetriever.retrieve("Redis 缓存")).thenReturn(List.of(keyword));
-        when(ranker.rankWithEvidence("Redis 缓存", merged)).thenReturn(modelResult(ranked, 0.90D));
+        // rerank 收到的是**完整问题**，不是削出来的关键词（见 ArticleRagSearchService 的说明）
+        when(ranker.rankWithEvidence("有没有关于 Redis 缓存的文章", merged))
+                .thenReturn(modelResult(ranked, 0.90D));
         when(articlesService.listByIds(List.of(2L, 1L))).thenReturn(publishedArticles(2L, 1L));
 
         var result = searchService.search("有没有关于 Redis 缓存的文章", intent);
@@ -149,9 +151,9 @@ class ArticleRagRetrievalTraceTests {
         when(retrieveService.retrieve("怎么防止库存超卖")).thenReturn(List.of(rejectedVector));
         when(keywordRetriever.retrieve("库存超卖")).thenReturn(List.of());
         when(keywordRetriever.retrieveFallback("库存超卖")).thenReturn(List.of(acceptedFallback));
-        when(ranker.rankWithEvidence("库存超卖", List.of(rejectedVector)))
+        when(ranker.rankWithEvidence("怎么防止库存超卖", List.of(rejectedVector)))
                 .thenReturn(modelResult(List.of(rejectedVector), 0.40D));
-        when(ranker.rankWithEvidence("库存超卖", List.of(rejectedVector, acceptedFallback)))
+        when(ranker.rankWithEvidence("怎么防止库存超卖", List.of(rejectedVector, acceptedFallback)))
                 .thenReturn(modelResult(List.of(acceptedFallback), 0.90D));
         when(articlesService.listByIds(List.of(2L))).thenReturn(publishedArticles(2L));
 

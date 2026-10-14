@@ -32,7 +32,7 @@ public class ArticleRagRelevanceGate {
             Reason reason;
             if (!enabled) {
                 reason = Reason.ACCEPT_GATE_DISABLED;
-            } else if (hasExactTitleEvidence(lexicalQuery, candidate.context())) {
+            } else if (hasTitleEvidence(lexicalQuery, candidate.context())) {
                 reason = Reason.ACCEPT_STRONG_LEXICAL;
             } else if (rankResult.status() == ArticleRagRankResult.Status.MODEL_APPLIED
                     && candidate.relevanceScore() != null
@@ -55,10 +55,50 @@ public class ArticleRagRelevanceGate {
         return new Result(accepted, decisions);
     }
 
-    private boolean hasExactTitleEvidence(String lexicalQuery, ArticleRagContext context) {
-        String query = normalize(lexicalQuery);
+    /**
+     * 标题证据：**这个词组是不是这篇文章的主题**。
+     *
+     * <p>这是 Gate 里最可靠的一条放行通道，因为**标题是作者自己定的主题标签**——
+     * 它能把"主题就是它"和"顺带提到了它"分开，而 rerank 的分数做不到这件事。
+     *
+     * <p>实测（2026-10-13，问"有没有关于缓存的文章"）：
+     * <ul>
+     *   <li>正文含"缓存"的 **10 篇**，标题含"缓存"的只有 **2 篇**——"提及"是"主题"的五倍。
+     *       而且《MySQL 核心机制》（顺带提了缓存）得 0.7182，**高于**《Redis 缓存工程化实践》
+     *       的 0.6786：两类的分数是**重叠**的，拿绝对分数切不开</li>
+     *   <li>同理"Java"：标题命中 4 篇，正文命中十几篇</li>
+     * </ul>
+     *
+     * <p>⚠️ <b>原来的判定是"标题与查询整串相等"（{@code equals}），等于从未生效过</b>
+     * ——谁会拿"缓存"两个字当标题？这里放宽成"标题包含这些词"。
+     *
+     * <p>按空白拆词后**逐词判断**，而不是整串 {@code contains}，原因有二：
+     * <ul>
+     *   <li>词序倒置（"缓存 Redis" vs 标题"Redis 缓存…"）整串匹配会漏，逐词不会</li>
+     *   <li>{@code lexicalQuery} 里可能残留标点（日志里出现过 {@code "Redis ？"}），
+     *       拆出的"？"经 {@link #normalize} 后是空串，应当**跳过而不是判失败**</li>
+     * </ul>
+     *
+     * <p>全空（比如查询只有标点）时返回 false —— 那不构成任何证据，该交回给分数门判断。
+     */
+    private boolean hasTitleEvidence(String lexicalQuery, ArticleRagContext context) {
         String title = normalize(context == null ? null : context.title());
-        return !query.isBlank() && query.equals(title);
+        if (title.isBlank() || lexicalQuery == null || lexicalQuery.isBlank()) {
+            return false;
+        }
+
+        boolean hasAnyToken = false;
+        for (String rawToken : lexicalQuery.trim().split("\\s+")) {
+            String token = normalize(rawToken);
+            if (token.isBlank()) {
+                continue;
+            }
+            hasAnyToken = true;
+            if (!title.contains(token)) {
+                return false;
+            }
+        }
+        return hasAnyToken;
     }
 
     private String normalize(String value) {

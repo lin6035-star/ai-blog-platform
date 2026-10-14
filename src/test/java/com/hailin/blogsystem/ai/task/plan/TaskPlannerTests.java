@@ -132,6 +132,85 @@ class TaskPlannerTests {
                 .isEqualTo(OnFailure.SKIP);
     }
 
+    // ==================== 2026-10-12：依赖引用格式放宽（只放格式，不放约束） ====================
+
+    @Test
+    void toleratesNaturalLanguageStepReferencesAndNormalizesThem() {
+        // 模型常写 "第1步" / "步骤 1"；原先只认规整的 "s1"，
+        // 一个格式问题就升级成「整条请求什么都做不了」——实测踩到过
+        TaskPlanCandidate.CandidateGoal first = new TaskPlanCandidate.CandidateGoal(
+                "NAVIGATE", Map.of("target", "userProfile"),
+                List.of("跳转到作者主页"), List.of(), List.of(), null);
+        TaskPlanCandidate.CandidateGoal second = new TaskPlanCandidate.CandidateGoal(
+                "ARTICLE_WRITE", Map.of("action", "likeArticle"),
+                List.of("点赞这篇文章"), List.of("第1步"), List.of("步骤 1"), null);
+
+        PlanningResult result = planner.plan(MESSAGE,
+                candidate(TaskPlanCandidate.RequestKind.TASK, first, second));
+
+        assertThat(result.plan().steps()).as("写法不同不该让整条请求不可用").hasSize(2);
+        assertThat(result.plan().steps().get(1).dependency().after())
+                .as("要归一化成下游认的标准 sN，否则依赖会被静默丢掉")
+                .containsExactly("s1");
+        assertThat(result.plan().steps().get(1).dependency().requires()).containsExactly("s1");
+    }
+
+    @Test
+    void toleratesMultipleStepRefsWrittenInOneString() {
+        // "s1、s2" 这种一个串里写多个步骤：原样透传会因为对不上而被当成"没有依赖"
+        String message = "点赞这篇文章，再搜一下 Java 相关文章，最后跳转到作者主页";
+
+        TaskPlanCandidate.CandidateGoal first = new TaskPlanCandidate.CandidateGoal(
+                "NAVIGATE", Map.of("target", "userProfile"),
+                List.of("跳转到作者主页"), List.of(), List.of(), null);
+        TaskPlanCandidate.CandidateGoal second = new TaskPlanCandidate.CandidateGoal(
+                "ARTICLE_SEARCH", Map.of("query", "Java"),
+                List.of("搜一下 Java 相关文章"), List.of(), List.of("s1"), null);
+        TaskPlanCandidate.CandidateGoal third = new TaskPlanCandidate.CandidateGoal(
+                "ARTICLE_WRITE", Map.of("action", "likeArticle"),
+                List.of("点赞这篇文章"), List.of("s1、s2"), List.of(), null);
+
+        PlanningResult result = handoffPlanner.plan(message,
+                candidate(TaskPlanCandidate.RequestKind.TASK, first, second, third));
+
+        assertThat(result.plan().steps()).hasSize(3);
+        assertThat(result.plan().steps().get(2).dependency().after())
+                .containsExactly("s1", "s2");
+    }
+
+    @Test
+    void stillRejectsReferencesWithoutAnyStepNumber() {
+        // 底线没动：抽不出序号 = 无法建立可靠映射 → 仍然非法。
+        // 静默丢弃会让"等前置数据"变成"无条件执行"，正是这类判据存在的理由
+        TaskPlanCandidate.CandidateGoal dependent = new TaskPlanCandidate.CandidateGoal(
+                "ARTICLE_WRITE", Map.of("action", "likeArticle"),
+                List.of("点赞这篇文章"), List.of("先看他写了什么"), List.of(), null);
+
+        PlanningResult result = planner.plan(MESSAGE,
+                candidate(TaskPlanCandidate.RequestKind.TASK, dependent));
+
+        assertThat(result.plan().steps()).as("解析不出来的依赖仍然整条不可执行").isEmpty();
+        assertThat(result.plan().uncoveredTypes()).containsExactly("ARTICLE_WRITE");
+    }
+
+    @Test
+    void stillRejectsOutOfRangeAndSelfReferences() {
+        // 放宽的只是"怎么写"，"指向谁"照样严格：越界与自引用都非法
+        TaskPlanCandidate.CandidateGoal outOfRange = new TaskPlanCandidate.CandidateGoal(
+                "ARTICLE_WRITE", Map.of("action", "likeArticle"),
+                List.of("点赞这篇文章"), List.of("s9"), List.of(), null);
+        PlanningResult rangeResult = planner.plan(MESSAGE,
+                candidate(TaskPlanCandidate.RequestKind.TASK, outOfRange));
+        assertThat(rangeResult.plan().steps()).as("越界引用（s9）不能放行").isEmpty();
+
+        TaskPlanCandidate.CandidateGoal selfReference = new TaskPlanCandidate.CandidateGoal(
+                "ARTICLE_WRITE", Map.of("action", "likeArticle"),
+                List.of("点赞这篇文章"), List.of("第1步"), List.of(), null);
+        PlanningResult selfResult = planner.plan(MESSAGE,
+                candidate(TaskPlanCandidate.RequestKind.TASK, selfReference));
+        assertThat(selfResult.plan().steps()).as("自引用（s1 依赖自己）不能放行").isEmpty();
+    }
+
     // ==================== C0 收尾：onFailure 三态 ====================
 
     @Test

@@ -63,8 +63,16 @@ class ArticleRagCorpusIndexTargetTests {
         retriever.retrieve("Redis 缓存");
 
         assertThat(captured.get().query().bool().must()).hasSize(1);
-        assertThat(captured.get().query().bool().must().get(0).match().operator())
+        /*
+         * 必须是**带标题权重的 multi_match**（原来是只查 content 的单字段 match）。
+         * 只查 content 时，"顺带提到"会盖过"主题就是它"——这正是高频配角词
+         * （Java / 缓存）只找得回一两篇、而"消息队列"这类专属主题词正常的原因。
+         * 所以这里同时锁住：① 标题进了检索字段且在权重位；② AND 语义没丢。
+         */
+        assertThat(captured.get().query().bool().must().get(0).multiMatch().operator())
                 .isEqualTo(Operator.And);
+        assertThat(captured.get().query().bool().must().get(0).multiMatch().fields())
+                .containsExactly("metadata.title^3", "content");
         assertThat(captured.get().query().bool().filter())
                 .anySatisfy(filter -> {
                     assertThat(filter.term().field()).isEqualTo("metadata.articleStatus");
@@ -87,8 +95,12 @@ class ArticleRagCorpusIndexTargetTests {
 
         retriever.retrieveFallback("Redis 缓存");
 
-        assertThat(captured.get().size()).isEqualTo(5);
-        assertThat(captured.get().query().bool().must().get(0).match().operator())
+        // size 现在来自配置（原来是硬编码的 5）。断言"等于配置值"而不是某个字面量：
+        // 调参不会打破这条用例，但"忘了把配置接进来"仍然会被抓到
+        assertThat(captured.get().size())
+                .isEqualTo(properties.getRag().getKeyword().getFetchSize());
+        // 兜底路径同样走「带标题权重的 multi_match」，只是语义放宽成 OR
+        assertThat(captured.get().query().bool().must().get(0).multiMatch().operator())
                 .isEqualTo(Operator.Or);
     }
 

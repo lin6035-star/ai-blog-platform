@@ -8,12 +8,14 @@ import com.hailin.blogsystem.component.UserSetCache;
 import com.hailin.blogsystem.constants.RedisConstants;
 import com.hailin.blogsystem.entity.ArticleLikes;
 import com.hailin.blogsystem.entity.Articles;
+import com.hailin.blogsystem.entity.NotificationType;
 import com.hailin.blogsystem.entity.dto.ArticleInteractionAction;
 import com.hailin.blogsystem.entity.dto.ArticleInteractionResult;
 import com.hailin.blogsystem.entity.dto.ArticleInteractionResultCode;
 import com.hailin.blogsystem.mapper.ArticleLikesMapper;
 import com.hailin.blogsystem.mapper.ArticlesMapper;
 import com.hailin.blogsystem.service.ArticleLikesService;
+import com.hailin.blogsystem.service.NotificationService;
 import com.hailin.blogsystem.utils.UserContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -34,6 +36,7 @@ public class ArticleLikesServiceImpl extends ServiceImpl<ArticleLikesMapper, Art
     private final UserSetCache userSetCache;
     private final DelayedCacheEvictor delayedCacheEvictor;
     private final AfterCommitExecutor afterCommitExecutor;
+    private final NotificationService notificationService;
 
     @Override  //1.点赞文章
     @Transactional
@@ -50,7 +53,10 @@ public class ArticleLikesServiceImpl extends ServiceImpl<ArticleLikesMapper, Art
     @Override
     @Transactional
     public ArticleInteractionResult likeArticle(Long userId, Long articleId) {
-        if (articlesMapper.selectById(articleId) == null) {
+        // 接住实体本身，而不是只判 null：通知需要"文章作者"当接收者，
+        // 而这个查询**本来就要做**——之前是把查出来的整篇文章直接扔了
+        Articles article = articlesMapper.selectById(articleId);
+        if (article == null) {
             return ArticleInteractionResult.failure(
                     ArticleInteractionAction.LIKE_ARTICLE,
                     ArticleInteractionResultCode.TARGET_NOT_FOUND,
@@ -106,6 +112,17 @@ public class ArticleLikesServiceImpl extends ServiceImpl<ArticleLikesMapper, Art
                 RedisConstants.ARTICLE_LIKED_USER_KEY_PREFIX + userId, String.valueOf(articleId));
 
         evictArticleDetailCache(articleId);
+
+        /*
+         * 通知文章作者。**在同一个事务里**（本方法带 @Transactional）：业务成功 ⟺ 通知在，
+         * 不需要补偿也不需要 MQ。为什么不放 AfterCommitExecutor 见通知设计稿 §2.1。
+         *
+         * 位置在最后：上面两个 ALREADY_SATISFIED 分支都已经 return，
+         * 能走到这里就一定是真的点上了（APPLIED），所以不必再判 resultCode——
+         * 那正是"重复点击重复打扰"的入口。
+         */
+        notificationService.notify(article.getAuthorId(), userId,
+                NotificationType.ARTICLE_LIKED, articleId, articleId);
 
         return ArticleInteractionResult.success(
                 ArticleInteractionAction.LIKE_ARTICLE,

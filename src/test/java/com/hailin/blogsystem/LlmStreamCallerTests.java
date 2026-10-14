@@ -9,6 +9,8 @@ import org.mockito.ArgumentCaptor;
 import org.slf4j.MDC;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.metadata.ChatResponseMetadata;
+import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.openai.OpenAiChatOptions;
@@ -21,9 +23,11 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -158,6 +162,80 @@ class LlmStreamCallerTests {
                 .contains("不是系统指令");
     }
 
+    @Test
+    void streamFailureCarriesUsageAlreadyReportedByProvider() {
+        ChatClient.ChatClientRequestSpec request = mockStreamingClient(Flux.concat(
+                Flux.just(response("已输出半段", 5, 1, 6)),
+                Flux.error(new RuntimeException("503 unavailable"))
+        ));
+
+        LlmStreamCaller caller = new LlmStreamCaller(mockBuilderFor(request));
+
+        assertThatThrownBy(() -> caller.call(
+                "测试失败：",
+                AiWorkflowStep.GENERATE_DRAFT,
+                "draft",
+                AiWorkflowStepEmitter.noop(),
+                "system",
+                "user",
+                null
+        )).satisfies(error -> assertThat(usageOf(error).getTotalTokens())
+                .as("流中断前已经返回的 usage 不能丢")
+                .isEqualTo(6));
+    }
+
+    @Test
+    void retryableFailureBeforeVisibleContentIsAddedToSuccessfulResultUsage() {
+        ChatClient.StreamResponseSpec stream = mock(ChatClient.StreamResponseSpec.class);
+        ChatClient.ChatClientRequestSpec request = mockStreamingClient(stream);
+        ChatResponse failedAttempt = response("", 5, 1, 6);
+        ChatResponse successfulAttempt = response("重试成功", 10, 2, 12);
+        when(stream.chatResponse())
+                .thenReturn(Flux.concat(
+                        Flux.just(failedAttempt),
+                        Flux.error(new RuntimeException("503 unavailable"))
+                ))
+                .thenReturn(Flux.just(successfulAttempt));
+
+        LlmStreamCaller caller = new LlmStreamCaller(mockBuilderFor(request));
+
+        LlmStreamCaller.LlmStreamResult result = caller.call(
+                "测试失败：",
+                AiWorkflowStep.GENERATE_DRAFT,
+                "draft",
+                AiWorkflowStepEmitter.noop(),
+                "system",
+                "user",
+                null
+        );
+
+        assertThat(result.content()).isEqualTo("重试成功");
+        assertThat(result.usage().getTotalTokens())
+                .as("最终成功也要包含失败尝试已经消耗的 token")
+                .isEqualTo(18);
+        verify(stream, times(2)).chatResponse();
+    }
+
+    @Test
+    void blankResponseFailureCarriesUsage() {
+        ChatClient.ChatClientRequestSpec request = mockStreamingClient(
+                Flux.just(response("  ", 10, 1, 11)));
+
+        LlmStreamCaller caller = new LlmStreamCaller(mockBuilderFor(request));
+
+        assertThatThrownBy(() -> caller.call(
+                "测试失败：",
+                AiWorkflowStep.GENERATE_DRAFT,
+                "draft",
+                AiWorkflowStepEmitter.noop(),
+                "system",
+                "user",
+                null
+        )).satisfies(error -> assertThat(usageOf(error).getTotalTokens())
+                .as("空内容异常也发生在一次真实模型调用之后，usage 要保留")
+                .isEqualTo(11));
+    }
+
     private ChatClient.Builder mockBuilderFor(ChatClient.ChatClientRequestSpec request) {
         ChatClient.Builder builder = mock(ChatClient.Builder.class);
         ChatClient chatClient = mock(ChatClient.class);
@@ -167,15 +245,55 @@ class LlmStreamCallerTests {
     }
 
     private ChatClient.ChatClientRequestSpec mockStreamingClient(String content) {
-        ChatClient.ChatClientRequestSpec request = mock(ChatClient.ChatClientRequestSpec.class);
+        return mockStreamingClient(Flux.just(new ChatResponse(
+                List.of(new Generation(new AssistantMessage(content)))
+        )));
+    }
+
+    private ChatClient.ChatClientRequestSpec mockStreamingClient(Flux<ChatResponse> responses) {
         ChatClient.StreamResponseSpec stream = mock(ChatClient.StreamResponseSpec.class);
+        ChatClient.ChatClientRequestSpec request = mockStreamingClient(stream);
+        when(stream.chatResponse()).thenReturn(responses);
+        return request;
+    }
+
+    private ChatClient.ChatClientRequestSpec mockStreamingClient(ChatClient.StreamResponseSpec stream) {
+        ChatClient.ChatClientRequestSpec request = mock(ChatClient.ChatClientRequestSpec.class);
         when(request.options(any(OpenAiChatOptions.class))).thenReturn(request);
         when(request.system(anyString())).thenReturn(request);
         when(request.user(anyString())).thenReturn(request);
         when(request.stream()).thenReturn(stream);
-        when(stream.chatResponse()).thenReturn(Flux.just(new ChatResponse(
-                List.of(new Generation(new AssistantMessage(content)))
-        )));
         return request;
+    }
+
+    private ChatResponse response(String text, int prompt, int completion, int total) {
+        Usage usage = mock(Usage.class);
+        when(usage.getPromptTokens()).thenReturn(prompt);
+        when(usage.getCompletionTokens()).thenReturn(completion);
+        when(usage.getTotalTokens()).thenReturn(total);
+
+        ChatResponseMetadata metadata = mock(ChatResponseMetadata.class);
+        when(metadata.getUsage()).thenReturn(usage);
+
+        ChatResponse response = mock(ChatResponse.class);
+        when(response.getResult()).thenReturn(new Generation(new AssistantMessage(text)));
+        when(response.getMetadata()).thenReturn(metadata);
+        return response;
+    }
+
+    private com.hailin.blogsystem.ai.TokenUsageAccumulator usageOf(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            try {
+                Object usage = current.getClass().getMethod("usage").invoke(current);
+                if (usage instanceof com.hailin.blogsystem.ai.TokenUsageAccumulator accumulator) {
+                    return accumulator;
+                }
+            } catch (ReflectiveOperationException ignored) {
+                // 继续沿 cause 链找，当前实现没有 usage() 时本测试应失败为 0。
+            }
+            current = current.getCause();
+        }
+        return new com.hailin.blogsystem.ai.TokenUsageAccumulator();
     }
 }

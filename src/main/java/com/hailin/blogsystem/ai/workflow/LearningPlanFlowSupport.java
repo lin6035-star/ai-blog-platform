@@ -170,6 +170,7 @@ public class LearningPlanFlowSupport {
             workflowTokenRecorder.accumulate(run, result.usage());
             return parsePlanJson(cleanJson(result.content()));
         } catch (RuntimeException e) {
+            workflowTokenRecorder.accumulateFailure(run, e);
             throw LlmErrorClassifier.wrap("学习计划生成失败：", e);
         } catch (Exception e) {
             throw new RuntimeException("学习计划生成失败：" + LlmErrorClassifier.friendlyMessage(e), e);
@@ -324,6 +325,7 @@ public class LearningPlanFlowSupport {
             workflowTokenRecorder.accumulate(run, result.usage());
             return parsePlanJson(cleanJson(result.content()));
         } catch (RuntimeException e) {
+            workflowTokenRecorder.accumulateFailure(run, e);
             throw LlmErrorClassifier.wrap("难点拆解失败：", e);
         } catch (Exception e) {
             throw new RuntimeException("难点拆解失败：" + LlmErrorClassifier.friendlyMessage(e), e);

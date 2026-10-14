@@ -18,15 +18,16 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 用户日活跃位图（Bitmap，第三刀）。
+ * 用户日活跃统计（SET 集合，第三刀）。
  *
  * **所有用例都用 2000-01-01 这类历史日期**，不碰"今天"的 key——
  * 否则测试会污染真实的活跃统计（同一天是同一个 key，断言和真实数据会互相干扰）。
  *
  * 重点覆盖两类东西：
- * 1. **位图语义**：同一天重复置位只算一个、跨天 OR 要去重、AND 求留存
- * 2. **offset 防线**：userId 越界必须静默丢弃。真换了雪花 ID，
- *    一次 SETBIT 就能让 Redis 试图分配天文数字的内存——这是不可逆的事故
+ * 1. **集合语义**：同一天重复记录只算一个、跨天并集要去重、交集求留存
+ * 2. **ID 量级**：真实用户用的是**雪花 ID**（19 位）。这条是踩过坑才加的——
+ *    原来的位图实现把 userId 当 offset，配了一道 1 千万的防线，结果**全部真实用户
+ *    都被拦掉、功能从未工作过**（详见 {@code snowflakeUserIdIsRecorded}）
  */
 @SpringBootTest
 class UserActivityTrackerTests {
@@ -82,22 +83,28 @@ class UserActivityTrackerTests {
 
         Long ttl = stringRedisTemplate.getExpire(keyOf(BASE_DATE), TimeUnit.SECONDS);
         assertThat(ttl)
-                .as("活跃位图也是「允许丢失」的统计数据，必须带 TTL")
+                .as("活跃统计也是「允许丢失」的数据，必须带 TTL")
                 .isNotNull()
                 .isGreaterThan(0);
     }
 
     /**
-     * offset 越界防线。1 亿的 offset 意味着 Redis 要为这个 key 分配 12.5MB，
-     * 而雪花 ID 量级的 offset 直接是天文数字——必须静默丢弃。
+     * 雪花 ID 必须能正常记录——**这条替换掉了原来的「越界 ID 不写入」**。
+     *
+     * <p>原实现用位图、offset 就是 userId，所以必须有「1 千万上限」那道防线。
+     * 但 `users.id` 是雪花（19 位），结果是 205 个真实用户**全部**被拦掉：
+     * 活跃统计从未产出过数据、个人主页一直显示 0，而且拦得静默（裸 return、无日志）。
+     * 换成 SET 后 offset 这个概念不存在了，这里反过来锁住「真实量级的 ID 能记上」。
      */
     @Test
-    void oversizedUserIdIsNotWritten() {
-        userActivityTracker.markActive(100_000_000L, BASE_DATE);
+    void snowflakeUserIdIsRecorded() {
+        long snowflakeId = 2085218095032741891L;   // 取一个真实用户 ID 的量级
 
-        assertThat(stringRedisTemplate.hasKey(keyOf(BASE_DATE)))
-                .as("越界 ID 不能建出 key，否则位图会按这个 offset 分配内存")
-                .isFalse();
+        userActivityTracker.markActive(snowflakeId, BASE_DATE);
+
+        assertThat(userActivityTracker.countActive(BASE_DATE))
+                .as("雪花 ID 必须能统计——这正是从位图换成 SET 的原因")
+                .isEqualTo(1);
     }
 
     @Test
@@ -108,7 +115,7 @@ class UserActivityTrackerTests {
         assertThat(stringRedisTemplate.hasKey(keyOf(BASE_DATE))).isFalse();
     }
 
-    /** 未登录时 markActiveToday 什么都不做——游客没有 userId 可做 offset */
+    /** 未登录时 markActiveToday 什么都不做——游客没有 userId 可记 */
     @Test
     void markActiveTodayDoesNothingWhenNotLoggedIn() {
         LocalDate today = LocalDate.now();
@@ -118,11 +125,11 @@ class UserActivityTrackerTests {
         userActivityTracker.markActiveToday();
 
         assertThat(userActivityTracker.countActive(today))
-                .as("未登录不该写入任何位")
+                .as("未登录不该写入任何成员")
                 .isEqualTo(before);
     }
 
-    /** 区间统计是**去重后的总人数**，不是每天相加——OR 天然去重，这是位图相对 Set 的额外好处 */
+    /** 区间统计是**去重后的总人数**，不是每天相加——并集天然去重 */
     @Test
     void rangeCountDeduplicatesAcrossDays() {
         LocalDate day1 = BASE_DATE;
@@ -139,7 +146,7 @@ class UserActivityTrackerTests {
                 .isEqualTo(3);
     }
 
-    /** 留存 = 两天都活跃的人数（AND） */
+    /** 留存 = 两天都活跃的人数（交集） */
     @Test
     void retentionCountsUsersActiveOnBothDays() {
         LocalDate day1 = BASE_DATE;
@@ -155,16 +162,16 @@ class UserActivityTrackerTests {
                 .isEqualTo(1);
     }
 
-    /** BITOP 的临时 key 必须用完即删——否则每调一次统计就多一个孤儿 key */
+    /** 运算的临时 key 必须用完即删——否则每调一次统计就多一个孤儿 key */
     @Test
-    void bitOpLeavesNoTemporaryKey() {
+    void setOpLeavesNoTemporaryKey() {
         userActivityTracker.markActive(1001L, BASE_DATE);
         userActivityTracker.markActive(1001L, BASE_DATE.plusDays(1));
 
         userActivityTracker.countRetained(BASE_DATE, BASE_DATE.plusDays(1));
 
         assertThat(redisKeyScanner.scan(RedisConstants.USER_ACTIVE_KEY_PREFIX + "tmp:*"))
-                .as("BITOP 结果用的临时 key 不能留下来")
+                .as("运算结果用的临时 key 不能留下来")
                 .isEmpty();
     }
 
@@ -180,11 +187,11 @@ class UserActivityTrackerTests {
     }
 
     /**
-     * 清掉 BITOP 可能留下的临时 key。
+     * 清掉集合运算可能留下的临时 key。
      *
      * 正常情况下方法自己在 finally 里删了，这里是**双保险 + 清历史遗留**：
      * 反向验证故意制造过孤儿（那时清理被注释掉了），不扫一遍就会让
-     * {@link #bitOpLeavesNoTemporaryKey} 在后续运行里误报。
+     * {@link #setOpLeavesNoTemporaryKey} 在后续运行里误报。
      *
      * 注意这不削弱那个用例——它断言在 tearDown **之前**执行，
      * 所以真出现孤儿时它仍然会红。

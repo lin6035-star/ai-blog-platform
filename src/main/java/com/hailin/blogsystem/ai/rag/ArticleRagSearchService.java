@@ -98,6 +98,32 @@ public class ArticleRagSearchService {
         List<ArticleRagContext> contexts = vectorContexts;
         boolean keywordFallbackTriggered = false;
         long keywordElapsedMs = 0L;
+
+        /*
+         * rerank 打分用**原始问题**，而不是削过的关键词——这是"只找回 1 篇"的最后一道根因。
+         *
+         * 原来对 ARTICLE_SEARCH 传的是 {@code lexicalQuery}，而它是停用词表削出来的：
+         * "有没有关于缓存的文章" → "缓存"（两个字）。拿它当 query 去给一堆讲 Redis 的文章打分，
+         * 分数被摊平、整体偏低，Gate 的 0.75 就只放得过 top1。
+         *
+         * 实测（2026-10-13 问"有没有关于缓存的文章"）8 条候选的分数是
+         * 0.7718 / 0.7019 / 0.6653 / 0.6630 / 0.6533 …，只有第 1 名过线。
+         * 而 0.7019 那篇（《Redis 缓存工程化实践》）**比阈值标定时的"负例上限 0.7043"还低**
+         * ——不是它不相关，是打分用的 query 形态与标定时完全不是一回事。
+         *
+         * 为什么这对两个 ranker 都安全：
+         *   · 模型 ranker 是 cross-encoder，完整问句的信息量只会更大；
+         *   · 规则 ranker（rerank 失败时的兜底）**自己会剔停用词提取关键词**
+         *     （见 {@code DefaultArticleRagRanker.extractKeywords}），不依赖调用方预先削好。
+         *
+         * ⚠️ Gate 那侧仍然用 {@code lexicalQuery}——它的"标题整串相等"判断需要的是关键词。
+         *    两者刻意不同，**不要图省事"统一"掉**。
+         *
+         * ⚠️ 改 query 会改变分数分布：**Gate 阈值 0.75 需要重新验证是否仍合适**
+         *    （它当初是按另一套 query 形态标定的，见 application.yml 的 rerank-threshold 注释）。
+         */
+        String rankQuestion = question;
+
         if (isArticleSearch(intent)) {
             lexicalQuery = getArticleSearchKeyword(question, intent);
             long keywordStartedAt = System.nanoTime();
@@ -106,8 +132,9 @@ public class ArticleRagSearchService {
             contexts = mergeContexts(vectorContexts, keywordContexts);
 
             log.info(
-                    "ARTICLE_SEARCH 使用混合检索，keyword={}, keywordFallback={}, vector={}, keywordHit={}, merged={}",
+                    "ARTICLE_SEARCH 使用混合检索，keyword={}, rankQuestion={}, keywordFallback={}, vector={}, keywordHit={}, merged={}",
                     lexicalQuery,
+                    rankQuestion,
                     keywordFallbackTriggered,
                     vectorContexts.size(),
                     keywordContexts.size(),
@@ -115,7 +142,6 @@ public class ArticleRagSearchService {
             );
         }
 
-        String rankQuestion = isArticleSearch(intent) ? lexicalQuery : question;
         long rankStartedAt = System.nanoTime();
         ArticleRagRankResult rankResult = articleRagRanker.rankWithEvidence(rankQuestion, contexts);
         ArticleRagRelevanceGate.Result gateResult = relevanceGate.apply(lexicalQuery, rankResult);
@@ -227,7 +253,8 @@ public class ArticleRagSearchService {
             return List.of();
         }
 
-        PageVO<ArticleDetailVO> pageResult = articlesService.getArticles(1L, 3L, keyword, null, "lasted");
+        // 第一页即可（兜底只取 3 条引用），游标传 null
+        PageVO<ArticleDetailVO> pageResult = articlesService.getArticles(null, 3L, keyword, null, "lasted");
         if (pageResult == null) {
             return List.of();
         }

@@ -137,26 +137,39 @@ class SeckillDailyTests {
     // ---------- 列表过滤 ----------
 
     /**
-     * 已结束的活动不进列表。
+     * 列表口径 = 「今天和明天」。
      *
-     * <p><b>只断言自己这两个 id</b>，不断言列表长度或顺序——测试库里还有别的类
+     * <p>今天那场**结束后仍然留在列表里**（灰态卡片）——这是 2026-10-11 定的：列表口径改成
+     * 「今天 + 明天」之后，10:30 那一刻今天的卡不会消失，用户不会看到空列表。
+     * 而昨天及更早的是历史、后天的是还没到时候，都不该出现。
+     *
+     * <p><b>只断言自己这几个 id</b>，不断言列表长度或顺序——测试库里还有别的类
      * （比如 `SeckillSettleTests`，它连清理都没有）留下的活动行。
      */
     @Test
-    void listHidesEndedActivities() {
-        long endedId = activityId(LocalDate.now().minusDays(5));
-        long upcomingId = activityId(LocalDate.now().plusDays(6));
-        createTracked(LocalDate.now().minusDays(5));
-        createTracked(LocalDate.now().plusDays(6));
+    void listCoversTodayAndTomorrowOnly() {
+        LocalDate today = LocalDate.now();
+        long yesterdayId = activityId(today.minusDays(1));
+        long todayId = activityId(today);
+        long dayAfterTomorrowId = activityId(today.plusDays(2));
+
+        createTracked(today.minusDays(1));
+        createTracked(today);
+        createTracked(today.plusDays(2));
 
         List<Long> visibleIds = seckillService.listActivities(null).stream()
                 .map(SeckillActivityVO::getId)
                 .toList();
 
-        assertThat(visibleIds).contains(upcomingId);
         assertThat(visibleIds)
-                .as("窗口全在过去的活动不该出现在「现在能抢什么」的列表里")
-                .doesNotContain(endedId);
+                .as("今天那场要在——哪怕已经结束（灰态），否则 10:30 之后列表会空")
+                .contains(todayId);
+        assertThat(visibleIds)
+                .as("昨天的属于历史，不是「接下来能抢什么」")
+                .doesNotContain(yesterdayId);
+        assertThat(visibleIds)
+                .as("后天的不提前暴露")
+                .doesNotContain(dayAfterTomorrowId);
     }
 
     // ---------- 端到端 ----------

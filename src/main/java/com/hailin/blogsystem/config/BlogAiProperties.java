@@ -110,6 +110,31 @@ public class BlogAiProperties {
         private Rerank rerank = new Rerank();
         private Gate gate = new Gate();
         private Health health = new Health();
+        private Keyword keyword = new Keyword();
+    }
+
+    /**
+     * keyword（词法）检索的参数。
+     *
+     * <p><b>为什么它和向量那边的 {@code topK} 不是一个量级</b>：这是 **chunk 级**检索，
+     * 而同一篇文章的多个 chunk 相关度接近、会**连续排在前面**。原来硬编码 {@code size=5}，
+     * 实测问"有没有关于 Java 的文章"时，ES 里明明有 **51 个 chunk / 12 篇**命中，
+     * 却只捞回 5 个 chunk——它们几乎全来自同一两篇，于是最终只喂给 LLM 一篇内容，
+     * 用户看到的就是"只找到 1 篇、而且没讲全"。
+     *
+     * <p>所以这里按「**要覆盖多少篇文章**」来配，而不是按"要多少片段"：
+     * 先多捞（{@link #fetchSize}），再按 articleId 分组，每组保留前
+     * {@link #chunksPerArticle} 个（组内第一个就是该篇最相关的，因为 ES 按分数降序返回），
+     * 最后取前 {@link #maxArticles} 篇。
+     */
+    @Data
+    public static class Keyword {
+        /** 一次从 ES 捞多少 chunk。要够"覆盖 {@code maxArticles} 篇 × 每篇 {@code chunksPerArticle} 个"再留足余量 */
+        private int fetchSize = 60;
+        /** 最多保留几篇**文章**（这才是"召回几篇"的真正上限） */
+        private int maxArticles = 8;
+        /** 每篇文章最多保留几个 chunk */
+        private int chunksPerArticle = 2;
     }
 
     @Data

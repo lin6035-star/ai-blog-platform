@@ -73,4 +73,18 @@ public class BlogWalletProperties {
          */
         private long creditPerYuan = 1000;
     }
+
+    /**
+     * 账单的**展示**保留期（天）：用户只看得到最近这么多天的账单，默认 7 天。
+     *
+     * <p><b>它只影响"给用户看的账单"，账本一行都不删。</b>
+     * {@code wallet_transaction} 是按 {@code balance_seq} **连续编号**的账本，
+     * 逐笔回放对账（{@code WalletTransactionMapper#selectLedgerAnomalies} 的
+     * {@code LAG} 检查"序号连号 + 余额连续"）依赖这个连续性——
+     * 删掉任何一段，巡检都会报"漏流水"假警，把真正的账不平淹没掉。
+     *
+     * <p>所以"只看最近 N 天"这件事只在**展示层**解决：改这个配置就能放开，
+     * 不需要动数据。真要减负应该走归档或分区，那是另一回事。
+     */
+    private long billRetentionDays = 7;
 }

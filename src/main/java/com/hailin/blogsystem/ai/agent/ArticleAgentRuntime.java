@@ -2,6 +2,7 @@ package com.hailin.blogsystem.ai.agent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.LogValues;
+import com.hailin.blogsystem.ai.TokenUsageAccumulator;
 import com.hailin.blogsystem.constants.BlogConstants;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.Articles;
@@ -523,7 +524,8 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
             String goal,
             List<String> observations,
             AgentStepEmitter emitter,
-            PageContextDTO pageContext
+            PageContextDTO pageContext,
+            TokenUsageAccumulator stepUsage
     ) {
         if (decision.actionType() != AgentStepActionType.SUGGEST_WRITE) {
             return null;
@@ -532,7 +534,7 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
         if (observations.isEmpty()) {
             String rejectReason = "首轮零观察写动作提案被拒绝：必须先执行至少一个只读查询";
             emitter.emit(nextStepNo, "SUGGEST_WRITE", "FAILED", "提案被拒绝：需先完成一次查询", null);
-            recordRejectedStep(run, decision, nextStepNo, rejectReason, null);
+            recordRejectedStep(run, decision, nextStepNo, rejectReason, stepUsage);
             observations.add("系统提示：你在没有任何查询结果时尝试提案写动作，后端已拒绝。"
                     + "请先执行只读查询（QUERY_ARTICLE / QUERY_MEMORY / SEARCH_RAG）再决策。");
             run.setCurrentStep(nextStepNo);
@@ -542,7 +544,7 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
             runMapper.updateById(run);
             return null; // 循环继续，由下一轮决策收尾
         }
-        return suggestWriteArticle(run, decision, observations, emitter, pageContext);
+        return suggestWriteArticle(run, decision, observations, emitter, pageContext, stepUsage);
     }
 
     /**
@@ -563,7 +565,8 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
             AgentStepDecision decision,
             List<String> observations,
             AgentStepEmitter emitter,
-            PageContextDTO pageContext
+            PageContextDTO pageContext,
+            TokenUsageAccumulator stepUsage
     ) {
         Map<String, Object> input = decision.input() == null ? Map.of() : decision.input();
         String actionType = text(input, "actionType");
@@ -575,13 +578,17 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
             // C0.2：actionType 是模型给的内部协议值，只进日志（用户可见文案保持稳定）
             log.warn("[AGENT] 写动作提案被拒（actionType 不在白名单）: runId={}, actionType={}",
                     run.getId(), LogValues.safe(actionType));
-            return markFailed(run, "Agent 写动作提案无效（不支持的写动作类型）");
+            return markFailedAfterRejectedStep(
+                    run, decision, run.getUsedSteps() + 1, stepUsage,
+                    "Agent 写动作提案无效（不支持的写动作类型）");
         }
         // 改名专属必填：新标题必须来自用户原话
         String newTitle = text(input, "newTitle");
         if (rename && (newTitle == null || newTitle.isBlank())) {
             emitter.emit(run.getUsedSteps() + 1, "SUGGEST_WRITE", "FAILED", "提案缺少新标题", null);
-            return markFailed(run, "Agent 写动作提案无效（缺少 newTitle）");
+            return markFailedAfterRejectedStep(
+                    run, decision, run.getUsedSteps() + 1, stepUsage,
+                    "Agent 写动作提案无效（缺少 newTitle）");
         }
 
         // V3.8：写动作目标 = run 决议目标（anchorMode 解析产物，首步 QUERY_ARTICLE 定位后锁定）。
@@ -589,14 +596,16 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
         Long targetId = run.getTargetArticleId();
         if (targetId == null) {
             emitter.emit(run.getUsedSteps() + 1, "SUGGEST_WRITE", "FAILED", "缺少文章上下文", null);
-            return markFailed(run, "Agent 写动作提案无效（run 未决议定位目标，无法定位文章）");
+            return markFailedAfterRejectedStep(
+                    run, decision, run.getUsedSteps() + 1, stepUsage,
+                    "Agent 写动作提案无效（run 未决议定位目标，无法定位文章）");
         }
         Articles article = articlesService.getById(targetId);
         if (article == null || !article.getAuthorId().equals(run.getUserId())) {
             // 终局失败：文章不存在/不属于当前用户（对齐 QUERY_ARTICLE 归属语义，不继续循环）
             int nextStepNo = run.getUsedSteps() + 1;
             emitter.emit(nextStepNo, "SUGGEST_WRITE", "FAILED", "未找到这篇文章，或文章不属于你", null);
-            recordRejectedStep(run, decision, nextStepNo, "文章归属校验失败（SUGGEST_WRITE）", null);
+            recordRejectedStep(run, decision, nextStepNo, "文章归属校验失败（SUGGEST_WRITE）", stepUsage);
             throw new AgentRunTerminalException(
                     nextStepNo, "未找到这篇文章，或文章不属于你，无法继续处理。");
         }
@@ -605,7 +614,7 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
             // 同名改名（无变化不弹卡）：FAILED step + observation → 循环继续由 LLM 告知用户（镜像学习域 RENAME precheck）
             if (newTitle.trim().equalsIgnoreCase(
                     article.getTitle() == null ? "" : article.getTitle().trim())) {
-                return rejectStepContinue(run, decision, emitter, observations,
+                return rejectStepContinue(run, decision, emitter, observations, stepUsage,
                         "新标题与原标题相同，改标题提案被拒绝",
                         "不要生成改标题提案，如用户确实要改可建议换个新标题");
             }
@@ -617,7 +626,8 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
             String actionLabel = "提案将文章《" + article.getTitle() + "》标题改为《" + newTitle.trim() + "》";
             String finalAnswer = "已为你准备好将文章《" + article.getTitle() + "》标题改为《"
                     + newTitle.trim() + "》的提案，确认后执行。";
-            return finishSuggestWrite(run, decision, observations, emitter, proposal, actionLabel, finalAnswer);
+            return finishSuggestWrite(run, decision, observations, emitter, stepUsage,
+                    proposal, actionLabel, finalAnswer);
         }
 
         // V3.7 可见性分支：前置状态从动作方向推导（HIDE 前置 PUBLISHED / PUBLISH 前置 HIDDEN）
@@ -626,14 +636,16 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
         if (Objects.equals(article.getStatus(), BlogConstants.ArticlesStatus.DRAFT)) {
             // 草稿拒绝：Agent 不从详情页把草稿发布/隐藏，编辑器人工闸保留
             emitter.emit(run.getUsedSteps() + 1, "SUGGEST_WRITE", "FAILED", "草稿文章不能执行此操作", null);
-            return markFailed(run, "这篇文章还未发布，隐藏/公开操作请在编辑器中完成。");
+            return markFailedAfterRejectedStep(
+                    run, decision, run.getUsedSteps() + 1, stepUsage,
+                    "这篇文章还未发布，隐藏/公开操作请在编辑器中完成。");
         }
         Integer expectedStatus = hideDirection
                 ? BlogConstants.ArticlesStatus.PUBLISHED
                 : BlogConstants.ArticlesStatus.HIDDEN;
         if (!Objects.equals(article.getStatus(), expectedStatus)) {
             // 已是目标状态（如已隐藏再提隐藏）→ 不弹卡，循环继续由 LLM 告知
-            return rejectStepContinue(run, decision, emitter, observations,
+            return rejectStepContinue(run, decision, emitter, observations, stepUsage,
                     "文章当前已处于" + ("隐藏".equals(targetDesc) ? "隐藏" : "公开") + "状态，" + targetDesc + "提案被拒绝",
                     "不要生成" + targetDesc + "提案，请直接告知用户当前状态");
         }
@@ -646,15 +658,17 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
         String actionLabel = "提案将文章《" + article.getTitle() + "》" + (hideDirection ? "设为隐藏" : "公开");
         String finalAnswer = "已为你准备好将文章《" + article.getTitle() + "》"
                 + (hideDirection ? "设为隐藏" : "公开") + "的提案，确认后执行。";
-        return finishSuggestWrite(run, decision, observations, emitter, proposal, actionLabel, finalAnswer);
+        return finishSuggestWrite(run, decision, observations, emitter, stepUsage,
+                proposal, actionLabel, finalAnswer);
     }
 
     /** 业务拒绝（不弹卡）：FAILED step + observation → 循环继续由 LLM 收尾告知（镜像学习域 precheck 模式） */
     private AgentRunResult rejectStepContinue(AiAgentRun run, AgentStepDecision decision, AgentStepEmitter emitter,
-                                              List<String> observations, String rejectReason, String advice) {
+                                              List<String> observations, TokenUsageAccumulator stepUsage,
+                                              String rejectReason, String advice) {
         int nextStepNo = run.getUsedSteps() + 1;
         emitter.emit(nextStepNo, "SUGGEST_WRITE", "FAILED", rejectReason, null);
-        recordRejectedStep(run, decision, nextStepNo, rejectReason, null);
+        recordRejectedStep(run, decision, nextStepNo, rejectReason, stepUsage);
         observations.add("系统提示：" + rejectReason + "。" + advice + "。");
         run.setCurrentStep(nextStepNo);
         run.setUsedSteps(nextStepNo);
@@ -667,10 +681,11 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
     /** 提案成功落库（WAITING_WRITE_CONFIRM + pendingWriteAction），两分支共用 */
     private AgentRunResult finishSuggestWrite(AiAgentRun run, AgentStepDecision decision,
                                               List<String> observations, AgentStepEmitter emitter,
+                                              TokenUsageAccumulator stepUsage,
                                               AgentWriteProposal proposal, String actionLabel, String finalAnswer) {
         emitter.emit(run.getUsedSteps() + 1, "SUGGEST_WRITE", "SUCCESS", actionLabel,
                 decision.thoughtSummary());
-        recordTerminalStep(run, decision, run.getUsedSteps() + 1, null);
+        recordTerminalStep(run, decision, run.getUsedSteps() + 1, stepUsage);
         run.setStatus(AiAgentRunStatus.WAITING_WRITE_CONFIRM.name());
         run.setFinalAnswer(finalAnswer);
         run.setContextJson(toJson(Map.of(

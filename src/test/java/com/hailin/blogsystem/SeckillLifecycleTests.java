@@ -71,6 +71,8 @@ class SeckillLifecycleTests {
      * 但已经到期或售罄</b>的活动都会被 {@code endDueActivities} 一起捞走，把返回值搞脏
      * （{@code SeckillSettleTests} 里把库存吃满的那几个用例正好会留下这种数据）。
      * 测试库里这些都是造出来的，直接推成终态即可。
+     *
+     * <p>「窗口已过却还是 DRAFT」同样会被捞走（{@code endStaleDrafts}），所以要一起清。
      */
     @BeforeEach
     void clearDueActivitiesLeftByOtherTests() {
@@ -79,6 +81,11 @@ class SeckillLifecycleTests {
                 .and(w -> w.le(SeckillActivity::getEndAt, LocalDateTime.now())
                         .or()
                         .apply("sold_count >= total_stock"))
+                .set(SeckillActivity::getStatus, ENDED));
+
+        seckillActivityMapper.update(null, new LambdaUpdateWrapper<SeckillActivity>()
+                .eq(SeckillActivity::getStatus, DRAFT)
+                .le(SeckillActivity::getEndAt, LocalDateTime.now())
                 .set(SeckillActivity::getStatus, ENDED));
     }
 
@@ -169,6 +176,29 @@ class SeckillLifecycleTests {
 
         assertThat(seckillLifecycleService.activateDueActivities()).isZero();
         assertThat(reload().getStatus()).isEqualTo(DRAFT);
+    }
+
+    /**
+     * 窗口已过却还停在 DRAFT 的场次，必须被 {@code endDueActivities} 收敛成 ENDED。
+     *
+     * <p>产生条件很日常：**服务在活动那半小时里没运行**（本地开发不常开、线上停机）。
+     * 不收敛的话它会永久停在 DRAFT，前端于是把它当「未开始」——
+     * 一场早就结束的活动整天显示未开始，列表被压成一场（本该是「今天已结束 + 明天未开始」），
+     * 还会因为「该开始却没翻转」而每 3 秒重拉一次列表，骨架屏一直闪。
+     *
+     * <p>与上一条的分工：{@code activateDueActivities} 不激活它（不白建 key），
+     * 由 {@code endDueActivities} 收尾——上一条的注释写着「然后下一轮又结束掉」，
+     * 而当时那半句只对 ACTIVE 成立。这条用例把 DRAFT 那半也钉住。
+     */
+    @Test
+    void expiredDraftIsEndedByLifecycle() {
+        newActivity(DRAFT, 10, LocalDateTime.now().minusHours(2), LocalDateTime.now().minusHours(1));
+
+        assertThat(seckillLifecycleService.endDueActivities())
+                .as("窗口已过的 DRAFT 必须被收敛，否则永远停在「未开始」")
+                .isEqualTo(1);
+
+        assertThat(reload().getStatus()).isEqualTo(ENDED);
     }
 
     @Test
