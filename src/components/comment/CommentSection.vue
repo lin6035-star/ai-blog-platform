@@ -84,8 +84,8 @@ async function loadComments(nextPage = 1) {
       sort: selectedSort.value,
     })
 
-    total.value = result.data.total
-    page.value = result.data.page
+    total.value = result.data.total ?? 0
+    page.value = result.data.page ?? nextPage
     if (isFirstPage) {
       comments.value = result.data.list
       replyPages.value = {}
@@ -310,8 +310,8 @@ async function loadMoreReplies(comment: Comment) {
     const newReplies = result.data.list.filter((reply) => !existingIds.has(reply.id))
 
     comment.replies = [...comment.replies, ...newReplies]
-    comment.replyCount = result.data.total
-    replyPages.value[comment.id] = result.data.page
+    comment.replyCount = result.data.total ?? 0
+    replyPages.value[comment.id] = result.data.page ?? nextPage
   } catch (error) {
     message.error(errorMessage(error, '回复加载失败'))
   } finally {

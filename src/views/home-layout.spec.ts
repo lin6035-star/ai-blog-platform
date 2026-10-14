@@ -47,7 +47,7 @@ describe('home information-flow layout', () => {
     expect(hotRankCard).toContain('热度榜')
     expect(hotRankCard).toContain('articleApi.getHotList({ page: 1, pageSize: 5 })')
     expect(hotRankCard).toContain("router.push({ name: 'hot-rank' })")
-    expect(css).toContain('grid-template-columns: 180px minmax(0, 1fr) 180px')
+    expect(css).toContain('grid-template-columns: 220px minmax(0, 1fr) 220px')
     expect(css).toContain('.home-side-rail')
     expect(css).toContain('min-width: 0')
   })
@@ -57,8 +57,9 @@ describe('home information-flow layout', () => {
 
     expect(css).toContain('.home-feed-layout')
     expect(css).toContain('margin-top: 0px')
+    // 首页首屏比通用列表页更紧凑：上内边距收掉（通用的是 12px）
     expect(css).toContain('.home-feed-layout .feed-tabs')
-    expect(css).toContain('padding: 6px 14px')
+    expect(css).toContain('padding: 10px 20px 0')
   })
 
   it('defines a full hot rank page route', () => {
@@ -108,9 +109,12 @@ describe('home information-flow layout', () => {
     const feed = readSource('components/article/ArticleFeed.vue')
 
     expect(home).toContain('const loadingMore = ref(false)')
-    expect(home).toContain('const hasMore = computed(() => articles.value.length < totalArticles.value)')
-    expect(home).toContain('async function loadArticles(nextPage = 1)')
-    expect(home).toContain('const isFirstPage = nextPage === 1')
+    expect(home).toContain('const hasMore = ref(false)')
+    expect(home).toContain('async function loadArticles(reset = false)')
+    expect(home).toContain('const isFirstPage = reset')
+    // 翻页靠后端签发的 nextCursor，不是页码；"还有没有下一页"也由它驱动
+    expect(home).toContain('cursor: isFirstPage ? undefined : (cursor.value ?? undefined)')
+    expect(home).toContain('hasMore.value = Boolean(data.nextCursor)')
     expect(home).toContain('articles.value = isFirstPage ? list : [...articles.value, ...list]')
     expect(home).toContain('function loadMoreArticles()')
     expect(home).toContain('@load-more="loadMoreArticles"')

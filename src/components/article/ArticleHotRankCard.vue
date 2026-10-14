@@ -68,6 +68,8 @@ onMounted(loadHotArticles)
 
 .hot-rank-card-header h2 {
   margin-bottom: 0;
+  /* 与左侧分类栏的「分类」标题对齐：标题居中，两侧栏视觉上对称 */
+  text-align: center;
 }
 
 .hot-rank-loading {

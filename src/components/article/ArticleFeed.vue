@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ArticleCard from '@/components/article/ArticleCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import type { ArticleSort } from '@/api/article'
@@ -11,8 +11,11 @@ const props = defineProps<{
   loading: boolean
   loadingMore: boolean
   loadMoreError: boolean
-  total: number
   sort: ArticleSort
+  /** 「关注」流的空状态要区分「没登录」和「登录了但没关注」——文案和按钮都不一样 */
+  isLoggedIn: boolean
+  /** 当前搜索关键词。透传给卡片，用于 ES 降级到 LIKE 时的兜底高亮 */
+  keyword?: string
 }>()
 
 const emit = defineEmits<{
@@ -27,7 +30,21 @@ const emit = defineEmits<{
 const sortTabs: Array<{ label: string; value: ArticleSort }> = [
   { label: '推荐', value: 'recommend' },
   { label: '最新', value: 'latest' },
+  { label: '关注', value: 'following' },
 ]
+
+const emptyTitle = computed(() =>
+  props.sort === 'following' ? '暂无关注人发布的文章' : '暂无公开文章',
+)
+
+const emptyDescription = computed(() => {
+  if (props.sort === 'following') {
+    return props.isLoggedIn
+      ? '去关注几位作者吧，他们发布的新文章会出现在这里。'
+      : '登录后就能看到你关注的作者发布的文章。'
+  }
+  return '等后端准备好文章数据后，这里会显示技术信息流。'
+})
 
 const loadMoreTriggerRef = ref<HTMLElement | null>(null)
 let observer: IntersectionObserver | null = null
@@ -96,6 +113,7 @@ watch(
         v-for="article in articles"
         :key="article.id"
         :article="article"
+        :keyword="keyword"
         @open="emit('open', $event)"
         @like="emit('like', $event)"
         @favorite="emit('favorite', $event)"
@@ -103,7 +121,17 @@ watch(
       />
     </div>
 
-    <EmptyState v-else title="暂无公开文章" description="等后端准备好文章数据后，这里会显示技术信息流。" />
+    <EmptyState v-else :title="emptyTitle" :description="emptyDescription">
+      <!-- 用 router-link 而不是 @click + router.push：保持链接语义（可右键、可新窗口），
+           也和全站「未登录操作就地提示、不命令式跳转」的约定一致 -->
+      <router-link
+        v-if="sort === 'following' && !isLoggedIn"
+        class="empty-action"
+        to="/login"
+      >
+        立即登录
+      </router-link>
+    </EmptyState>
 
     <div
       v-if="articles.length || loadingMore || loadMoreError"
@@ -127,6 +155,25 @@ watch(
 </template>
 
 <style scoped>
+.empty-action {
+  margin-top: 18px;
+  border: 1px solid var(--color-forest);
+  border-radius: 8px;
+  padding: 9px 20px;
+  color: white;
+  background: var(--color-forest);
+  cursor: pointer;
+  font-weight: 800;
+  transition:
+    filter 0.18s ease,
+    transform 0.18s ease;
+}
+
+.empty-action:hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
 .feed-load-more-trigger {
   display: flex;
   justify-content: center;

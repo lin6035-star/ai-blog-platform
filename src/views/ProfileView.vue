@@ -20,7 +20,6 @@ import { publicUserApi } from '@/api/publicUser'
 import { ARTICLE_STATUS, getArticleStatusLabel } from '@/constants/articleStatus'
 import { userApi } from '@/api/user'
 import AvatarPreviewModal from '@/components/common/AvatarPreviewModal.vue'
-import SiteActivityCard from '@/components/common/SiteActivityCard.vue'
 import WalletBalanceCard from '@/components/common/WalletBalanceCard.vue'
 import MainLayout from '@/layouts/MainLayout.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -499,9 +498,7 @@ onMounted(() => {
             <span>加入于</span>
             <strong>{{ joinedAtText }}</strong>
           </div>
-          <!-- 站点活跃（Bitmap 统计）。放在"我的学习计划"入口之前，
-               让那个导航入口保持贴在卡片底部 -->
-          <SiteActivityCard />
+          <!-- 站点活跃已移到顶部头像的悬停弹层里（见 AppHeader），这里不再重复 -->
           <!-- 钱包额度（整卡即进入钱包页的入口，不再另加一条导航链接） -->
           <WalletBalanceCard />
           <router-link class="profile-learning-plans-entry" to="/me/learning-plans">

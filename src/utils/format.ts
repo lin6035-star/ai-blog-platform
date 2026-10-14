@@ -52,6 +52,31 @@ export function formatCredit(credit: number | null | undefined) {
   return credit.toLocaleString('zh-CN')
 }
 
+/**
+ * 展示用额度：把「在途预占」加回余额。
+ *
+ * 为什么需要它：预扣是按该路径的**硬上限**占款的——一次 Workflow 会先占掉 10000，
+ * 而实际只花几十。于是任务执行期间余额会显示成远低于预期、甚至负数，
+ * 用户看到的是"额度出错了"，其实那笔钱只是被临时占着，结算后按实际用量退回。
+ *
+ * 展示口径 = `balance + pendingReserveCredit`：
+ * - 任务执行中：显示任务开始前的额度（在途预占被加回，数字不跳）
+ * - 结算完成后：`pendingReserveCredit` 归零，显示真实扣减后的额度（一次性扣掉实际消费）
+ * - 真欠费（`pendingReserveCount = 0` 且 `balance < 0`）：原样显示负数
+ *
+ * ⚠️ **只用于展示**。「够不够扣」一律由后端用 `balance` 判定；
+ * 这里把预占加回来不代表那部分额度还能花——它已经被占住了。
+ */
+export function displayCredit(
+  info: { balance: number; pendingReserveCredit?: number } | null | undefined,
+) {
+  if (!info) {
+    return 0
+  }
+
+  return info.balance + (info.pendingReserveCredit ?? 0)
+}
+
 export function formatCommentTime(value: string) {
   if (!value) {
     return ''

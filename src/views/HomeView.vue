@@ -28,14 +28,22 @@ const selectedCategoryId = ref('0')
 const selectedSort = ref<ArticleSort>('recommend')
 const articleActionKeys = ref(new Set<string>())
 
-/* ---- 分页 ---- */
-const currentPage = ref(1)
+/* ---- 分页（游标 / keyset，不是页码） ---- */
 const pageSize = 10
-const totalArticles = ref(0)
+/** 下一页游标。null = 从头开始；后端返回 null = 已经到底 */
+const cursor = ref<string | null>(null)
+/** 还有没有下一页。**由后端返回的 nextCursor 驱动，不看 total**——游标分页不算 total */
+const hasMore = ref(false)
+/**
+ * 请求序号。切换分类 / 排序时会并发出两条请求，而响应回来的顺序不保证——
+ * 旧的 loadMore 若后返回，会把它那个分类的数据追加进新分类的列表，还会把游标
+ * 覆盖成旧分类的位置（下次 loadMore 从错误位置继续，中间那段被跳过）。
+ * 只认最新一次请求的响应。
+ */
+let loadRequestSeq = 0
 
 const searchKeyword = computed(() => (route.query.keyword as string) ?? '')
 const isHomeRoute = computed(() => route.name === 'home')
-const hasMore = computed(() => articles.value.length < totalArticles.value)
 const authSignature = computed(() =>
   authStore.isLoggedIn && authStore.usersVO ? `user:${authStore.usersVO.id}` : 'guest',
 )
@@ -54,8 +62,9 @@ const categoryItems = computed(() =>
   [allCategory, ...(categories.value.length ? categories.value : fallbackCategories)],
 )
 
-async function loadArticles(nextPage = 1) {
-  const isFirstPage = nextPage === 1
+async function loadArticles(reset = false) {
+  const isFirstPage = reset
+  const seq = ++loadRequestSeq
 
   if (isFirstPage) {
     loading.value = true
@@ -66,26 +75,39 @@ async function loadArticles(nextPage = 1) {
 
   try {
     const result = await articleApi.getList({
-      page: nextPage,
+      // 第一页不带游标；否则原样带回上一次的 nextCursor（不要在前端拼它）
+      cursor: isFirstPage ? undefined : (cursor.value ?? undefined),
       pageSize,
       keyword: searchKeyword.value || undefined,
       categoryId: selectedCategoryId.value === allCategory.id ? undefined : selectedCategoryId.value,
       sort: selectedSort.value,
     })
+
+    if (seq !== loadRequestSeq) {
+      return
+    }
+
     const data = result.data as PageData<Article>
     const list = data.list ?? []
     articles.value = isFirstPage ? list : [...articles.value, ...list]
-    totalArticles.value = data.total ?? 0
-    currentPage.value = data.page ?? nextPage
+    cursor.value = data.nextCursor ?? null
+    hasMore.value = Boolean(data.nextCursor)
   } catch (error) {
+    if (seq !== loadRequestSeq) {
+      return
+    }
+
     if (!isFirstPage) {
       loadMoreError.value = true
     }
     const msg = error instanceof Error ? error.message : '文章加载失败'
     message.error(msg)
   } finally {
-    loading.value = false
-    loadingMore.value = false
+    // 过期请求不重置这两个状态：最新的那次请求还在飞，状态归它管
+    if (seq === loadRequestSeq) {
+      loading.value = false
+      loadingMore.value = false
+    }
   }
 }
 
@@ -97,7 +119,7 @@ async function loadHomeData() {
     // 分类加载失败时使用 fallback，不阻断页面
   }
 
-  await loadArticles()
+  await loadArticles(true)
   loadedAuthSignature.value = authSignature.value
 }
 
@@ -106,26 +128,30 @@ async function refreshArticlesForAuthChange() {
     return
   }
 
-  currentPage.value = 1
-  await loadArticles(1)
+  resetCursor()
+  await loadArticles(true)
   loadedAuthSignature.value = authSignature.value
+}
+
+/** 回到「第一页」：清空游标与"到底"标记。列表本身由各调用方决定要不要一起清 */
+function resetCursor() {
+  cursor.value = null
+  hasMore.value = false
 }
 
 function resetHomeState() {
   selectedCategoryId.value = allCategory.id
   selectedSort.value = 'recommend'
-  currentPage.value = 1
+  resetCursor()
   articles.value = []
-  totalArticles.value = 0
   loadMoreError.value = false
 }
 
 function reloadArticles() {
-  currentPage.value = 1
+  resetCursor()
   articles.value = []
-  totalArticles.value = 0
   loadMoreError.value = false
-  void loadArticles(1)
+  void loadArticles(true)
 }
 
 function loadMoreArticles() {
@@ -133,7 +159,7 @@ function loadMoreArticles() {
     return
   }
 
-  void loadArticles(currentPage.value + 1)
+  void loadArticles(false)
 }
 
 function onCategorySelect(category: Category) {
@@ -242,7 +268,7 @@ watch(
       return
     }
 
-    currentPage.value = 1
+    // reloadArticles 内部会重置游标与"到底"标记，这里不需要再单独重置
     reloadArticles()
   },
 )
@@ -268,6 +294,7 @@ watch(
   <MainLayout>
     <div class="feed-layout home-feed-layout">
       <aside class="category-rail" aria-label="分类导航">
+        <div class="category-rail-title">分类</div>
         <button
           v-for="category in categoryItems"
           :key="category.id"
@@ -288,7 +315,8 @@ watch(
         :loading-more="loadingMore"
         :load-more-error="loadMoreError"
         :sort="selectedSort"
-        :total="totalArticles"
+        :is-logged-in="authStore.isLoggedIn"
+        :keyword="searchKeyword"
         @open="goToArticle"
         @like="handleArticleLike"
         @favorite="handleArticleFavorite"

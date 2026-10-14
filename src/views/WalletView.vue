@@ -14,13 +14,20 @@ import type {
   WalletInfo,
   WalletPackage,
 } from '@/types/wallet'
-import { formatArticleDateTime, formatCredit, formatPayAmount } from '@/utils/format'
+import { formatArticleDateTime, formatCredit, displayCredit, formatPayAmount } from '@/utils/format'
 
 const router = useRouter()
 const message = useMessage()
 const dialog = useDialog()
 
 const wallet = ref<WalletInfo | null>(null)
+
+/**
+ * 账单只展示最近 N 天（口径在后端 `blog.wallet.bill-retention-days`）。
+ * **不硬编码那个 7**：后端调配置时这里跟着变，说明文字不会和实际口径打架。
+ * 拿不到配置时为 0，整句提示不显示。
+ */
+const billRetentionDays = computed(() => wallet.value?.billRetentionDays ?? 0)
 const packages = ref<WalletPackage[]>([])
 const billEntries = ref<WalletBillEntry[]>([])
 const loading = ref(false)
@@ -215,7 +222,7 @@ onMounted(loadAll)
 
       <section class="wallet-balance" :class="`is-${balanceTone}`">
         <div class="wallet-balance-label">当前额度</div>
-        <div class="wallet-balance-value">{{ formatCredit(wallet?.balance) }}</div>
+        <div class="wallet-balance-value">{{ formatCredit(displayCredit(wallet)) }}</div>
         <div class="wallet-balance-hint">{{ balanceHint }}</div>
       </section>
 
@@ -277,7 +284,12 @@ onMounted(loadAll)
       </section>
 
       <section class="wallet-section">
-        <h2 class="wallet-section-title">账单</h2>
+        <h2 class="wallet-section-title">
+          账单
+          <span v-if="billRetentionDays" class="wallet-section-note">
+            仅显示最近 {{ billRetentionDays }} 天
+          </span>
+        </h2>
 
         <div v-if="loading" class="wallet-loading">
           <n-skeleton text :repeat="4" />
@@ -434,6 +446,14 @@ onMounted(loadAll)
   margin: 0 0 12px;
   color: #1f2937;
   font-size: 16px;
+}
+
+/* 账单口径说明（"仅显示最近 N 天"）。轻一点：它是补充信息，不该和标题抢注意力 */
+.wallet-section-note {
+  margin-left: 8px;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 400;
 }
 
 .wallet-packages {

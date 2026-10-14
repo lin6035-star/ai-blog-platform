@@ -74,33 +74,41 @@ textarea {
   letter-spacing: 0.04em;
 }
 
-.header-nav {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  overflow: hidden;
-  padding-left: 18px;
-}
-
-.header-nav a,
-.nav-disabled {
+/* 额度秒杀入口。文案与配色移植自钱包页的 .wallet-seckill-entry。
+   原先是「首页 / 写文章」两个导航项（.header-nav + .nav-disabled） */
+.header-seckill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  border-radius: 8px;
-  color: var(--color-muted);
+  justify-content: center; /* 文字放中间 */
+  justify-self: center;    /* 入口整体在 header 中间那一列居中 */
+  gap: 10px;
+  width: fit-content;
+  padding: 8px 18px;
+  border: 1px solid #e0e7ff;
+  border-radius: 12px;
+  background: #eef2ff;
+  text-decoration: none;
+  white-space: nowrap;     /* header 里必须单行，否则高度会被撑开 */
 }
 
-.header-nav a.router-link-active {
-  color: var(--color-forest);
-  background: var(--color-mint);
+.header-seckill:hover {
+  background: #e0e7ff;
 }
 
-.nav-disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
+.header-seckill-title {
+  color: #4338ca;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.header-seckill-desc {
+  color: #6366f1;
+  font-size: 13px;
+}
+
+.header-seckill-arrow {
+  color: #6366f1;
+  font-size: 15px;
 }
 
 .header-actions {
@@ -143,6 +151,48 @@ textarea {
 
 .header-search input::placeholder {
   color: var(--color-muted);
+}
+
+/* 消息铃铛（排在搜索框与创作中心之间）。
+   图标**刻意不上色**：用 currentColor 继承 header 的文字色，hover 只改背景。
+   一个花色的铃铛会和秒杀入口、头像抢注意力，而它只需要传达"有没有红点"这一个信号 */
+.header-notification {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.18s ease;
+}
+
+.header-notification:hover {
+  background: #eef5f4;
+}
+
+/* 未读数字。**整个 header 里唯一带颜色的东西**——它是"需要立刻看一眼"的信号，
+   所以不跟着中性色走 */
+.header-notification-badge {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  box-sizing: border-box;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  color: #fff;
+  background: #e03e3e;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
 }
 
 .creator-center {
@@ -303,6 +353,72 @@ textarea {
   transform: scale(1.08);
 }
 
+/* 头像悬停弹层：纯 CSS hover，套路与 .creator-popover 一致
+   （不引入 JS 状态，鼠标移开会自己收回去，也不会有"点了别处没收起"的残留） */
+.avatar-center {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.avatar-popover {
+  position: absolute;
+  top: calc(100% + 12px);
+  right: 0;
+  z-index: 30;
+  display: grid;
+  gap: 10px;
+  min-width: 230px;
+  padding: 4px 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: white;
+  box-shadow: 0 20px 50px rgba(31, 39, 41, 0.14);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(8px);
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease,
+    visibility 0.18s ease;
+}
+
+/* 隐形桥：弹层与头像之间有 12px 间隙，没有它鼠标一移过去 hover 就断了、弹层闪没 */
+.avatar-popover::before {
+  content: '';
+  position: absolute;
+  top: -12px;
+  right: 0;
+  width: 100%;
+  height: 12px;
+}
+
+.avatar-center:hover .avatar-popover,
+.avatar-center:focus-within .avatar-popover {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.avatar-logout {
+  margin: 0 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: #dc2626;
+  background: white;
+  cursor: pointer;
+  font-weight: 700;
+  transition:
+    border-color 0.18s ease,
+    background 0.18s ease;
+}
+
+.avatar-logout:hover {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
 .shell-main {
   width: min(1320px, calc(100% - 32px));
   margin: 0 auto;
@@ -381,10 +497,19 @@ textarea {
 
 .feed-layout {
   display: grid;
-  grid-template-columns: 180px minmax(0, 1fr) 180px;
+  /* 两侧栏 220px：原先 180px 放「分类」标题 + 图标 + 文字偏挤。
+     中间仍是 1fr——容器同步放宽到 1400px，所以信息流宽度没变，加的全给了两侧 */
+  grid-template-columns: 220px minmax(0, 1fr) 220px;
   gap: 15px;
   align-items: start;
   margin-top: 0;
+}
+
+/* 首页把内容区放宽。用 :has 定向到「含三栏布局」的那个 shell，
+   不动 .shell-main 的通用宽度——否则个人中心、详情页那些单栏页面会一起变形。
+   不支持 :has 的浏览器自然降级回 1320px，只是两侧窄一点，不影响可用 */
+.shell-main:has(.home-feed-layout) {
+  width: min(1400px, calc(100% - 32px));
 }
 
 .home-feed-layout {
@@ -402,6 +527,16 @@ textarea {
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.88);
   box-shadow: var(--shadow-soft);
+}
+
+/* 与右侧「热度榜」保持同一套标题样式（颜色 / 字号 / 字重 / 居中）。
+   之前用了灰色 + 15px，两边并排时看着像两个层级的东西 */
+.category-rail-title {
+  padding: 0 0 6px;
+  color: var(--color-ink);
+  font-size: 16px;
+  font-weight: 700;
+  text-align: center;
 }
 
 .category-rail button {
@@ -470,30 +605,52 @@ textarea {
   top: 65px;
   z-index: 10;
   display: flex;
-  gap: 4px;
-  padding: 10px 14px;
+  gap: 34px;
+  padding: 12px 20px 0;
   border-bottom: 1px solid var(--color-border);
   background: rgba(255, 255, 255, 0.94);
   backdrop-filter: blur(16px);
 }
 
 .home-feed-layout .feed-tabs {
-  padding: 6px 14px;
+  padding: 10px 20px 0;
 }
 
+/* 掘金那套：选中**不用背景块**，靠字重 + 文字下方的小横线表达。
+   背景块在三个 tab 并排时会变成三个方块，视觉上比文字本身还重 */
 .feed-tabs button {
+  position: relative;
   border: 0;
-  border-radius: 8px;
-  padding: 8px 14px;
+  padding: 0 2px 13px;
   color: var(--color-muted);
   background: transparent;
   cursor: pointer;
+  font-size: 17px;
+  font-weight: 600;
+  transition: color 0.18s ease;
+}
+
+.feed-tabs button:hover {
+  color: var(--color-ink);
 }
 
 .feed-tabs button.active {
-  color: var(--color-forest);
-  background: var(--color-mint);
+  color: var(--color-ink);
+  background: transparent;
   font-weight: 800;
+}
+
+/* 选中态的小横线：贴着文字居中，比文字略窄 */
+.feed-tabs button.active::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: 4px;
+  width: 22px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--color-forest);
+  transform: translateX(-50%);
 }
 
 .article-list {
@@ -575,6 +732,17 @@ textarea {
   line-height: 1.7;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+/* 搜索关键词高亮。后端 ES 用 <em> 包（preTags 配置），前端兜底高亮也统一用 <em>，
+   所以样式只需要这一条——注意 em 默认是斜体，必须显式关掉 */
+.article-card h2 em,
+.article-card p em {
+  padding: 0 1px;
+  color: var(--color-forest);
+  background: var(--color-mint);
+  border-radius: 3px;
+  font-style: normal;
 }
 
 .article-stats {
@@ -1814,9 +1982,13 @@ textarea {
     padding: 12px 16px;
   }
 
-  .header-actions,
-  .header-nav {
+  .header-actions {
     justify-content: space-between;
+  }
+
+  /* 小屏时 header 变单列，秒杀入口的描述会撑破一行，收掉它（标题和箭头仍在） */
+  .header-seckill-desc {
+    display: none;
   }
 
   .header-search {

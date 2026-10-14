@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { walletApi } from '@/api/wallet'
 import type { WalletInfo } from '@/types/wallet'
-import { formatCredit } from '@/utils/format'
+import { formatCredit, displayCredit } from '@/utils/format'
 
 /**
  * 钱包余额小卡片（仿 SiteActivityCard）。
@@ -52,7 +52,7 @@ onMounted(async () => {
   <router-link v-if="wallet" class="wallet-card" to="/me/wallet">
     <div class="wallet-card-title">我的额度</div>
     <div class="wallet-card-value" :class="`is-${tone}`">
-      {{ formatCredit(wallet.balance) }}
+      {{ formatCredit(displayCredit(wallet)) }}
     </div>
     <div class="wallet-card-hint" :class="`is-${tone}`">{{ hint }}</div>
   </router-link>

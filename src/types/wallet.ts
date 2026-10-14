@@ -18,6 +18,20 @@ export interface WalletInfo {
    * - `== 0`：结算后仍为负，才需要充值
    */
   pendingReserveCount: number
+  /**
+   * 进行中的预扣**总额**（credit）。
+   *
+   * 预扣按该路径硬上限占款（一次 Workflow 可能先占 10000、实际只花几十），
+   * 所以展示时要用它把在途部分加回去——见 `utils/format.ts` 的 `displayCredit`。
+   */
+  pendingReserveCredit: number
+  /**
+   * 账单的**展示**保留期（天）。来自后端 `blog.wallet.bill-retention-days`，默认 7。
+   *
+   * 前端用它渲染「仅显示最近 N 天」——**不要把 7 硬编码进去**：
+   * 后端调配置时前端不用跟着改，用户看到的说明也不会和实际口径对不上。
+   */
+  billRetentionDays: number
 }
 
 /** 充值套餐（来自后端 blog.wallet.packages 配置） */

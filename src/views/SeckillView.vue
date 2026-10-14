@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { ArrowBack } from '@vicons/ionicons5'
@@ -17,8 +17,14 @@ const loading = ref(false)
 /** 正在发请求的活动 id——按钮转圈用 */
 const grabbing = ref<string | null>(null)
 
-/** 结果秒级产出，1 秒一次足够；上限 10 次是给「消费者恰好卡了一轮」留余量 */
-const POLL_INTERVAL_MS = 1000
+/**
+ * 结果轮询间隔。
+ *
+ * <p>入账本身是百毫秒级的，**轮询间隔成了主要感知延迟**：后端 settle 每 2 秒一轮，
+ * 最坏要等 2 秒；1 秒轮询会在这之上再叠最多 1 秒。压到 300ms 后总感知延迟明显降下来。
+ * 每轮请求很轻（只查一次 Redis 结果），10 次 × 300ms = 3 秒覆盖得下最坏情况。
+ */
+const POLL_INTERVAL_MS = 300
 const MAX_POLL_ATTEMPTS = 10
 const pollTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
@@ -29,18 +35,21 @@ const STALE_DRAFT_RETRY_MS = 3000
 /** 下限，避免边界就在眼前时打出一串请求 */
 const MIN_REFRESH_MS = 1000
 /**
- * 一个活动都没有（或全都排到了很久以后）时的兜底重拉间隔。
+ * 一个活动都没有时的兜底重拉间隔。
  *
- * 取 30 秒而不是几分钟：列表每天有一段几十秒的空窗——10:30 那一刻今天的场次被
- * `end_at > now` 过滤掉，而明天的要等每日任务跑下一轮才建出来。用户正好在那时打开的话，
- * 干等 5 分钟才看到卡片太久了。空列表时请求很轻（0 个活动 = 1 次查询），勤一点无所谓。
+ * 取 30 秒而不是几分钟：这是**纯兜底**——正常路径下服务端始终会返回「今天 + 明天」里的
+ * 至少一张卡（今天那场结束后仍以灰态留在列表上），不会出现空列表。但后端任务挂了、
+ * 或者刚好卡在跨天那一瞬，空列表也得有东西兜住，不能就此冻死。
+ * 空列表时请求很轻（0 个活动 = 1 次查询），勤一点无所谓。
  */
 const IDLE_REFRESH_MS = 30 * 1000
 
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
 
 async function loadActivities() {
-  loading.value = true
+  // 只在「还没有数据」时显示骨架屏：边界重试 / 兜底重拉都会走这里，
+  // 每次刷新都切一次骨架屏，列表看起来就是一直在闪
+  loading.value = activities.value.length === 0
   try {
     const res = await seckillApi.listActivities()
     activities.value = res.data ?? []
@@ -82,8 +91,8 @@ function scheduleRefresh() {
   if (waits.length === 0) {
     // ⚠️ 没有这一兜，这一页会就此冻死：列表空 ⇒ 排不出任何边界 ⇒ 永远不再拉取，
     // 用户挂着页面等开场，什么都不会发生。
-    // （正常也不该走到这里——服务端会始终保留一张「下一场」的卡；
-    //  但当天活动被抢完 + 下一场还没建出来的窗口、或者后端任务挂了，都会落到这）
+    // （正常也不该走到这里——服务端始终保留「今天 + 明天」的卡，今天那场结束后
+    //  仍以灰态留在列表上；但后端任务挂了、或者刚好卡在跨天那一瞬，都会落到这）
     refreshTimer = setTimeout(loadActivities, IDLE_REFRESH_MS)
     return
   }
@@ -95,7 +104,7 @@ function scheduleRefresh() {
  *
  * ⚠️ 后端返回 `QUEUED` **不是「抢到了」**——那只是名额占住了、事件进了队列。
  * 真正的发放是异步的，必须轮询到 `GRANTED` 才能告诉用户到账。
- * 这里把两步分开，是为了让界面上「排队中」和「已到账」永远是两个不同的样子。
+ * 这里把两步分开，是为了让界面上「入账中」和「已到账」永远是两个不同的样子。
  */
 async function grab(activity: SeckillActivity) {
   if (grabbing.value) {
@@ -177,18 +186,25 @@ type ActivityPhase = 'draft' | 'active' | 'ended'
 /**
  * 相位派生。
  *
- * ⚠️ **本地时钟只允许把状态推向「更不可抢」**：一个 ACTIVE 的活动过了 `endAt` 就显示已结束。
+ * ⚠️ **本地时钟只允许把状态推向「更不可抢」**：过了 `endAt` 就显示已结束。
  * 方向是保守的——最坏早显示几秒，绝不会出现「前端说能抢、后端说没开始」。
  * **`startAt` 永远不参与判断**，那一条只能等后端的 `status` 翻转解锁。
+ *
+ * ⚠️ **时间窗判断必须排在 `DRAFT` 之前**：服务在活动那半小时里没运行时，
+ * 场次会一直停在 `DRAFT`（后端已补自愈，但前端不该等它）。先判 DRAFT 的话，
+ * 一场早就结束的活动会整天显示「未开始」，还会连带把列表压成一场、并触发 3 秒一次的重拉。
  */
 function activityPhase(activity: SeckillActivity): ActivityPhase {
   if (activity.status === 'ENDED' || activity.remainingStock <= 0) {
     return 'ended'
   }
+  if (Date.now() >= new Date(activity.endAt).getTime()) {
+    return 'ended'
+  }
   if (activity.status === 'DRAFT') {
     return 'draft'
   }
-  return Date.now() >= new Date(activity.endAt).getTime() ? 'ended' : 'active'
+  return 'active'
 }
 
 function buttonLabel(activity: SeckillActivity): string {
@@ -197,7 +213,7 @@ function buttonLabel(activity: SeckillActivity): string {
     case 'GRANTED':
       return '已到账'
     case 'QUEUED':
-      return '排队中…'
+      return '入账中…'
     case 'FAILED_RETRY':
       return '发放异常'
     case 'FAILED':
@@ -226,6 +242,43 @@ function isBusy(activity: SeckillActivity): boolean {
   )
 }
 
+/**
+ * 实际展示的列表。
+ *
+ * 后端返回的口径是「今天 + 明天」，但**明天那场不该提前剧透**：
+ * 今天还没开始 / 正在跑的时候，明天那场对用户没有决策价值，只显示今天的；
+ * 今天全部结束（灰态）之后才把明天那场接上——列表也就不会出现「10:30 之后一片空白」。
+ *
+ * 依赖 `activities` 这个 ref，所以每次 `loadActivities` 之后都会重算；
+ * 而活动结束的那一刻由 `scheduleRefresh` 负责重新拉取（见那边的时间边界计算）。
+ *
+ * ⚠️ **位置有讲究，别挪到 `activityPhase` 和 `buttonLabel` 之间**：
+ * `seckill-lifecycle.spec.ts` 用「从 `function activityPhase(` 截到 `function buttonLabel(`」
+ * 来锁「本地时钟不许判断开始」这条约束，把本块挪进去会被算成 `activityPhase` 的一部分
+ * ——它用了 `startAt`，断言会红。
+ */
+const visibleActivities = computed(() => {
+  const list = activities.value
+  if (list.length === 0) {
+    return list
+  }
+
+  const now = new Date()
+  const isToday = (iso: string) => {
+    const d = new Date(iso)
+    return (
+      d.getFullYear() === now.getFullYear() &&
+      d.getMonth() === now.getMonth() &&
+      d.getDate() === now.getDate()
+    )
+  }
+
+  const todayList = list.filter((a) => isToday(a.startAt))
+  // 今天这场还没结束 → 明天的不显示；今天全结束了 → 两张都显示
+  const todayStillOpen = todayList.some((a) => activityPhase(a) !== 'ended')
+  return todayStillOpen ? todayList : list
+})
+
 function goBackToWallet() {
   if (router.options.history.state.back) {
     router.back()
@@ -251,7 +304,7 @@ onUnmounted(() => {
       <header class="seckill-header">
         <button class="seckill-back" type="button" @click="goBackToWallet">
           <n-icon :component="ArrowBack" size="18" />
-          返回钱包
+          返回
         </button>
         <h1>额度秒杀</h1>
         <p class="seckill-subtitle">
@@ -264,14 +317,14 @@ onUnmounted(() => {
       </div>
 
       <EmptyState
-        v-else-if="activities.length === 0"
+        v-else-if="visibleActivities.length === 0"
         title="暂无可参与的活动"
         description="每天定时开场，名额有限、先到先得——稍后刷新看看"
       />
 
       <ul v-else class="seckill-list">
         <li
-          v-for="activity in activities"
+          v-for="activity in visibleActivities"
           :key="activity.id"
           class="seckill-card"
           :class="[`is-${activity.myStatus.toLowerCase()}`, `phase-${activityPhase(activity)}`]"
@@ -377,7 +430,7 @@ onUnmounted(() => {
 }
 
 /* 未开始 / 已结束：中性灰。
-   刻意不抢「排队中」的暖黄与「已到账」的绿——那两色表达的是个人结果，
+   刻意不抢「入账中」的暖黄与「已到账」的绿——那两色表达的是个人结果，
    而这两色表达的是「这场活动现在跟你能做的事无关」。 */
 .seckill-card.phase-draft,
 .seckill-card.phase-ended {
@@ -385,7 +438,7 @@ onUnmounted(() => {
   background: #f8fafc;
 }
 
-/* 排队中：暖黄，和钱包的「预占中」三态保持一致——它是进行中，不是告警 */
+/* 入账中：暖黄，和钱包的「预占中」三态保持一致——它是进行中，不是告警 */
 .seckill-card.is-queued {
   border-color: #fde68a;
   background: #fffbeb;

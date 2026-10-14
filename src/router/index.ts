@@ -12,6 +12,7 @@ import HotRankView from '@/views/HotRankView.vue'
 import AuthCallbackView from '@/views/AuthCallbackView.vue'
 import LearningPlansView from '@/views/LearningPlansView.vue'
 import WalletView from '@/views/WalletView.vue'
+import NotificationsView from '@/views/NotificationsView.vue'
 import SeckillView from '@/views/SeckillView.vue'
 import LearningPlanDetailView from '@/views/LearningPlanDetailView.vue'
 import DevAgentRunsView from '@/views/DevAgentRunsView.vue'
@@ -84,6 +85,12 @@ const router = createRouter({
       name: 'wallet',
       component: WalletView,
       meta: { title: '我的钱包', requiresAuth: true },
+    },
+    {
+      path: '/me/notifications',
+      name: 'notifications',
+      component: NotificationsView,
+      meta: { title: '消息', requiresAuth: true },
     },
     // 后端活动列表对游客开放，但前端页面要求登录：抢购本身必须登录，
     // 而「看得到抢不了」只会多出一次「点了才提示登录」的无效点击

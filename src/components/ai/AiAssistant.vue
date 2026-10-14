@@ -54,6 +54,7 @@ import { completeLiveProcessSteps, finalizeFailedStreamMessage } from './streamM
 import { useAuthStore } from '@/stores/auth'
 import { walletApi } from '@/api/wallet'
 import type { WalletInfo } from '@/types/wallet'
+import { displayCredit, formatCredit } from '@/utils/format'
 
 // ============================================================
 // Auth & guest
@@ -2292,6 +2293,24 @@ const walletTone = computed(() => {
   return info.pendingReserveCount > 0 ? 'pending' : 'empty'
 })
 
+/**
+ * 余额入口的悬浮说明。
+ *
+ * 有调用在途时要把「预占」讲清楚：卡片上显示的是**加回在途预占**后的额度
+ * （见 format.ts 的 displayCredit），而账单里那一刻可能显示得更少——
+ * 不说清，用户会以为两个数字对不上。
+ */
+const walletTitle = computed(() => {
+  const info = wallet.value
+  if (!info) {
+    return '查看我的钱包'
+  }
+  if (info.pendingReserveCount > 0) {
+    return `有 ${info.pendingReserveCount} 次 AI 调用进行中，额度已临时占用，结束后按实际用量结算`
+  }
+  return info.balance > 0 ? '查看我的钱包' : '额度不足，点击充值'
+})
+
 async function loadWallet() {
   try {
     const res = await walletApi.getWallet()
@@ -3186,11 +3205,11 @@ watch(visible, async (v) => {
             type="button"
             class="ai-balance-chip"
             :class="`is-${walletTone}`"
-            :title="walletTone === 'empty' ? '额度不足，点击充值' : '查看我的钱包'"
+            :title="walletTitle"
             @mousedown.stop
             @click="goWallet"
           >
-            {{ wallet.balance }}
+            {{ formatCredit(displayCredit(wallet)) }}
           </button>
         </div>
         <div class="ai-panel-actions">
