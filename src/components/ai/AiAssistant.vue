@@ -3166,6 +3166,34 @@ watch(visible, async (v) => {
     loadMemoryCandidates()
   }
 })
+
+/*
+ * 2026-10-17 上线审计：登录态变化必须重置面板状态。
+ *
+ * 改造前登出只清了 token（auth store），面板里的消息、会话列表、Workflow 卡片、
+ * 记忆候选全是内存状态——共用设备上换个账号打开面板，能看到上一个账号的完整对话。
+ * 这里在登录态切换时整块清空；游客数据（sessionStorage）在登出时也一并清掉。
+ */
+watch(
+  () => authStore.isLoggedIn,
+  (loggedIn) => {
+    currentSessionId.value = null
+    sessions.value = []
+    messages.value = []
+    activeWorkflow.value = null
+    workflowStepLogs.value = {}
+    workflowStepLogsExpanded.value = {}
+    workflowStepLogsLoading.value = {}
+    workflowStreamingContent.value = {}
+    workflowStreamingOutline.value = {}
+    resetWorkflowRejectUI()
+    resetCompressionHint()
+    if (!loggedIn) {
+      clearGuestData()
+      guestUsedCount.value = 0
+    }
+  },
+)
 </script>
 
 <template>

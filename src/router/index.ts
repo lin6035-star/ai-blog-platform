@@ -149,6 +149,14 @@ const router = createRouter({
       component: () => import('@/views/DevAgentRunDetailView.vue'),
       meta: { title: 'Agent 运行详情', requiresAuth: true },
     },
+    // 2026-10-17 上线审计补：兜底路由。没有它时错误 URL 是一张**空白页**
+    // （Vue Router 匹配不到就不渲染，控制台也不报错），用户会以为站点挂了。
+    {
+      path: '/:pathMatch(.*)*',
+      name: 'not-found',
+      component: () => import('@/views/NotFoundView.vue'),
+      meta: { title: '页面不存在' },
+    },
   ],
 })
 
