@@ -46,6 +46,20 @@ spring:
       # 强制 fail-fast 会逼着"无密码 Redis"的部署去设一个空变量，没有意义。
       # 反过来说：生产 Redis 若设了密码，这里必须给值，否则连不上。
       password: ${REDIS_PASSWORD:}
+  mail:
+    # 生产：**无默认值**（与其它敏感项一致）。少一个就启动失败，
+    # 不允许静默退回 application.yml 里的 QQ 邮箱默认值。
+    host: ${MAIL_HOST}
+    port: ${MAIL_PORT}
+    username: ${MAIL_USERNAME}
+    password: ${MAIL_PASSWORD}
+    default-encoding: UTF-8
+    properties:
+      mail.smtp.ssl.enable: true
+      mail.smtp.connectiontimeout: 5000
+      mail.smtp.timeout: 5000
+      mail.smtp.writetimeout: 5000
+
   servlet:
     multipart:
       max-file-size: 10MB

@@ -49,6 +49,12 @@ class ArticleDeciderPromptTests {
     /** 改造前实测基线（2026-09-30 落盘夹具时的运行时长度） */
     private static final int ANALYSIS_ONLY_NORMAL_BASELINE = 3986;
 
+    /**
+     * 指代判定段 tail 的结尾（2026-10-18 新增段落的固定锚点）。
+     * 跨级指代规则插在它之后；基线夹具代表改造前的 prompt、拒绝覆盖，所以差异在这里显式声明。
+     */
+    private static final String PRONOUN_TAIL_ANCHOR = "是指当前这篇《X》吗？\"）\n";
+
     /** §8.4：静态数字门 30% → 裁剪后不得超过基线的 70% */
     private static final double STATIC_GATE = 0.70;
 
@@ -68,9 +74,14 @@ class ArticleDeciderPromptTests {
     @Test
     @DisplayName("FULL 正常轮除 answerPlan 协议外与改造前逐字一致")
     void fullNormalIsIdenticalToBaseline() throws Exception {
+        // 期望串对齐实现的当前文案：ACT_FINAL_ANSWER 收紧过 answerPlan 约束（"单个字符串…总计不超过 500 字"），
+        // 本期望串没跟上 → 该用例长期红着（2026-10-18 修，与 repair 轮同一处漂移）
         String expected = fixture(DeciderPromptBaselineDumpTests.FULL_NORMAL)
                 .replace("input.answer = 完整的回答文本（中文）",
-                        "input.answerPlan = 1-5 条简短的拟回答要点（中文，禁止展开成完整正文）");
+                        "input.answerPlan = 单个字符串，写 1-5 条简短的拟回答要点（用分号分隔，总计不超过 500 字，禁止展开成完整正文）")
+                // 2026-10-18 有意新增：跨级指代规则（"再前面那篇"不再被静默当成 SESSION_LAST）
+                .replace(PRONOUN_TAIL_ANCHOR,
+                        PRONOUN_TAIL_ANCHOR + ArticleDeciderPrompts.RULE_CROSS_LEVEL_FULL);
         assertIdentical(DeciderPromptBaselineDumpTests.FULL_NORMAL,
                 expected, full.buildSystemPrompt(false));
     }
@@ -78,10 +89,14 @@ class ArticleDeciderPromptTests {
     @Test
     @DisplayName("FULL 修复轮除 answerPlan 约束外与改造前逐字一致")
     void fullRepairIsIdenticalToBaseline() throws Exception {
+        // 期望串对齐同步为实现的当前文案（"单个字符串…总计不超过 500 字"）：实现收紧 answerPlan 约束时
+        // 只改了 ArticleDeciderPrompts 的修复轮文案，本期望串没跟上 → 该用例长期红着（2026-10-18 修）
         String expected = fixture(DeciderPromptBaselineDumpTests.FULL_REPAIR)
                 .replace("禁止输出 markdown、代码块或任何解释文字。",
-                        "FINAL_ANSWER 必须带非空 input.answerPlan（1-5 条简短要点），禁止使用 input.answer。\n"
-                                + "禁止输出 markdown、代码块或任何解释文字。");
+                        "FINAL_ANSWER 必须带非空 input.answerPlan（单个字符串，1-5 条简短要点，总计不超过 500 字），禁止使用 input.answer。\n"
+                                + "禁止输出 markdown、代码块或任何解释文字。")
+                .replace(PRONOUN_TAIL_ANCHOR,
+                        PRONOUN_TAIL_ANCHOR + ArticleDeciderPrompts.RULE_CROSS_LEVEL_FULL);
         assertIdentical(DeciderPromptBaselineDumpTests.FULL_REPAIR,
                 expected, full.buildSystemPrompt(true));
     }

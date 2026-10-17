@@ -4498,6 +4498,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
      * V3.8：会话内消息数为 0 时清空文章锚（含全部消息被逐条删除的场景）。
      * V3.12：**结论锚一并清**——否则用户清空聊天记录后，系统仍会继承已删除对话里的优化建议，
      * 与 V3.8 建立的「清空对话 = 上下文归零」语义冲突。
+     * V4.x：**学习计划锚一并清**（2026-10-18 补）——同一语义的第三个漏网锚：
+     * 清空对话后说"继续改那个计划"，系统仍会从锚里捞出已删除对话里定位过的计划。
      */
     private void clearArticleAnchorIfSessionEmpty(Long sessionId) {
         Long remaining = lambdaQuery()
@@ -4517,6 +4519,10 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                 .set(AiSessions::getLastConclusionSourceRunId, null)
                 .set(AiSessions::getLastConclusionSourceType, null)
                 .set(AiSessions::getLastConclusionUpdatedAt, null)
+                .set(AiSessions::getLastLearningPlanId, null)
+                .set(AiSessions::getLastLearningPlanTitle, null)
+                .set(AiSessions::getLastLearningPlanSource, null)
+                .set(AiSessions::getLastLearningPlanUpdatedAt, null)
                 .update();
     }
 

@@ -1,6 +1,7 @@
 package com.hailin.blogsystem.interceptor;
 
 import com.hailin.blogsystem.security.TokenBlacklist;
+import com.hailin.blogsystem.security.TokenVersionStore;
 import com.hailin.blogsystem.utils.JwtUtil;
 import com.hailin.blogsystem.utils.UserContext;
 import jakarta.servlet.http.HttpServletRequest;
@@ -18,6 +19,7 @@ public class OptionalJwtInterceptor implements AsyncHandlerInterceptor {
 
     private final JwtUtil jwtUtil;
     private final TokenBlacklist tokenBlacklist;
+    private final TokenVersionStore tokenVersionStore;
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response,
@@ -31,8 +33,10 @@ public class OptionalJwtInterceptor implements AsyncHandlerInterceptor {
         String token = authHeader.substring(7);
         try {
             JwtUtil.Payload payload = jwtUtil.parsePayload(token);
-            // 已登出的 token 按游客处理：公开接口不报错，但不能再以这个身份做写操作
-            if (tokenBlacklist.isRevoked(payload.jti())) {
+            // 已登出、或改密后代次已过期的 token：公开接口不报错，但不能再以这个身份做写操作
+            boolean stale = tokenBlacklist.isRevoked(payload.jti())
+                    || payload.tokenVersion() != tokenVersionStore.current(payload.userId());
+            if (stale) {
                 UserContext.clear();
             } else {
                 UserContext.set(payload.userId());

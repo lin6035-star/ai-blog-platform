@@ -9,15 +9,19 @@ import com.hailin.blogsystem.entity.vo.AuthVO;
 import com.hailin.blogsystem.entity.vo.UsersVO;
 import com.hailin.blogsystem.exception.BusinessException;
 import com.hailin.blogsystem.mapper.LoginMapper;
+import com.hailin.blogsystem.security.CaptchaVerifier;
 import com.hailin.blogsystem.security.LoginAttemptLimiter;
 import com.hailin.blogsystem.security.TokenBlacklist;
 import com.hailin.blogsystem.service.LoginService;
 import com.hailin.blogsystem.service.WalletService;
 import com.hailin.blogsystem.utils.AliyunOSSOperator;
+import com.hailin.blogsystem.utils.EmailUtils;
+import com.hailin.blogsystem.utils.PasswordPolicy;
 import com.hailin.blogsystem.utils.JwtUtil;
 import com.hailin.blogsystem.utils.Result;
 import com.hailin.blogsystem.utils.UserContext;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -27,6 +31,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.Duration;
 import java.time.LocalDateTime;
 
 @Service
@@ -38,7 +43,18 @@ public class LoginServiceImpl extends ServiceImpl<LoginMapper, Users>
     private final LoginAttemptLimiter loginAttemptLimiter;
     private final TokenBlacklist tokenBlacklist;
     private final WalletService walletService;
+    private final CaptchaVerifier captchaVerifier;
     private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
+
+    /**
+     * 「记住我」的两种有效期。**时长由服务端定，客户端只传意愿**——
+     * 让前端传秒数等于把令牌策略交给调用方，以后改天数还得跟着改前端。
+     */
+    @Value("${jwt.expire.long}")
+    private Duration longTokenTtl;
+
+    @Value("${jwt.expire.short}")
+    private Duration shortTokenTtl;
 
     /**
      * 账号不存在时用来"陪跑"的 bcrypt hash：类加载时现算一个，
@@ -51,6 +67,17 @@ public class LoginServiceImpl extends ServiceImpl<LoginMapper, Users>
     public AuthVO register(RegisterDTO registerDTO) {
         validateRegisterDTO(registerDTO);
 
+        // 长度由 DTO 的 @Size 管；这里只查弱密码表（声明式注解做不了集合比对）。
+        // 不查的话，攻击者用泄露库里的弱密码撞库命中率极高——限流挡得住"同一账号反复试"，
+        // 挡不住"每个账号试一两次"的撞库。
+        String weakReason = PasswordPolicy.validate(registerDTO.getPassword());
+        if (weakReason != null) {
+            throw new BusinessException(BlogConstants.ErrorCode.BAD_REQUEST, weakReason);
+        }
+
+        // 注册同样要过验证码：不限流的话，批量刷号（占用户名 / 薅注册赠送额度）比撞库更划算
+        captchaVerifier.verify(registerDTO.getCaptchaVerification());
+
         Users users = lambdaQuery()
                 .eq(Users::getUsername, registerDTO.getUsername())
                 .eq(Users::getLoginType, "password")
@@ -59,9 +86,19 @@ public class LoginServiceImpl extends ServiceImpl<LoginMapper, Users>
             throw new BusinessException(BlogConstants.ErrorCode.BAD_REQUEST, "用户名已存在");
         }
 
+        // 邮箱也要唯一：它是找回密码的唯一通道，重复了「重置链接该发给谁」就说不清了。
+        // **归一化后再比**：`A@x.com` 与 `a@x.com` 是同一个邮箱，不归一化的话两个都能注册，
+        // 而找回时只命中其中一个（与 LoginAttemptLimiter 对用户名做归一化同一个理由）。
+        String email = EmailUtils.normalize(registerDTO.getEmail());
+        Users emailOwner = lambdaQuery().eq(Users::getEmail, email).one();
+        if (emailOwner != null) {
+            throw new BusinessException(BlogConstants.ErrorCode.BAD_REQUEST, "该邮箱已被注册");
+        }
+
         Users user = new Users();
         user.setUsername(registerDTO.getUsername());
         user.setNickname(registerDTO.getNickname());
+        user.setEmail(email);
         user.setPasswordHash(passwordEncoder.encode(registerDTO.getPassword()));
         user.setLoginType("password");
         user.setCreatedAt(LocalDateTime.now());
@@ -72,12 +109,26 @@ public class LoginServiceImpl extends ServiceImpl<LoginMapper, Users>
         // 反过来「用户建出来了却报注册失败」会让用户名被自己占死，重试都重试不了。
         walletService.grantInitialCredit(user.getId());
 
-        return buildAuthVO(user);
+        // 刚注册的人必然在自己的设备上，给长值——否则第二天就要重新登录，体验很差
+        return buildAuthVO(user, longTokenTtl);
     }
 
     @Override
     public AuthVO login(LoginDTO loginDTO, String clientIp) {
         validateLoginDTO(loginDTO);
+
+        // 验证码排在**限流之前**：没通过验证码的请求不代表密码错，不该计入失败次数。
+        // 顺序反过来的话，任何人拿别人的用户名连刷无效凭证，就能把真实账号锁死 15 分钟
+        //（LoginAttemptLimiter 的已知残留代价就这么被放大了）。
+        // 凭证是一次性的（消费即销毁），所以这里过了就过了，后续密码错了也不会退还。
+        captchaVerifier.verify(loginDTO.getCaptchaVerification());
+
+        // BCrypt 对 >72 字节的密码会抛 IllegalArgumentException（实测 Spring Security 6 的行为）。
+        // 正常注册的密码不可能超长（PasswordPolicy 拦了），但**攻击者可以随便构造**——
+        // 不拦的话一次请求就换来一个 500。这里按"密码错误"处理，和其它失败路径一致。
+        if (PasswordPolicy.exceedsBcryptLimit(loginDTO.getPassword())) {
+            throw loginFailed(loginDTO.getUsername(), clientIp);
+        }
 
         // 查库之前先拦：锁定时既不做 bcrypt 计算，也不让"是否被锁"成为账号存在性的探针
         loginAttemptLimiter.checkBlocked(loginDTO.getUsername(), clientIp);
@@ -101,7 +152,11 @@ public class LoginServiceImpl extends ServiceImpl<LoginMapper, Users>
         // 只清账号维度：IP 维度表达的是"这个来源可疑"，成功登录证明不了同一出口下的其他人（详见类注释）
         loginAttemptLimiter.clear(loginDTO.getUsername());
 
-        return buildAuthVO(users);
+        // 「记住我」= **有效期不同**，不是把密码存进浏览器：
+        // 勾选 30 天、不勾 24 小时。null 按"不记住"处理，理由见 LoginDTO#rememberMe
+        Duration ttl = Boolean.TRUE.equals(loginDTO.getRememberMe()) ? longTokenTtl : shortTokenTtl;
+
+        return buildAuthVO(users, ttl);
     }
 
     @Override
@@ -209,12 +264,15 @@ public class LoginServiceImpl extends ServiceImpl<LoginMapper, Users>
     }
 
 
-    private AuthVO buildAuthVO(Users user) {
+    /**
+     * @param ttl 本次签发的有效期：注册走长值，登录按「记住我」选
+     *            （时长定义在 application.yml 的 {@code jwt.expire}）
+     */
+    private AuthVO buildAuthVO(Users user, Duration ttl) {
         AuthVO authVO = new AuthVO();
-        authVO.setToken(jwtUtil.generateToken(user.getId()));
+        authVO.setToken(jwtUtil.generateToken(user.getId(), user.tokenVersionOrDefault(), ttl));
         authVO.setUsersVO(UsersVO.from(user));
         return authVO;
-
     }
 
     private void validateRegisterDTO(RegisterDTO registerDTO) {

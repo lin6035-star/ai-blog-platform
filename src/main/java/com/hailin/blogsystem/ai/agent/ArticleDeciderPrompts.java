@@ -175,6 +175,27 @@ final class ArticleDeciderPrompts {
     private static final String RULE_SUGGEST_WORKFLOW =
             "- 用户诉求是\"真正去改文章\"且需要 AI 给出改法（泛泛的优化、重写开头等）时，用 SUGGEST_WORKFLOW 建议 OPTIMIZE_ARTICLE\n";
 
+    /**
+     * 跨级指代规则（2026-10-18 补）：用户指向"比最近一次更早"的文章。
+     *
+     * 与上面"两候选不清"是**两种不同的不猜**：那个是"候选里有一个对的、但分不清是哪个"，
+     * 这个是"候选里根本没有用户要的那个"。所以必须让它**显式退出**候选映射——
+     * 否则"再前面那篇"里的"那篇"会把它带进 SESSION_LAST，那等于拿最近一篇冒充答案（答错一篇文章）。
+     *
+     * package-private 而非 private：{@link ArticleDeciderPromptTests} 的 FULL 逐字等价门要引用它做差异声明
+     * ——基线夹具代表改造前的 prompt、拒绝覆盖，有意新增的段落必须在测试里显式写出来。
+     */
+    static final String RULE_CROSS_LEVEL_FULL =
+            "- 跨级指代（\"再前面 / 再往前 / 更早 / 上上篇 / 倒数第二篇\"，指比最近一次更早的文章）：\n"
+                    + "  候选里没有这个对象，不许当成本篇或 SESSION_LAST——会话只保留最近一次定位的文章；\n"
+                    + "  用 ASK_USER 如实说明并请用户给出标题、或打开那篇详情页\n";
+
+    /** ANALYSIS_ONLY：没有 ASK_USER 动作，只能如实说明 */
+    static final String RULE_CROSS_LEVEL_ANALYSIS =
+            "- 跨级指代（\"再前面 / 再往前 / 更早 / 上上篇 / 倒数第二篇\"，指比最近一次更早的文章）：\n"
+                    + "  候选里没有这个对象，不许当成本篇或 SESSION_LAST——会话只保留最近一次定位的文章；\n"
+                    + "  用 FINAL_ANSWER 如实说明并请用户给出标题、或打开那篇详情页\n";
+
     /** 按模式：指代判定本身两模式都要，只有"怎么处理歧义"不同 */
     private static String rulePronoun(Mode mode) {
         // 用字符串字面量而不是文本块：这段要拼在上一句之后，必须带 2 空格续行缩进；
@@ -187,7 +208,7 @@ final class ArticleDeciderPrompts {
                   "这篇 / 它 / 当前文章 / 这篇文章" 或没有指代词 → 当前页文章（CURRENT_PAGE）
                   "刚刚那篇 / 刚才那篇 / 之前说的那篇"（时间近指，指对话里聊过的）→ SESSION_LAST（会话最近文章）
                   特别注意：用户说"刚刚那篇"而系统标注【会话最近讨论文章】无 → 本会话没有可指的"刚刚那篇"，
-                """ + tail;
+                """ + tail + (mode == Mode.FULL ? RULE_CROSS_LEVEL_FULL : RULE_CROSS_LEVEL_ANALYSIS);
     }
 
     /** 仅 FULL */

@@ -16,3 +16,20 @@
 github:
   oauth:
     client-secret: your-github-oauth-client-secret
+
+# 邮件：忘记密码的重置链接。
+#
+# ⚠️ **不填不会报错**：忘记密码接口照样回「已发送」，但实际只打一条 ERROR 日志
+#    （防枚举的代价——对所有情况都返回同一句话）。所以配完**必须**看启动日志确认：
+#        [MAIL] 发信已配置: from=xxx@qq.com     ← 这行才算配好
+#        [MAIL] 未配置 spring.mail.username...   ← 还是这行 = 没生效
+#
+# ⚠️ QQ 邮箱这里填的是**授权码**，不是 QQ 密码：
+#    QQ邮箱 → 设置 → 账户 → POP3/IMAP/SMTP 服务 → 开启 SMTP → 生成授权码（16 位，只显示一次）
+#
+# 配好后先打一发自检，能立刻区分「配置问题」和「业务问题」：
+#    curl.exe -X POST "http://localhost:8080/api/dev/mail/check?to=你的另一个邮箱@example.com"
+spring:
+  mail:
+    username: 3288114535@qq.com
+    password: yydnjbojodaxdcbe

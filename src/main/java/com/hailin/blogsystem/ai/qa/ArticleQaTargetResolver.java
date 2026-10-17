@@ -51,6 +51,33 @@ public class ArticleQaTargetResolver {
         S0_NONE
     }
 
+    /**
+     * 跨级指代判定（2026-10-18 补）：用户指向"比最近一次更早"的文章。
+     *
+     * 与 {@link Signal} **正交**而非并列的一档：Signal 回答"指哪个方向的候选"（页面 / 会话 / 都不清），
+     * 而"再前面那篇"同时含跨级词与"那篇"，塞进互斥枚举装不下两个维度。
+     *
+     * 为什么命中就追问、不静默回落：会话只保留最近一次定位（`last_article_id` 单槽），
+     * 序位指代**结构性无解**——静默当成本会话最近那篇就是"答错一篇文章"，
+     * 比多问一句严重得多（V3.8/V3.9 一贯的「宁可不猜」）。
+     *
+     * 词集**刻意收窄**到明确排除最近一个的说法：
+     * - 收 `再前面/再往前/更早/上上/倒数第二`
+     * - **不收「前一篇/上一篇」**：它完全可能指"上一轮说的那篇"（就是最近锚），
+     *   收进来会把正常近指误伤成追问
+     * - 跨级词必须**与文章指代同现**：「更早说的那个观点」是对话内容追问，不是指文章
+     *   （同 S2 的设计：时间近指也要求与文章指代同现）
+     * - 指代词含「篇」是为了覆盖"上上篇/倒数第二篇"这类不带"那篇"的说法
+     */
+    static boolean isCrossLevel(String message) {
+        if (message == null || message.isBlank()) {
+            return false;
+        }
+        boolean crossLevelWord = containsAny(message, "再前面", "再往前", "更早", "上上", "倒数第二");
+        boolean articleDeixis = containsAny(message, "那篇", "这篇", "文章", "它", "篇");
+        return crossLevelWord && articleDeixis;
+    }
+
     private final ArticleSessionAnchorService anchorService;
 
     /**
@@ -59,6 +86,15 @@ public class ArticleQaTargetResolver {
     public QaTarget resolve(String message, PageContextDTO pageContext, Long sessionId, Long userId) {
         Articles pageArticle = resolvePageCandidate(pageContext, userId);
         Articles anchorArticle = anchorService.resolveReadable(sessionId, userId);
+
+        // 跨级指代（2026-10-18）：排在 S 档之前——单锚下无解，不猜、直接追问。
+        // 不做游客豁免（V3.9 对 S2 有豁免）：游客说"再前面那篇"同样不可能指当前页这篇。
+        if (isCrossLevel(message)) {
+            return QaTarget.promptNote(noteCrossLevel(
+                    pageArticle == null ? null : pageArticle.getTitle(),
+                    anchorArticle == null ? null : anchorArticle.getTitle()));
+        }
+
         // 游客无归属会话：没有"会话最近文章"概念，会话近指无从解析 → 信号降级，
         // 避免详情页问"刚才那篇"（大概率是当前页口语）被澄清规则误伤
         Signal signal = sessionId == null ? Signal.S0_NONE : classifySignal(message);
@@ -143,6 +179,32 @@ public class ArticleQaTargetResolver {
         return "用户用\"那篇\"指代一篇文章，但当前可能指：当前页《" + safe(pageTitle)
                 + "》或本会话最近聊过的《" + safe(anchorTitle)
                 + "》。先用一句话向用户确认指哪一篇，确认前不要回答文章内容。";
+    }
+
+    /**
+     * 跨级指代追问文案（2026-10-18）：如实说明"只记得最近一篇"，引导用户给标题或打开详情页。
+     *
+     * 刻意**不**把现有候选包装成"二选一"（不像 {@link #askWhich}）——用户要的第三个本来就不在候选里，
+     * 让他从两个错的中挑一个只会更糟。候选标题只作"我能看到什么"的如实交代。
+     */
+    private static String noteCrossLevel(String pageTitle, String anchorTitle) {
+        StringBuilder sb = new StringBuilder(
+                "用户用\"再前面/更早\"指代一篇比最近一次更早的文章，但本会话只保留最近一次定位的文章，"
+                        + "无法按序找回更早的那一篇。");
+        if (pageTitle != null && anchorTitle != null) {
+            sb.append("系统当前能看到的只有当前页《").append(safe(pageTitle))
+                    .append("》与本会话最近聊过的《").append(safe(anchorTitle))
+                    .append("》——都不是用户要的\"再前面那篇\"，不要拿它们充当答案。");
+        } else if (pageTitle != null) {
+            sb.append("系统当前能看到的只有当前页《").append(safe(pageTitle))
+                    .append("》——它不是用户要的\"再前面那篇\"，不要拿它充当答案。");
+        } else if (anchorTitle != null) {
+            sb.append("系统当前能看到的只有本会话最近聊过的《").append(safe(anchorTitle))
+                    .append("》——它不是用户要的\"再前面那篇\"，不要拿它充当答案。");
+        }
+        sb.append("先用一句话如实说明你只记得最近一篇，请用户说出目标文章的标题、"
+                + "或打开那篇文章的详情页后再问；在用户给出标题或打开页面之前，不要回答任何文章内容。");
+        return sb.toString();
     }
 
     private static String noteRecentNoRecord(String pageTitle) {

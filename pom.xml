@@ -136,6 +136,25 @@
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
+        <!-- 行为验证码（滑块 / 旋转 / 滑动还原 / 文字点选）。
+             选它而不是图形字符验证码：图形码已被 OCR + 打码平台攻破，只能抬高最廉价那批脚本的成本；
+             行为码判的是「滑动轨迹的加速度与平滑度」，防护力高一个量级。
+             starter 用 jakarta.servlet，与 Spring Boot 3 原生兼容；检测到 Redis 时自动把
+             验证码数据存 Redis（见 CacheStoreAutoConfiguration$RedisCacheStoreConfiguration）。 -->
+        <dependency>
+            <groupId>cloud.tianai.captcha</groupId>
+            <artifactId>tianai-captcha-springboot-starter</artifactId>
+            <version>1.5.5</version>
+        </dependency>
+
+        <!-- 邮件：忘记密码的重置链接走 SMTP。
+             host / 端口 / 账号 / 授权码**全部走环境变量**，代码里不硬编码任何服务商——
+             换服务商只改环境变量，不动代码。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-mail</artifactId>
+        </dependency>
+
         <!-- spring-ai-->
         <dependency>
             <groupId>org.springframework.ai</groupId>

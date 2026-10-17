@@ -37,7 +37,7 @@ class UsersControllerTests {
 
     @Test
     void updatesCurrentUserProfile() throws Exception {
-        String token = jwtUtil.generateToken(101L);
+        String token = jwtUtil.generateToken(101L, 0);
 
         mockMvc.perform(put("/api/users/me/profile")
                         .header("Authorization", "Bearer " + token)
@@ -57,7 +57,7 @@ class UsersControllerTests {
 
     @Test
     void getsCurrentUserInfoWithFollowCounts() throws Exception {
-        String token = jwtUtil.generateToken(100L);
+        String token = jwtUtil.generateToken(100L, 0);
 
         mockMvc.perform(get("/api/users/me")
                         .header("Authorization", "Bearer " + token))
@@ -85,7 +85,7 @@ class UsersControllerTests {
 
     @Test
     void getsPublicUserFollowersAndExcludesSoftDeletedFollows() throws Exception {
-        String authorToken = jwtUtil.generateToken(100L);
+        String authorToken = jwtUtil.generateToken(100L, 0);
 
         mockMvc.perform(get("/api/users/100/followers")
                         .header("Authorization", "Bearer " + authorToken)
@@ -103,7 +103,7 @@ class UsersControllerTests {
 
     @Test
     void keepsMutualFollowStateAfterRefreshingFollowersList() throws Exception {
-        String authorToken = jwtUtil.generateToken(100L);
+        String authorToken = jwtUtil.generateToken(100L, 0);
 
         mockMvc.perform(post("/api/users/102/follow")
                         .header("Authorization", "Bearer " + authorToken))
@@ -124,7 +124,7 @@ class UsersControllerTests {
 
     @Test
     void publicUserInfoUsesActiveFollowState() throws Exception {
-        String authorToken = jwtUtil.generateToken(100L);
+        String authorToken = jwtUtil.generateToken(100L, 0);
 
         mockMvc.perform(get("/api/users/101")
                         .header("Authorization", "Bearer " + authorToken))
@@ -143,7 +143,7 @@ class UsersControllerTests {
 
     @Test
     void keepsFollowStateAfterRefreshingPublicProfile() throws Exception {
-        String authorToken = jwtUtil.generateToken(100L);
+        String authorToken = jwtUtil.generateToken(100L, 0);
 
         mockMvc.perform(post("/api/users/102/follow")
                         .header("Authorization", "Bearer " + authorToken))
@@ -166,5 +166,46 @@ class UsersControllerTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(0))
                 .andExpect(jsonPath("$.data.followed").value(false));
+    }
+
+    // ============ 用户搜索（2026-10-17）============
+
+    /**
+     * 路径不被 {@code /api/users/{id}} 吞掉的契约测试。
+     *
+     * <p>UserInfoController 是 {@code /api/users/{id}}，本接口是 {@code /api/users/search}——
+     * 一旦 Spring 把 "search" 当成 id，`Long.valueOf("search")` 会直接失败（400/500），
+     * 前端看到的就是"搜索坏了"。字面量优先于变量段，这里把它钉死。
+     *
+     * <p>同时验证游客可访问（不带 Authorization），且空的关键词不报错。
+     */
+    @Test
+    void searchesUsersByNicknameWithoutAuth() throws Exception {
+        mockMvc.perform(get("/api/users/search").param("keyword", "Nick"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.list", hasSize(3)))
+                .andExpect(jsonPath("$.data.total").value(3));
+
+        mockMvc.perform(get("/api/users/search"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.list", hasSize(0)));
+    }
+
+    @Test
+    void userSearchFillsFollowStateForLoggedInUser() throws Exception {
+        String authorToken = jwtUtil.generateToken(100L, 0);
+
+        // 种子数据：100 关注了 101，所以搜到 101 时 followed=true
+        mockMvc.perform(get("/api/users/search")
+                        .header("Authorization", "Bearer " + authorToken)
+                        .param("keyword", "Reader"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.list", hasSize(1)))
+                .andExpect(jsonPath("$.data.list[0].nickname").value("Reader Nick"))
+                .andExpect(jsonPath("$.data.list[0].followed").value(true))
+                .andExpect(jsonPath("$.data.list[0].self").value(false));
     }
 }

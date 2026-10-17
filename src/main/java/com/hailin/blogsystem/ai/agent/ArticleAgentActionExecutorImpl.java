@@ -465,10 +465,10 @@ public class ArticleAgentActionExecutorImpl implements ArticleAgentActionExecuto
      * 用户记忆检索：语义记忆 + 情景记忆，按检索词召回。
      */
     private AgentActionResult queryMemory(AgentStepDecision decision, Long userId) {
-        String question = text(decision.input(), "question");
-        String keyword = text(decision.input(), "keyword");
-        String query = question != null ? question : keyword;
-        if (query == null || query.isBlank()) {
+        // 检索词优先用 run 原始目标（Runtime 并入的 userGoal），其次 LLM 改写词：
+        // 实测同一问题下原话 cosine=0.6241、改写 0.5607（详见 AgentStepDecision#memoryQuery）
+        String query = decision.memoryQuery();
+        if (query == null) {
             query = "写作偏好";
         }
 

@@ -3,6 +3,7 @@ package com.hailin.blogsystem.interceptor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.constants.BlogConstants;
 import com.hailin.blogsystem.security.TokenBlacklist;
+import com.hailin.blogsystem.security.TokenVersionStore;
 import com.hailin.blogsystem.utils.JwtUtil;
 import com.hailin.blogsystem.utils.Result;
 import com.hailin.blogsystem.utils.UserContext;
@@ -24,6 +25,7 @@ public class JwtInterceptor implements AsyncHandlerInterceptor {
 
     private final JwtUtil jwtUtil;
     private final TokenBlacklist tokenBlacklist;
+    private final TokenVersionStore tokenVersionStore;
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
@@ -42,6 +44,12 @@ public class JwtInterceptor implements AsyncHandlerInterceptor {
             JwtUtil.Payload payload = jwtUtil.parsePayload(token);
             // 签名与过期都对，但可能已经登出——JWT 无状态，这是唯一能提前作废的入口
             if (tokenBlacklist.isRevoked(payload.jti())) {
+                writeUnauthorized(response, "登录已失效，请重新登录");
+                return false;
+            }
+            // 代次比对：改密 / 重置密码后，该用户**已签发的全部** token 立即失效。
+            // 黑名单只能按 jti 拉黑单个，批量作废只能靠它（见 TokenVersionStore）
+            if (payload.tokenVersion() != tokenVersionStore.current(payload.userId())) {
                 writeUnauthorized(response, "登录已失效，请重新登录");
                 return false;
             }

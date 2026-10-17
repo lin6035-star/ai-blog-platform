@@ -834,6 +834,8 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
             Users author = usersById.get(article.getAuthorId());
             if (author != null) {
                 article.setAuthorName(author.getNickname());
+                // 头像与昵称同源（同一个 author 对象），不需要额外查库
+                article.setAvatarUrl(author.getAvatarUrl());
             }
 
             Category category = categoriesById.get(article.getCategoryId());

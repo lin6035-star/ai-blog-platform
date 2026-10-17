@@ -12,6 +12,14 @@ public class ArticleDetailVO {
     private Long categoryId;
     private Long authorId;
     private String authorName;
+    /**
+     * 作者头像。
+     *
+     * <p><b>不能放进 {@link #from} 里填</b>：那一步手上只有 {@code Articles} 实体，
+     * 而头像在 {@code users} 表上。由 service 层批量取完 users 后回填——
+     * 那一步本来就是 {@code selectBatchIds} 一次查完（不是 N+1），所以只是多拷一个字段。
+     */
+    private String avatarUrl;
     private String categoryName;
     private String title;
     private String summary;

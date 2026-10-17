@@ -487,17 +487,21 @@ public class ArticleAgentRuntime extends AbstractAgentRuntime implements AgentRu
     /**
      * V3.8：动作执行前把决议目标并入 QUERY_ARTICLE 的 input（后端注入，非 LLM 输出）。
      * 目标缺失时不注入，执行器按原线索链处理（报缺文章 FAILED，不静默错查）。
+     *
+     * <p>先调 super：基类负责给 QUERY_MEMORY 并入 userGoal（2026-10-16），
+     * 本域重写时不能把它吞掉。
      */
     @Override
     protected AgentStepDecision prepareStepDecision(AiAgentRun run, AgentStepDecision decision) {
+        AgentStepDecision prepared = super.prepareStepDecision(run, decision);
         if (run.getTargetArticleId() == null
-                || decision.actionType() != AgentStepActionType.QUERY_ARTICLE) {
-            return decision;
+                || prepared.actionType() != AgentStepActionType.QUERY_ARTICLE) {
+            return prepared;
         }
         Map<String, Object> merged = new HashMap<>(
-                decision.input() == null ? Map.of() : decision.input());
+                prepared.input() == null ? Map.of() : prepared.input());
         merged.put("articleId", String.valueOf(run.getTargetArticleId()));
-        return decision.withInput(merged);
+        return prepared.withInput(merged);
     }
 
     /**

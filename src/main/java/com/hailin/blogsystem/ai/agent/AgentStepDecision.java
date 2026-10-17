@@ -44,4 +44,40 @@ public record AgentStepDecision(
         // 不改变决策动机叙述与计划
         return new AgentStepDecision(actionType, newInput, thoughtSummary, plan);
     }
+
+    /**
+     * QUERY_MEMORY 的检索词候选，按优先级取第一个非空：
+     * ① {@code userGoal}——Runtime 在 {@code prepareStepDecision} 里并入的 run 原始目标原话；
+     * ② {@code question}——LLM 改写的检索词；③ {@code keyword}。
+     *
+     * <p><b>为什么原话排第一</b>（2026-10-16 实测，线上同一 embedding 模型 + ES knn 复现）：
+     * 同一个问题上，原话 cosine=0.6241、LLM 改写=0.5607、两者拼接=0.6023——
+     * 改写丢掉的信息比口语噪声更伤召回，拼接也不如原话干净。
+     *
+     * <p>返回 {@code null} 表示三者都空，由调用方用自己的领域兜底词
+     * （通用域"用户情况"/ 文章域"写作偏好"/ 学习域"学习偏好"）。
+     */
+    public String memoryQuery() {
+        String goal = text("userGoal");
+        if (goal != null) {
+            return goal;
+        }
+        String question = text("question");
+        if (question != null) {
+            return question;
+        }
+        return text("keyword");
+    }
+
+    private String text(String key) {
+        if (input == null) {
+            return null;
+        }
+        Object value = input.get(key);
+        if (value == null) {
+            return null;
+        }
+        String trimmed = String.valueOf(value).trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
 }

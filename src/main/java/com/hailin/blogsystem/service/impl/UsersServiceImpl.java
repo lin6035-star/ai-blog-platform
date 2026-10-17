@@ -382,6 +382,45 @@ public class UsersServiceImpl extends ServiceImpl<UsersMapper, Users>
         return buildRelationPage(userIds, followPage.getTotal(), page, pageSize);
     }
 
+    @Override
+    public PageVO<UserRelationVO> searchUsers(String keyword, Long page, Long pageSize) {
+        String normalizedKeyword = keyword == null ? "" : keyword.trim();
+        long safePage = page == null || page < 1 ? 1L : page;
+        // 单页上限沿用项目口径（见 ArticlesServiceImpl#getArticles 的 safeSize）
+        long safePageSize = pageSize == null || pageSize < 1 ? 10L : Math.min(pageSize, 50L);
+
+        // 空关键词返回空页，而不是全站用户列表——那不是「搜索」语义。
+        // 搜索页在无关键词时本来就不发请求，这里只是防御
+        if (normalizedKeyword.isEmpty()) {
+            return new PageVO<>(List.of(), 0L, safePage, safePageSize);
+        }
+
+        /*
+         * 只搜 nickname：
+         * - username 是登录账号，能搜等于让任何人批量试探某个账号是否存在
+         * - bio 噪声太大（简介里出现一个通用词就会把无关用户全捞出来）
+         *
+         * deleted_at 不用手写：Users.deletedAt 上有 @TableLogic，MP 会自动追加 `deleted_at IS NULL`。
+         */
+        Page<Users> userPage = usersMapper.selectPage(
+                new Page<>(safePage, safePageSize),
+                new LambdaQueryWrapper<Users>()
+                        .like(Users::getNickname, normalizedKeyword)
+                        .eq(Users::getStatus, 1)
+                        // 粉丝多的优先；同粉丝数再按 id 倒序，保证分页全序稳定（否则翻页会串行/漏行）
+                        .orderByDesc(Users::getFollowersCount)
+                        .orderByDesc(Users::getId));
+
+        List<UserRelationVO> list = userPage.getRecords().stream()
+                .map(UserRelationVO::from)
+                .toList();
+
+        // 游客访问时内部直接返回，followed / self 保持默认值
+        fillRelationState(list);
+
+        return new PageVO<>(list, userPage.getTotal(), safePage, safePageSize);
+    }
+
     private void ensurePublicUserExists(Long id) {
         Users user = getById(id);
         if (user == null) {

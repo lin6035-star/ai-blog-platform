@@ -259,4 +259,83 @@ class ArticleQaTargetResolverTests {
         assertThat(target.hasArticle()).isTrue();
         assertThat(target.article().getAuthorId()).isEqualTo(999L);
     }
+
+    // ===================== 跨级指代（2026-10-18）：单锚下无解 → 不猜 =====================
+
+    @Test
+    void crossLevelWordsAreDetected() {
+        assertThat(ArticleQaTargetResolver.isCrossLevel("再前面那篇讲了什么")).isTrue();
+        assertThat(ArticleQaTargetResolver.isCrossLevel("再往前那篇文章")).isTrue();
+        assertThat(ArticleQaTargetResolver.isCrossLevel("更早那篇的观点")).isTrue();
+        assertThat(ArticleQaTargetResolver.isCrossLevel("上上篇讲了什么")).isTrue();
+        assertThat(ArticleQaTargetResolver.isCrossLevel("倒数第二篇是什么")).isTrue();
+    }
+
+    @Test
+    void crossLevelRequiresArticleDeixisTogether() {
+        // "更早说的那个观点" = 对话内容追问（无文章指代）→ 不判跨级（同 S2 的同现约束）
+        assertThat(ArticleQaTargetResolver.isCrossLevel("你更早说的那个观点再讲讲")).isFalse();
+        assertThat(ArticleQaTargetResolver.isCrossLevel("再往前看看")).isFalse();
+        assertThat(ArticleQaTargetResolver.isCrossLevel(null)).isFalse();
+        assertThat(ArticleQaTargetResolver.isCrossLevel("  ")).isFalse();
+    }
+
+    @Test
+    void previousArticleWordingIsNotCrossLevel() {
+        // 「前一篇 / 上一篇」刻意不收：它可能就是"上一轮说的那篇"（= 最近锚），
+        // 收进来会把正常近指误伤成追问
+        assertThat(ArticleQaTargetResolver.isCrossLevel("前一篇讲了什么")).isFalse();
+        assertThat(ArticleQaTargetResolver.isCrossLevel("刚才那篇讲了什么")).isFalse();
+    }
+
+    @Test
+    void crossLevelWithOnlyAnchorPromptsInsteadOfSilentlyUsingAnchor() {
+        // 本条修的就是旧失败模式：以前"再前面那篇"含"那篇" → S3 + 唯一候选（锚）→ 静默返回最近那篇
+        stubAnchor(article(2L, 100L, "会话里的 A"));
+
+        QaTarget target = resolver.resolve("再前面那篇讲了什么", null, 10L, 100L);
+
+        assertThat(target.hasArticle()).isFalse();
+        assertThat(target.promptNote()).contains("再前面");
+        assertThat(target.promptNote()).contains("会话里的 A");
+        assertThat(target.promptNote()).contains("不要回答任何文章内容");
+    }
+
+    @Test
+    void crossLevelWithOnlyPagePromptsInsteadOfSilentlyUsingPage() {
+        stubPage(1L, article(1L, 100L, "当前页 B"));
+        stubAnchor(null);
+
+        QaTarget target = resolver.resolve("再前面那篇讲了什么", page("1"), 10L, 100L);
+
+        assertThat(target.hasArticle()).isFalse();
+        assertThat(target.promptNote()).contains("当前页 B");
+        assertThat(target.promptNote()).contains("不要回答任何文章内容");
+    }
+
+    @Test
+    void crossLevelWithBothCandidatesDoesNotOfferTwoWayChoice() {
+        stubPage(1L, article(1L, 100L, "当前页 B"));
+        stubAnchor(article(2L, 100L, "会话里的 A"));
+
+        QaTarget target = resolver.resolve("上上篇讲了什么", page("1"), 10L, 100L);
+
+        assertThat(target.hasArticle()).isFalse();
+        assertThat(target.promptNote()).contains("当前页 B").contains("会话里的 A");
+        // 与 S3 双候选追问（askWhich）不同：不问"是哪一篇"——用户要的第三个本来就不在候选里，
+        // 摆出两个错候选让他选只会更糟；只引导他说出标题
+        assertThat(target.promptNote()).doesNotContain("确认指哪一篇");
+        assertThat(target.promptNote()).contains("标题");
+    }
+
+    @Test
+    void crossLevelWithNoCandidateAlsoPrompts() {
+        stubPage(999L, null);
+        stubAnchor(null);
+
+        QaTarget target = resolver.resolve("再前面那篇讲了什么", page("999"), 10L, 100L);
+
+        assertThat(target.hasArticle()).isFalse();
+        assertThat(target.promptNote()).contains("再前面");
+    }
 }

@@ -84,7 +84,7 @@ class ArticlesControllerTests {
         // V3.7 修复：隐藏文章作者本人可见（阅读页预览入口），游客/他人仍不可见
         setHidden(1L);
         try {
-            String authorToken = jwtUtil.generateToken(100L);
+            String authorToken = jwtUtil.generateToken(100L, 0);
             mockMvc.perform(get("/api/articles/1")
                             .header("Authorization", "Bearer " + authorToken))
                     .andExpect(status().isOk())
@@ -111,7 +111,7 @@ class ArticlesControllerTests {
     void hiddenArticleDetailInvisibleToOtherLoggedInUser() throws Exception {
         setHidden(1L);
         try {
-            String readerToken = jwtUtil.generateToken(101L);
+            String readerToken = jwtUtil.generateToken(101L, 0);
             mockMvc.perform(get("/api/articles/1")
                             .header("Authorization", "Bearer " + readerToken))
                     .andExpect(status().isOk())
@@ -129,7 +129,7 @@ class ArticlesControllerTests {
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.code").value(40400));
 
-            String authorToken = jwtUtil.generateToken(100L);
+            String authorToken = jwtUtil.generateToken(100L, 0);
             mockMvc.perform(get("/api/articles/1")
                             .header("Authorization", "Bearer " + authorToken))
                     .andExpect(status().isOk())
@@ -149,7 +149,7 @@ class ArticlesControllerTests {
                     RedisConstants.CACHE_NULL_VALUE + ":invisible:100:2"
             );
 
-            String readerToken = jwtUtil.generateToken(101L);
+            String readerToken = jwtUtil.generateToken(101L, 0);
             mockMvc.perform(get("/api/articles/1")
                             .header("Authorization", "Bearer " + readerToken))
                     .andExpect(status().isOk())
@@ -191,15 +191,14 @@ class ArticlesControllerTests {
                 .andExpect(jsonPath("$.data.list", hasSize(3)))
                 .andExpect(jsonPath("$.data.list[0].id").value(4))
                 .andExpect(jsonPath("$.data.list[0].authorName").value("Author Nick"))
-                .andExpect(jsonPath("$.data.list[0].categoryName").value("AI / Agent"))
-                .andExpect(jsonPath("$.data.total").value(3))
-                .andExpect(jsonPath("$.data.page").value(1))
-                .andExpect(jsonPath("$.data.pageSize").value(10));
+                .andExpect(jsonPath("$.data.list[0].categoryName").value("AI / Agent"));
+        // total / page / pageSize 在游标分页下恒为 null（PageVO 注释：判断还有没有下一页要看 nextCursor），
+        // 所以不再断言它们；游标分页本身的行为由 ArticleCursorPaginationTests 覆盖
     }
 
     @Test
     void createsPublishedArticleWithPublishedAt() throws Exception {
-        String authorToken = jwtUtil.generateToken(100L);
+        String authorToken = jwtUtil.generateToken(100L, 0);
 
         try {
             mockMvc.perform(post("/api/users/me/articles")
@@ -240,8 +239,8 @@ class ArticlesControllerTests {
                         .param("categoryId", "1"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(0))
-                .andExpect(jsonPath("$.data.list", hasSize(3)))
-                .andExpect(jsonPath("$.data.total").value(3));
+                .andExpect(jsonPath("$.data.list", hasSize(3)));
+        // total 恒为 null（游标分页），理由同上
 
         mockMvc.perform(get("/api/articles")
                         .param("page", "1")
@@ -250,7 +249,8 @@ class ArticlesControllerTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(0))
                 .andExpect(jsonPath("$.data.list", hasSize(0)))
-                .andExpect(jsonPath("$.data.total").value(0));
+                .andExpect(jsonPath("$.data.list", hasSize(0)));
+        // total 恒为 null（游标分页）；「查不到数据」用 list 为空来表达
     }
 
     @Test
@@ -300,7 +300,7 @@ class ArticlesControllerTests {
 
     @Test
     void doesNotIncreaseViewCountForAuthor() throws Exception {
-        String authorToken = jwtUtil.generateToken(100L);
+        String authorToken = jwtUtil.generateToken(100L, 0);
 
         mockMvc.perform(get("/api/articles/1")
                         .header("Authorization", "Bearer " + authorToken))
@@ -313,7 +313,7 @@ class ArticlesControllerTests {
 
     @Test
     void increasesViewCountForLoggedInNonAuthor() throws Exception {
-        String readerToken = jwtUtil.generateToken(101L);
+        String readerToken = jwtUtil.generateToken(101L, 0);
 
         mockMvc.perform(get("/api/articles/1")
                         .header("Authorization", "Bearer " + readerToken))

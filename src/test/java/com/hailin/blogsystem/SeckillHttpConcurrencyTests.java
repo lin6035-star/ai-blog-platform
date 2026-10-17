@@ -6,6 +6,7 @@ import com.hailin.blogsystem.entity.SeckillActivity;
 import com.hailin.blogsystem.entity.SeckillOrder;
 import com.hailin.blogsystem.mapper.SeckillActivityMapper;
 import com.hailin.blogsystem.mapper.SeckillOrderMapper;
+import com.hailin.blogsystem.security.TokenVersionStore;
 import com.hailin.blogsystem.service.SeckillService;
 import com.hailin.blogsystem.utils.JwtUtil;
 import org.junit.jupiter.api.AfterEach;
@@ -13,6 +14,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.client.RestClient;
@@ -40,6 +42,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class SeckillHttpConcurrencyTests {
+
+    /**
+     * 挡掉 token 代次校验。
+     *
+     * <p>本类用的全是**虚拟 userId**（库里没有对应的 users 记录），而真实的
+     * {@code TokenVersionStore} 查不到人会返回哨兵 -1，于是每个请求都在拦截器里
+     * 被判 401「登录已失效」——整类测试会以一种和秒杀毫无关系的方式失败。
+     * mock 之后 {@code current()} 返回 int 默认值 0，正好等于 token 里的 ver=0。
+     *
+     * <p>这里挡掉不损失什么：本类验的是「并发抢购不会超卖」，
+     * 代次校验有自己的 {@code TokenVersionStoreTests} 和 {@code AuthInterceptorUserContextTests}。
+     */
+    @MockBean
+    private TokenVersionStore tokenVersionStore;
 
     private static final int CONCURRENT_USERS = 50;
     private static final int STOCK = 10;
@@ -163,7 +179,7 @@ class SeckillHttpConcurrencyTests {
     private String grabOverHttp(Long activityId, long userId) {
         return http.post()
                 .uri("http://localhost:" + port + "/api/seckill/activities/" + activityId + "/grab")
-                .header("Authorization", "Bearer " + jwtUtil.generateToken(userId))
+                .header("Authorization", "Bearer " + jwtUtil.generateToken(userId, 0))
                 .retrieve()
                 .body(String.class);
     }

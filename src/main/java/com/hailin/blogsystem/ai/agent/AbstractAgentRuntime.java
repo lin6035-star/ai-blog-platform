@@ -19,6 +19,7 @@ import org.slf4j.MDC;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -121,11 +122,32 @@ public abstract class AbstractAgentRuntime {
     }
 
     /**
-     * V3.8：动作执行前对决策做后端预处理（文章域把决议目标并入 QUERY_ARTICLE 的 input；
-     * 默认原样返回）。终态动作（FINAL_ANSWER / ASK_USER / SUGGEST_*）不经此钩子。
+     * V3.8：动作执行前对决策做后端预处理（文章域把决议目标并入 QUERY_ARTICLE 的 input）。
+     * 终态动作（FINAL_ANSWER / ASK_USER / SUGGEST_*）不经此钩子。
+     *
+     * <p><b>2026-10-16 起默认实现不再是「原样返回」</b>：给 QUERY_MEMORY 并入
+     * {@code userGoal}（run 的原始目标原话），供执行器选检索词。
+     * 实测同一问题下原话 cosine=0.6241，而 LLM 改写出的检索词只有 0.5607——
+     * 改写丢掉的信息比口语噪声更伤召回（原话 0.6241 &gt; 拼接 0.6023 &gt; 改写 0.5607）。
+     *
+     * <p>为什么塞进 input 而不是加 execute 参数：这是本钩子的既有用法（后端注入，非 LLM 输出）。
+     * goal 在整个 run 内恒定，所以 {@code rejectDuplicatedQuery} 的 input_json 精确比对不受影响。
+     * {@code queryParamLabel} 只读 focus / question / keyword，userGoal 不会进观察文本。
+     *
+     * <p>⚠️ 文章域重写了本方法，必须继续调 super，否则文章域 QUERY_MEMORY 拿不到原话。
      */
     protected AgentStepDecision prepareStepDecision(AiAgentRun run, AgentStepDecision decision) {
-        return decision;
+        if (decision.actionType() != AgentStepActionType.QUERY_MEMORY) {
+            return decision;
+        }
+        String goal = run == null ? null : run.getRuntimeGoal();
+        if (goal == null || goal.isBlank()) {
+            return decision;
+        }
+        Map<String, Object> merged = new HashMap<>(
+                decision.input() == null ? Map.of() : decision.input());
+        merged.put("userGoal", goal);
+        return decision.withInput(merged);
     }
 
     /**

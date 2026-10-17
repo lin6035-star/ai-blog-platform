@@ -77,7 +77,7 @@ class CommentsControllerTests {
 
     @Test
     void marksLikedRepliesForAuthenticatedUsers() throws Exception {
-        String token = jwtUtil.generateToken(READER_ID);
+        String token = jwtUtil.generateToken(READER_ID, 0);
 
         mockMvc.perform(get("/api/comments/{rootId}/replies", ROOT_COMMENT_ID)
                         .header("Authorization", "Bearer " + token))
@@ -98,7 +98,7 @@ class CommentsControllerTests {
 
     @Test
     void postingCommentUsesServerDerivedIpAndLocation() throws Exception {
-        String token = jwtUtil.generateToken(READER_ID);
+        String token = jwtUtil.generateToken(READER_ID, 0);
 
         mockMvc.perform(post("/api/articles/{articleId}/comments", 1L)
                         .header("Authorization", "Bearer " + token)
@@ -126,7 +126,7 @@ class CommentsControllerTests {
 
     @Test
     void postingCommentUsesCloudflareCountryForPublicIpv6() throws Exception {
-        String token = jwtUtil.generateToken(READER_ID);
+        String token = jwtUtil.generateToken(READER_ID, 0);
 
         mockMvc.perform(post("/api/articles/{articleId}/comments", 1L)
                         .header("Authorization", "Bearer " + token)

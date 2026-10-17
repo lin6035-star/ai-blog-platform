@@ -4,6 +4,7 @@ import com.hailin.blogsystem.constants.BlogConstants;
 import com.hailin.blogsystem.constants.RedisConstants;
 import com.hailin.blogsystem.entity.Users;
 import com.hailin.blogsystem.entity.dto.RegisterDTO;
+import com.hailin.blogsystem.security.CaptchaVerifier;
 import com.hailin.blogsystem.service.LoginService;
 import com.hailin.blogsystem.utils.JwtUtil;
 import org.junit.jupiter.api.AfterEach;
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
@@ -41,6 +43,17 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest
 @AutoConfigureMockMvc
 class AuthSecurityTests {
+
+    /**
+     * 挡掉验证码校验：本类测的是<b>失败次数限制与登出黑名单</b>的接线，
+     * 每条用例都先去滑一次滑块只会让它们变慢变脆。验证码自己有
+     * {@code CaptchaVerifierTests}（单测）+ 端到端脚本覆盖。
+     *
+     * <p>注意请求体里仍然要给 {@code captchaVerification} 一个非空值——DTO 上是
+     * {@code @NotBlank}，缺了会在 @Valid 阶段就返回 40001，测到的就不是这里想测的分支了。
+     */
+    @MockBean
+    private CaptchaVerifier captchaVerifier;
 
     private static final String PROBE_PREFIX = "login_probe_";
     private static final String PROBE_PASSWORD = "Probe-Pass-123";
@@ -181,7 +194,7 @@ class AuthSecurityTests {
 
     @Test
     void logoutRevokesTokenImmediately() throws Exception {
-        String token = jwtUtil.generateToken(100L);
+        String token = jwtUtil.generateToken(100L, 0);
 
         mockMvc.perform(get("/api/users/me").header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk());
@@ -197,7 +210,7 @@ class AuthSecurityTests {
     /** 被拉黑的 token 走公开接口时按游客处理，不能因为查黑名单就报错 */
     @Test
     void revokedTokenStillReachesPublicEndpoints() throws Exception {
-        String token = jwtUtil.generateToken(100L);
+        String token = jwtUtil.generateToken(100L, 0);
 
         mockMvc.perform(post("/api/auth/logout").header("Authorization", "Bearer " + token))
                 .andExpect(jsonPath("$.code").value(BlogConstants.ErrorCode.SUCCESS));
@@ -216,7 +229,7 @@ class AuthSecurityTests {
                         .header("Authorization", "Bearer not-a-real-token"))
                 .andExpect(jsonPath("$.code").value(BlogConstants.ErrorCode.SUCCESS));
 
-        String token = jwtUtil.generateToken(100L);
+        String token = jwtUtil.generateToken(100L, 0);
         for (int i = 0; i < 2; i++) {
             mockMvc.perform(post("/api/auth/logout").header("Authorization", "Bearer " + token))
                     .andExpect(jsonPath("$.code").value(BlogConstants.ErrorCode.SUCCESS));
@@ -226,7 +239,8 @@ class AuthSecurityTests {
     private ResultActions login(String username, String password) throws Exception {
         return mockMvc.perform(post("/api/auth/login")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"username\":\"" + username + "\",\"password\":\"" + password + "\"}"));
+                .content("{\"username\":\"" + username + "\",\"password\":\"" + password
+                        + "\",\"captchaVerification\":\"test-only\"}"));
     }
 
     private void registerProbeUser() {

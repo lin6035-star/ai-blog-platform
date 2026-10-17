@@ -24,7 +24,33 @@ public class AiEpisodicMemoryRetrieveService {
     private static final int PROMPT_TOP_K = 5;
     private static final int PROMPT_LIMIT = 3;
     private static final int DEDUPE_TOP_K = 3;
-    private static final double PROMPT_SIMILARITY_THRESHOLD = 0.58;
+
+    /**
+     * 提示召回阈值。
+     *
+     * <p><b>2026-10-16 从 0.58 降到 0.50</b>。实测（线上同一 embedding 模型 + ES knn 复现）：
+     * 用户问「还记得我们之前决定的，RAG使用什么方法吗」时，命中那条情景记忆的 cosine = 0.5607
+     * ——**差 0.019 被挡掉**，AI 转而答"记忆中没有记录"，而那条记忆就在库里。
+     *
+     * <p>更硬的证据：用 `ai_agent_steps` 里 18 条**真实线上检索词**跑阈值敏感性，
+     * <b>0.58 下 0/18 能召回</b>（全库最高分仅 0.5717）、0.55 下 2/18、0.50 下 5/18。
+     * 也就是说 0.58 不是"偶尔漏"，是<b>让这条链路几乎从未生效过</b>。
+     * ⚠️ 别把它当成"有意保守"改回去：0.58 是 V1 实现计划里直接写死的常量
+     * （设计稿从未讨论过检索阈值），且同期文章 RAG 的 0.58 是 rerank Gate 的实测标定值，
+     * 场景不同（有大量候选要精排）；记忆召回候选极少，漏召回的代价远大于误召回。
+     *
+     * <p>误召回验证：无关问题（"帮我写一篇 Redis 缓存穿透的文章" 0.3294 / "今天心情不错" 0.3228 /
+     * "我的博客项目下一步该做什么" 0.3409）最高 0.3409，离 0.50 有 0.16 余量；
+     * 0.50 相对 0.58 新增的 3 条召回全是"问背景/个人情况"命中身份类记忆，属合理召回。
+     *
+     * <p>另一条依据是与长期记忆对齐：{@link AiMemoryRetrieveService} 的阈值本就是 0.50，
+     * 情景记忆反而更严没有道理——而情景记忆**只有向量这一条通道**（长期记忆还有常驻通道兜底），
+     * 阈值每严一分都是直接静默。
+     *
+     * <p>样本限制：2 条情景记忆 / 18 条检索词 / 1 个账号，方向明确但样本小；
+     * 记忆量上来后应重新标定，而不是把 0.50 当永久值。
+     */
+    private static final double PROMPT_SIMILARITY_THRESHOLD = 0.50;
     private static final double DEDUPE_SIMILARITY_THRESHOLD = 0.85;
 
     private final VectorStore vectorStore;

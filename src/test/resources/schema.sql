@@ -57,7 +57,10 @@ CREATE TABLE IF NOT EXISTS users (
     following_count INT DEFAULT 0,
     created_at TIMESTAMP,
     updated_at TIMESTAMP,
-    deleted_at TIMESTAMP
+    deleted_at TIMESTAMP,
+    token_version INT NOT NULL DEFAULT 0,
+    email VARCHAR(255) NULL,
+    CONSTRAINT uk_users_email UNIQUE (email)
 );
 
 CREATE TABLE IF NOT EXISTS user_follows (

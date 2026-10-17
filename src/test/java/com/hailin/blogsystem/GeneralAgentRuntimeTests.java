@@ -32,6 +32,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -85,6 +86,39 @@ class GeneralAgentRuntimeTests {
 
         AiAgentRun saved = captureRun();
         assertThat(saved.getContextJson()).contains("记忆摘要");
+    }
+
+    /**
+     * 2026-10-16：QUERY_MEMORY 的 input 必须由后端并入 run 原始目标（userGoal）。
+     *
+     * <p>为什么这条要在 Runtime 层锁住：执行器测试是直接构造 input 的，
+     * 「注入」这一环被删掉时它照样绿——而线上表现就是"AI 说记忆里没有记录，其实记忆就在库里"。
+     * 同时锁边界：只注入 QUERY_MEMORY，不污染 SEARCH_RAG 的 input。
+     */
+    @Test
+    void queryMemoryInputCarriesRunGoalButRagInputDoesNot() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY)
+                        .withInput(Map.of("question", "之前决定的RAG使用方法及原因")))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SEARCH_RAG)
+                        .withInput(Map.of("keyword", "RAG 检索")))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "结论")));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("记忆摘要"))
+                .thenReturn(AgentActionResult.of("站内检索结果"));
+
+        String goal = "还记得我们之前决定的，RAG使用什么方法吗，为什么使用这个方法";
+        runtime.run(100L, 200L, goal, null, AgentStepEmitter.noop());
+
+        ArgumentCaptor<AgentStepDecision> captor = ArgumentCaptor.forClass(AgentStepDecision.class);
+        verify(executor, times(2)).execute(captor.capture(), any(), any());
+        List<AgentStepDecision> decisions = captor.getAllValues();
+
+        assertThat(decisions.get(0).input()).containsEntry("userGoal", goal);
+        assertThat(decisions.get(0).memoryQuery()).isEqualTo(goal);
+        // 原话只给 QUERY_MEMORY：SEARCH_RAG 用的是自己的 keyword，不该被塞进无关的整句
+        assertThat(decisions.get(1).input()).doesNotContainKey("userGoal");
     }
 
     @Test

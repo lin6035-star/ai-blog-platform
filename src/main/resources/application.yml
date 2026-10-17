@@ -65,6 +65,27 @@ spring:
       # 不要在这里加 lettuce.pool.*：pom.xml 没有 commons-pool2 依赖，配了会被静默忽略，
       # 反而让人以为连接池已生效。当前全是非阻塞命令，Lettuce 共享单连接够用——
       # 只有引入 BLPOP / MULTI / WATCH 这类独占连接的命令时才需要引依赖再配池
+  # 邮件：忘记密码的重置链接。
+  # 默认指向 QQ 邮箱——**本地开发和服务器用同一套配置**，避免"上线时再折腾一遍"。
+  # 换服务商只改这几个环境变量，代码一行不动。
+  mail:
+    host: ${MAIL_HOST:smtp.qq.com}
+    port: ${MAIL_PORT:465}
+    # 账号/授权码留空默认值：允许启动（本地不测邮件时不必配），
+    # 真发信时才失败并提示「邮件未配置」——见 SmtpMailService
+    username: ${MAIL_USERNAME:}
+    # ⚠️ QQ 邮箱这里填的是**授权码**（QQ 邮箱 → 设置 → 账户 → 开启 SMTP 服务 → 生成），
+    #    不是 QQ 密码。填错会认证失败，而报错信息不会告诉你原因。
+    password: ${MAIL_PASSWORD:}
+    default-encoding: UTF-8
+    properties:
+      # 465 是隐式 TLS（SMTPS）。若改用 587，把这行换成 mail.smtp.starttls.enable: true
+      mail.smtp.ssl.enable: true
+      # 超时：SMTP 卡住不能把线程一直占着（发信本身也是异步的，这是第二道保险）
+      mail.smtp.connectiontimeout: 5000
+      mail.smtp.timeout: 5000
+      mail.smtp.writetimeout: 5000
+
   servlet:
     multipart:
       max-file-size: 10MB
@@ -136,6 +157,47 @@ jwt:
   # 启动校验要求 ≥32 字符：HS256 的安全性完全取决于这个值的熵，短 secret 可被离线爆破，
   # 一旦算出就能伪造任意用户的 token（攻破的是整个身份体系，不只是某个密码）
   secret: ${JWT_SECRET:blog-system-dev-secret-change-later}
+  # 「记住我」的两种有效期：不勾（short）与勾选（long）。
+  #
+  # ⚠️ **这才是「记住我」的实现方式**——延长登录态，而不是把密码存在浏览器里：
+  # 密码一旦落到前端可读的地方（localStorage / JS 变量），一次 XSS 就能全站泄露。
+  # 用户感觉到的「账号密码自动填好」来自**浏览器的密码管理器**，与本配置无关。
+  expire:
+    # 不勾：24 小时。公用电脑上登录，第二天就失效
+    short: 1d
+    # 勾选：30 天。私人设备上登录一次，一个月内不用再输密码
+    long: 30d
+
+# ===== 行为验证码（登录 / 注册）=====
+# 用 tianai-captcha 的滑块验证码，替代原计划里的「字母数字 / 算术」图形码。
+# 选型理由：图形码已被 OCR + 打码平台攻破（识别率 95%+、两分钱一次），
+# 只能抬高最廉价那批脚本的成本；行为码判的是滑动轨迹的加速度与平滑度，防护力高一个量级。
+captcha:
+  # 验证码数据放 Redis 的 key 前缀。starter 检测到 Redis 就用它（CacheStoreAutoConfiguration），
+  # 不配的话数据只在本机内存——多实例部署时「A 实例发码、B 实例校验」必然失败。
+  prefix: captcha
+  # 验证码有效期，单位毫秒
+  expire:
+    default: 120000        # 2 分钟
+    WORD_IMAGE_CLICK: 180000
+  # 用 jar 自带的滑块/旋转模板与背景图（META-INF/cut-image/）。
+  # ⚠️ 它**只装模板（template），不装背景图（resource）**——背景图由 CaptchaResourceConfig 提供
+  init-default-resource: true
+  # 文字点选（WORD_IMAGE_CLICK）要用的字体，jar 里自带一份，按 classpath 引用即可。
+  # ⚠️ SIMSUN 是微软宋体，**商用有版权要求**；个人练习无碍，公网商用前换成开源字体
+  # （思源黑体 / 文泉驿正黑等），只需替换这里的路径。
+  font-path:
+    - classpath:META-INF/cut-image/template/fonts/SIMSUN.TTC
+  secondary:
+    # ⚠️ 二次验证**必须开启**，这是行为验证码唯一的「服务端兜底」。
+    # matching 只证明「这条轨迹算得上对」，如果只有这一步，攻击者**绕过前端直接调
+    # /api/auth/login** 就完全跳过了验证码——等于没加。
+    # 开启后：matching 成功会写一条一次性记录（key = captcha:secondary:{captchaId}），
+    # 登录/注册必须带上同一个 captchaId，由服务端 getAndRemove 消费掉才算数。
+    # 启动时由 CaptchaSecondaryValidator 强制校验这一项，配成 false 会直接启动失败。
+    enabled: true
+    expire: 120000
+    key-prefix: captcha:secondary
 
 # GitHub OAuth
 github:
@@ -193,6 +255,14 @@ logging:
 blog:
   migration:
     enabled: false
+
+  # 行为验证码（混搭池）。设计稿：docs/登录验证码设计.md
+  captcha:
+    # 每次生成**等概率随机挑一种**；只留一种就等于固定在那种（改这里不用动代码，重启生效）。
+    # 可选：SLIDER 滑块 / ROTATE 旋转 / CONCAT 滑动还原 / WORD_IMAGE_CLICK 文字点选
+    # 四个都需要背景图（CaptchaResourceConfig 已按四种类型各注册一份），点选额外要上面的 font-path。
+    # ⚠️ 不要加 POW：前端 SDK 认识它，但后端 1.5.5 没有对应生成器，配了会在生成时失败。
+    types: SLIDER,ROTATE,CONCAT,WORD_IMAGE_CLICK
 
   # 钱包（设计稿：docs/redis/钱包与秒杀计划.md §4.5）
   # ⚠️ 套餐入口前端只传 packageCode，应付金额与到账额度都由后端按这里决定——让前端传金额等于自助发钱。

@@ -180,4 +180,70 @@ class AiSessionServiceTests {
         assertThat(savedSession.getActiveWorkflowRunId()).isNull();
         assertThat(session.getActiveWorkflowRunId()).isNull();
     }
+
+    /** 消息数为 0 的会话 → 清锚分支直接命中（本用例不建任何消息）。 */
+    @Test
+    void clearAnchorClearsAllThreeAnchorGroupsWhenSessionHasNoMessage() {
+        // 2026-10-18：学习计划锚此前漏清——清空对话后说"继续改那个计划"，
+        // 系统仍会从锚里捞出已删除对话里定位过的计划（V3.8 修过文章锚、V3.12 补过结论锚，学习域是漏网的）
+        AiSessions session = createSession();
+        session.setLastArticleId(12L);
+        session.setLastArticleTitle("会话里的 A");
+        session.setLastArticleSource("AGENT_RUN");
+        session.setLastArticleUpdatedAt(LocalDateTime.now());
+        session.setLastConclusionArticleId(12L);
+        session.setLastConclusionText("建议补充缓存击穿原理");
+        session.setLastConclusionSourceRunId(1L);
+        session.setLastConclusionSourceType("ARTICLE_AGENT_FINAL_ANSWER");
+        session.setLastConclusionUpdatedAt(LocalDateTime.now());
+        session.setLastLearningPlanId(7L);
+        session.setLastLearningPlanTitle("C++ 系统学习计划");
+        session.setLastLearningPlanSource("CLASSIFIER");
+        session.setLastLearningPlanUpdatedAt(LocalDateTime.now());
+        aiSessionMapper.updateById(session);
+
+        ReflectionTestUtils.invokeMethod(
+                aiMessageService, "clearArticleAnchorIfSessionEmpty", session.getId());
+
+        AiSessions saved = aiSessionMapper.selectById(session.getId());
+        assertThat(saved.getLastArticleId()).isNull();
+        assertThat(saved.getLastArticleTitle()).isNull();
+        assertThat(saved.getLastArticleSource()).isNull();
+        assertThat(saved.getLastArticleUpdatedAt()).isNull();
+        assertThat(saved.getLastConclusionArticleId()).isNull();
+        assertThat(saved.getLastConclusionText()).isNull();
+        assertThat(saved.getLastConclusionSourceRunId()).isNull();
+        assertThat(saved.getLastConclusionSourceType()).isNull();
+        assertThat(saved.getLastConclusionUpdatedAt()).isNull();
+        assertThat(saved.getLastLearningPlanId()).isNull();
+        assertThat(saved.getLastLearningPlanTitle()).isNull();
+        assertThat(saved.getLastLearningPlanSource()).isNull();
+        assertThat(saved.getLastLearningPlanUpdatedAt()).isNull();
+    }
+
+    @Test
+    void clearAnchorKeepsAnchorsWhileMessagesRemain() {
+        // 负向：还有消息就不清——"清空对话 = 上下文归零"只对真的空了成立
+        AiSessions session = createSession();
+        session.setLastLearningPlanId(7L);
+        session.setLastArticleId(12L);
+        aiSessionMapper.updateById(session);
+        createPlainMessage(session);
+
+        ReflectionTestUtils.invokeMethod(
+                aiMessageService, "clearArticleAnchorIfSessionEmpty", session.getId());
+
+        AiSessions saved = aiSessionMapper.selectById(session.getId());
+        assertThat(saved.getLastLearningPlanId()).isEqualTo(7L);
+        assertThat(saved.getLastArticleId()).isEqualTo(12L);
+    }
+
+    private void createPlainMessage(AiSessions session) {
+        AiMessages message = new AiMessages();
+        message.setSessionId(session.getId());
+        message.setRole("user");
+        message.setContent("测试消息");
+        message.setCreatedAt(LocalDateTime.now());
+        aiMessageMapper.insert(message);
+    }
 }

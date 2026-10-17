@@ -39,6 +39,32 @@ public class RedisConstants
     public static final String LOGIN_FAIL_IP_KEY_PREFIX = "login:fail:ip:";
     //登出 token 黑名单：token:blacklist:{jti}，TTL = token 的剩余有效期（不是固定时长）
     public static final String TOKEN_BLACKLIST_KEY_PREFIX = "token:blacklist:";
+    //用户 token 代次缓存：user:token:ver:{userId}。
+    //**权威值在 users.token_version（DB）**，这里只是缓存——放 Redis 当权威的话，
+    //一次 flushdb 就会让「改密前签发的 token」全部复活，那是真实的安全漏洞。
+    public static final String USER_TOKEN_VERSION_KEY_PREFIX = "user:token:ver:";
+    //代次缓存 TTL（分钟）。改密时主动删缓存，所以这个值只影响「删缓存失败」时的兜底时长，
+    //以及多实例下别的实例最晚多久看到新代次（当前单实例部署，影响为 0）
+    public static final long USER_TOKEN_VERSION_TTL_MINUTES = 10;
+
+    // ===== 忘记密码 =====
+    //申请接口的限流：pwd:reset:rate:email:{邮箱} / pwd:reset:rate:ip:{IP}
+    //两个维度各自计数，理由见 PasswordResetRateLimiter（防邮件轰炸 vs 防拿邮箱列表扫库）
+    public static final String PWD_RESET_RATE_EMAIL_KEY_PREFIX = "pwd:reset:rate:email:";
+    public static final String PWD_RESET_RATE_IP_KEY_PREFIX = "pwd:reset:rate:ip:";
+    //重置凭证：pwd:reset:token:{token} -> userId
+    //**一次性**（Lua 原子取删）+ 短 TTL：它是"凭邮件里的链接就能改掉密码"的唯一凭据，
+    //多活一秒都是风险面。用随机 token 而不是 JWT，正是因为 JWT 作废不掉
+    public static final String PWD_RESET_TOKEN_KEY_PREFIX = "pwd:reset:token:";
+    //重置凭证有效期（分钟）
+    public static final long PWD_RESET_TOKEN_TTL_MINUTES = 30;
+
+    // ===== GitHub OAuth =====
+    //state：oauth:state:{state}。**一次性**（回调时 DEL 成功才算校验通过），
+    //用途是挡 Login CSRF——见 GitHubOAuthServiceImpl#handleCallback 的注释
+    public static final String OAUTH_STATE_KEY_PREFIX = "oauth:state:";
+    //state 有效期（分钟）：够用户走完 GitHub 授权页即可。开太大等于把 CSRF 窗口放大
+    public static final long OAUTH_STATE_TTL_MINUTES = 5;
 
 
     public static final double ARTICLE_VIEW_HOT_SCORE = 1.0;

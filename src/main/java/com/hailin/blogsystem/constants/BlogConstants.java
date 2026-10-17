@@ -39,6 +39,21 @@ public class BlogConstants {
         public static final int BAD_REQUEST = 40001;    // 参数校验失败
         public static final int UNAUTHORIZED = 40100;   // 未登录
         public static final int LOGIN_FAILED = 40101;   // 用户名或密码错误
+        /**
+         * 验证码未通过 / 凭证已失效。
+         *
+         * <p>单开一个码而不是复用 40001：前端要靠它区分「该重新弹验证码」和
+         * 「参数填错了」——两者的界面动作完全不同（前者重开滑块，后者标红输入框）。
+         * 靠 message 字符串判断会随文案改动而静默失效。
+         */
+        public static final int CAPTCHA_INVALID = 40002;
+        /**
+         * 重置链接无效 / 已过期 / 已被用过。
+         *
+         * <p>单开一个码是为了让前端能给出**准确的下一步动作**（"重新申请一次"），
+         * 而不是笼统的"参数错误"——用户看到后者只会反复重试同一个死链接。
+         */
+        public static final int PASSWORD_RESET_INVALID = 40003;
         public static final int FORBIDDEN = 40300;      // 无权限
         public static final int NOT_FOUND = 40400;      // 资源不存在
         public static final int SERVER_ERROR = 50000;   // 服务器内部错误
@@ -47,6 +62,15 @@ public class BlogConstants {
         public static final int INSUFFICIENT_BALANCE = 40200;  // 额度不足（HTTP 402）
         public static final int AI_TASK_USER_LIMIT = 42901;   // 该用户 AI 长任务并发超限（HTTP 429）
         public static final int AI_TASK_POOL_FULL = 50300;    // AI 长任务全局容量耗尽（HTTP 503）
+        /**
+         * 邮件服务不可用（未配置 / 发不出去）。
+         *
+         * <p><b>为什么它可以从"防枚举"里豁免</b>：防枚举要保护的是
+         * 「<b>某个邮箱</b>是否注册过」这类**用户级**信息；而"邮件服务没配"是
+         * **全局状态**，跟任何用户都无关——把它说出来不会泄露任何信息，
+         * 却能让配置错误在第一次点击时就暴露，而不是界面一片绿、实际什么都没发生。
+         */
+        public static final int MAIL_UNAVAILABLE = 50301;
 
         private ErrorCode() {
 

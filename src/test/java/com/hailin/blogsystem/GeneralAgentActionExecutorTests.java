@@ -100,6 +100,50 @@ class GeneralAgentActionExecutorTests {
     }
 
     /**
+     * 2026-10-16：检索词优先用 run 原始目标（Runtime 经 prepareStepDecision 注入的 userGoal），
+     * 而不是 LLM 改写的 question。
+     *
+     * <p>实测（线上同一 embedding 模型 + ES knn）：同一个问题上原话 cosine=0.6241、
+     * LLM 改写=0.5607——改写丢掉的信息比口语噪声更伤召回。
+     */
+    @Test
+    void memoryQueryPrefersRunGoalOverLlmRewrite() {
+        when(aiMemoryRetrieveService.retrieve(eq(100L), any())).thenReturn(List.of());
+        when(aiEpisodicMemoryRetrieveService.retrieveForPrompt(eq(100L), any(), any()))
+                .thenReturn(List.of());
+
+        String runGoal = "还记得我们之前决定的，RAG使用什么方法吗，为什么使用这个方法";
+        executor.execute(
+                AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY)
+                        .withInput(Map.of(
+                                "question", "之前决定的RAG使用方法及原因",
+                                "userGoal", runGoal)),
+                100L,
+                null
+        );
+
+        verify(aiMemoryRetrieveService).retrieve(eq(100L), eq(runGoal));
+        verify(aiEpisodicMemoryRetrieveService).retrieveForPrompt(eq(100L), any(), eq(runGoal));
+    }
+
+    /** 没有 run 目标时（直连执行器 / 非 Runtime 调用）回退到 LLM 改写词。 */
+    @Test
+    void memoryQueryFallsBackToLlmQuestionWithoutRunGoal() {
+        when(aiMemoryRetrieveService.retrieve(eq(100L), any())).thenReturn(List.of());
+        when(aiEpisodicMemoryRetrieveService.retrieveForPrompt(eq(100L), any(), any()))
+                .thenReturn(List.of());
+
+        executor.execute(
+                AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY)
+                        .withInput(Map.of("question", "用户最近情况")),
+                100L,
+                null
+        );
+
+        verify(aiMemoryRetrieveService).retrieve(eq(100L), eq("用户最近情况"));
+    }
+
+    /**
      * 常驻记忆通道：向量召回全空时也必须带出用户画像/偏好。
      *
      * 2026-10-13 线上回归——记忆向量仍留在旧 embedding 空间，与当前 query 向量近似正交
