@@ -218,6 +218,19 @@ public class AiRateLimitInterceptor implements HandlerInterceptor {
             return BUCKET_WORKFLOW;
         }
 
+        /*
+         * 2026-10-17 上线审计修正：上面的 /api/ai/workflows 分支其实**永不命中**——
+         * 那条路径只有 GET/confirm/cancel，没有 POST 创建端点（Workflow 创建走聊天里的
+         * 分类器分支）。Workflow 真正的「用户点一下就跑几十秒 LLM」入口是
+         * Agent 建议确认：确认即同步启动 Workflow 并跑 runInitialSteps。
+         * 把这个入口挂到 workflow 桶（3 次/10 分钟），它才真正起作用。
+         */
+        if ("POST".equalsIgnoreCase(method)
+                && uri.startsWith("/api/ai/agent-runs/")
+                && uri.endsWith("/workflow-suggestion/confirm")) {
+            return BUCKET_WORKFLOW;
+        }
+
         // 秒杀：只拦「抢购」这一个动作。结果查询是前端每秒轮询的正常行为，
         // 把它也算进配额，等于用户还没抢到就先被 429 了
         if ("POST".equalsIgnoreCase(method)

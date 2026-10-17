@@ -76,6 +76,10 @@ public class WebMvcConfig implements WebMvcConfigurer {
                         "/api/ai/chat/stream",
                         "/api/ai/workflows/**",
                         "/api/ai/rag/articles/search",
+                        // Agent 建议确认：确认即同步启动 Workflow（runInitialSteps 跑几十秒 LLM）。
+                        // 2026-10-17 上线审计：它此前完全不在限流清单里，
+                        // 现在挂到 workflow 桶（3 次/10 分钟），见 AiRateLimitInterceptor.resolveBucket。
+                        "/api/ai/agent-runs/**",
                         // 秒杀抢购。结果轮询**不**挂在这里：它是前端每秒一次的正常行为，
                         // 限流它等于让用户还没抢到就先撞 429
                         "/api/seckill/activities/*/grab"

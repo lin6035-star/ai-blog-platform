@@ -66,6 +66,14 @@ public class RedisConstants
     //state：oauth:state:{state}。**一次性**（回调时 DEL 成功才算校验通过），
     //用途是挡 Login CSRF——见 GitHubOAuthServiceImpl#handleCallback 的注释
     public static final String OAUTH_STATE_KEY_PREFIX = "oauth:state:";
+
+    //一次性登录凭证：oauth:code:{code} → JWT。回调重定向只带 code，前端再换一次；
+    //TTL 60 秒、getAndDelete 原子消费一次即删。
+    //为什么需要它：token 放在回跳 URL 的 query 里会进 Nginx access log 与浏览器历史，
+    //等于把 7 天有效的登录态写进日志（2026-10-17 上线审计）
+    public static final String OAUTH_ONE_TIME_CODE_KEY_PREFIX = "oauth:code:";
+
+    public static final long OAUTH_ONE_TIME_CODE_TTL_SECONDS = 60;
     //state 有效期（分钟）：够用户走完 GitHub 授权页即可。开太大等于把 CSRF 窗口放大
     public static final long OAUTH_STATE_TTL_MINUTES = 5;
 
