@@ -3,6 +3,8 @@ package com.hailin.blogsystem.ai.task;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.billing.AiRequestBillingSupport;
+import com.hailin.blogsystem.ai.billing.BillingHandle;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.AiAgentStep;
 import com.hailin.blogsystem.entity.AiMessages;
@@ -57,6 +59,8 @@ public class TaskWorkflowContinuationService {
     private final ObjectMapper objectMapper;
     private final TaskRunStateTransitions stateTransitions;
     private final TransactionTemplate transactionTemplate;
+    /** 2026-10-17 计费补口：续跑会执行剩余步骤（可能含 LLM），此前完全免费。 */
+    private final AiRequestBillingSupport billingSupport;
 
     public void onWorkflowAdvanced(Long workflowRunId) {
         if (workflowRunId == null) {
@@ -142,21 +146,43 @@ public class TaskWorkflowContinuationService {
         StepResult handoffResult = WorkflowHandoffResults.toStepResult(handoffRow.getTaskStepId(), workflow);
         persisted.put(handoffRow.getTaskStepId(), handoffResult);
 
-        OrchestrationOutcome outcome = orchestrationService.resume(rootRun, plan, snapshot.anchor(), persisted);
+        /*
+         * 2026-10-17 计费补口：续跑会执行剩余步骤（可能含 LLM，如 ARTICLE_ANALYSIS 子 run）。
+         * 暂停那一刻（handoff 触发）已结算过已花的钱，但**续跑这部分此前完全免费**。
+         * 结算依据 = 续跑前后 root run 子树的 token 差量；触发方可能是用户请求的
+         * AFTER_COMMIT 回调，也可能是巡检线程，所以归属用户取自 rootRun 而不是 UserContext。
+         * 余额不足时 reserve 会抛 402 语义的异常 → 外层复位等待态，用户充值后巡检可重试。
+         */
+        long tokensBefore = orchestrationService.subtreeTokens(rootRun.getId());
+        BillingHandle resumeBilling = billingSupport.reserve(
+                AiRequestBillingSupport.BIZ_AGENT,
+                "TASK:RESUME:" + rootRun.getId() + ":" + handoffRow.getId(),
+                rootRun.getUserId());
+        try {
+            OrchestrationOutcome outcome = orchestrationService.resume(rootRun, plan, snapshot.anchor(), persisted);
 
-        // 剩余步骤已经在事务外执行并逐项落事实。最后只用一个短事务收敛四件事：
-        // handoff 终态、token 入账快照、原消息、根 run 终态。
-        // 任一写失败全部回滚，外层 catch 再把 RUNNING 复位成 WAITING_WORKFLOW。
-        transactionTemplate.executeWithoutResult(status -> {
-            AiMessages message = findOriginalMessage(rootRun);
-            long routingTokens = messageRoutingTokens(rootRun, handoffRow, message);
-            finishHandoffRow(handoffRow, workflow, handoffResult, routingTokens);
-            updateOriginalMessage(rootRun, outcome, workflow, routingTokens, message);
-            orchestrationService.finalizeResumedRun(rootRun, plan, outcome);
-        });
+            // 剩余步骤已经在事务外执行并逐项落事实。最后只用一个短事务收敛四件事：
+            // handoff 终态、token 入账快照、原消息、根 run 终态。
+            // 任一写失败全部回滚，外层 catch 再把 RUNNING 复位成 WAITING_WORKFLOW。
+            transactionTemplate.executeWithoutResult(status -> {
+                AiMessages message = findOriginalMessage(rootRun);
+                long routingTokens = messageRoutingTokens(rootRun, handoffRow, message);
+                finishHandoffRow(handoffRow, workflow, handoffResult, routingTokens);
+                updateOriginalMessage(rootRun, outcome, workflow, routingTokens, message);
+                orchestrationService.finalizeResumedRun(rootRun, plan, outcome);
+            });
 
-        log.info("{} 续跑结束: taskRunId={}, paused={}, steps={}",
-                LOG_PREFIX, rootRun.getId(), outcome.paused(), outcome.results().size());
+            long consumed = Math.max(0L,
+                    orchestrationService.subtreeTokens(rootRun.getId()) - tokensBefore);
+            billingSupport.bindResource(resumeBilling, String.valueOf(rootRun.getId()));
+            billingSupport.close(resumeBilling, consumed);
+
+            log.info("{} 续跑结束: taskRunId={}, paused={}, steps={}, billedTokens={}",
+                    LOG_PREFIX, rootRun.getId(), outcome.paused(), outcome.results().size(), consumed);
+        } catch (RuntimeException e) {
+            billingSupport.abort(resumeBilling);
+            throw e;
+        }
     }
 
     /**

@@ -83,7 +83,14 @@ public class LearningPlansServiceImpl extends ServiceImpl<LearningPlanMapper, Le
         if (existing != null) {
             plan.setId(existing.getId());
             plan.setCreatedAt(existing.getCreatedAt());
-            updateById(plan);
+            //乐观锁版本必须对齐库里当前值：调用方（LearningPlanFlowSupport.savePlan）构造的是
+            //"只带 id 的新实体"，version 恒为默认 0。直接 updateById 会生成 WHERE version=0，
+            //而库里 version 早被 refreshPlanStatus 推高 → 影响 0 行，计划标题/目标/状态静默不更新，
+            //后面的旧 stages 却照删照插（数据半新半旧）。CAS 失败必须报出来，不能吞掉。
+            plan.setVersion(existing.getVersion());
+            if (!updateById(plan)) {
+                throw new IllegalArgumentException("计划正在被修改，请稍后重试");
+            }
             learningStageMapper.delete(new LambdaQueryWrapper<LearningStages>()
                     .eq(LearningStages::getPlanId, existing.getId()));
         } else {

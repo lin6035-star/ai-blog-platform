@@ -19,6 +19,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.TestPropertySource;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
@@ -40,6 +41,13 @@ import static org.mockito.Mockito.mock;
  * 而不是又去跑一遍业务执行器。
  */
 @SpringBootTest
+/*
+ * 2026-10-17：续跑现在接入了计费（预扣 → 按子树 token 差量结算）。
+ * 本类用例的测试用户（H2 里没有钱包）会撞余额不足，把续跑本身打断——
+ * 而本类验证的是「谁有资格续跑、事实有没有落定」，不是计费。
+ * 计费语义由 WorkflowActionBillingTests 覆盖，这里显式关掉。
+ */
+@TestPropertySource(properties = "blog.ai.billing.enabled=false")
 class TaskWorkflowContinuationServiceTests {
 
     private static final Long USER = 881L;
@@ -189,7 +197,10 @@ class TaskWorkflowContinuationServiceTests {
         TaskWorkflowContinuationService failingService = new TaskWorkflowContinuationService(
                 runMapper, stepMapper, workflowRunMapper, failingMessageMapper,
                 orchestrationService, snapshotCodec, renderer, objectMapper, stateTransitions,
-                transactionTemplate);
+                transactionTemplate,
+                // 2026-10-17 计费补口：续跑现在要预扣/结算。mock 的 reserve 返回 null → 空转，
+                // 本用例只验证短事务回滚，计费不影响断言。
+                mock(com.hailin.blogsystem.ai.billing.AiRequestBillingSupport.class));
 
         failingService.onWorkflowAdvanced(fixture.workflow().getId());
 

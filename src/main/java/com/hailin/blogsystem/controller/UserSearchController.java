@@ -3,6 +3,7 @@ package com.hailin.blogsystem.controller;
 import com.hailin.blogsystem.entity.vo.PageVO;
 import com.hailin.blogsystem.entity.vo.UserRelationVO;
 import com.hailin.blogsystem.service.UsersService;
+import com.hailin.blogsystem.utils.PageParamUtils;
 import com.hailin.blogsystem.utils.Result;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -35,6 +36,9 @@ public class UserSearchController {
     public Result<PageVO<UserRelationVO>> searchUsers(@RequestParam(required = false) String keyword,
                                                       @RequestParam(defaultValue = "1") Long page,
                                                       @RequestParam(defaultValue = "10") Long pageSize) {
+        // 公开接口：pageSize 负数会让 MP 跳过所有分页，入口归一化
+        page = PageParamUtils.clampPage(page);
+        pageSize = PageParamUtils.clampPageSize(pageSize, 10);
         return Result.success(usersService.searchUsers(keyword, page, pageSize));
     }
 }

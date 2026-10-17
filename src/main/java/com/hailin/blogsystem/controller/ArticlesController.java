@@ -4,6 +4,7 @@ import com.hailin.blogsystem.entity.vo.PageVO;
 import com.hailin.blogsystem.service.ArticlesService;
 import com.hailin.blogsystem.constants.BlogConstants;
 import com.hailin.blogsystem.utils.ClientIpUtils;
+import com.hailin.blogsystem.utils.PageParamUtils;
 import com.hailin.blogsystem.utils.Result;
 import com.hailin.blogsystem.entity.vo.ArticleDetailVO;
 import jakarta.servlet.http.HttpServletRequest;
@@ -23,6 +24,8 @@ public class ArticlesController {
                                                        @RequestParam(required = false) String keyword,
                                                        @RequestParam(required = false) Long categoryId,
                                                        @RequestParam(defaultValue = "latest") String sort){
+        // 公开接口：pageSize 必须在入口归一化——MP 对 size<0 会跳过所有分页（全表查询）
+        pageSize = PageParamUtils.clampPageSize(pageSize, 10);
         PageVO<ArticleDetailVO> data = articlesService.getArticles(cursor,pageSize,keyword,categoryId,sort);
 
         return Result.success(data);
@@ -42,6 +45,9 @@ public class ArticlesController {
     @GetMapping("/articles/hot")  //3.获取热度前十的文章
     public Result<PageVO<ArticleDetailVO>> getHotArticles(@RequestParam(defaultValue = "1") Long page,
                                                           @RequestParam(defaultValue = "10") Long pageSize){
+        // 公开接口：page/pageSize 归一化（负数会让 MP 不分页，直接把热度榜全表读进内存）
+        page = PageParamUtils.clampPage(page);
+        pageSize = PageParamUtils.clampPageSize(pageSize, 10);
         PageVO<ArticleDetailVO> data = articlesService.getHotArticles(page, pageSize);
         return Result.success(data);
     }

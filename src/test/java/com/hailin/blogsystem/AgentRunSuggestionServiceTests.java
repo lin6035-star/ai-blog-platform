@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.agent.AgentRunSuggestionService;
 import com.hailin.blogsystem.ai.agent.AgentRunSuggestionView;
 import com.hailin.blogsystem.ai.agent.ArticleSessionAnchorService;
+import com.hailin.blogsystem.ai.billing.AiRequestBillingSupport;
 import com.hailin.blogsystem.ai.task.AiOrchestrationTaskAdmission;
 import com.hailin.blogsystem.ai.workflow.WorkflowActionIdempotency;
 import com.hailin.blogsystem.ai.workflow.WorkflowActionLock;
@@ -94,7 +95,10 @@ class AgentRunSuggestionServiceTests {
                 workflowRunManager,
                 admission,
                 learningPlansService,
-                anchorService
+                anchorService,
+                // 2026-10-17 计费补口：确认启动 Workflow 现在要预扣/结算。
+                // mock 的 reserve 返回 null → 计费空转，本类其余断言不受影响。
+                mock(AiRequestBillingSupport.class)
         );
         UserContext.set(100L);
     }

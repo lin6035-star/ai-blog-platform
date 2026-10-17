@@ -49,7 +49,9 @@ public class WalletController {
     public Result<PageVO<WalletBillEntryVO>> listBill(
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long pageSize) {
-        return Result.success(walletService.listBill(currentUserId(), page, pageSize));
+        long safePage = com.hailin.blogsystem.utils.PageParamUtils.clampPage(page);
+        long safePageSize = com.hailin.blogsystem.utils.PageParamUtils.clampPageSize(pageSize, 10);
+        return Result.success(walletService.listBill(currentUserId(), safePage, safePageSize));
     }
 
     /** 充值套餐（来自 blog.wallet.packages 配置） */

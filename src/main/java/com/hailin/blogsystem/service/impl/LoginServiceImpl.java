@@ -223,9 +223,18 @@ public class LoginServiceImpl extends ServiceImpl<LoginMapper, Users>
         );
 
         user.setAvatarUrl(avatarUrl);
-        user.setUpdatedAt(LocalDateTime.now());
 
-        updateById(user);
+        //只做局部更新：updateById(user) 是整行回写，若上传期间用户改了密码 / 重置了密码
+        //（password_hash、token_version 已变），这里会把上传前读到的旧值写回去——
+        //改密被静默回滚、旧 token 复活。只 SET 头像和 updated_at。
+        boolean updated = lambdaUpdate()
+                .eq(Users::getId, userId)
+                .set(Users::getAvatarUrl, avatarUrl)
+                .set(Users::getUpdatedAt, LocalDateTime.now())
+                .update();
+        if (!updated) {
+            throw new IllegalStateException("头像更新失败，请稍后重试");
+        }
 
         return UsersVO.from(user);
     }

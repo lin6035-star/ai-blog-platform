@@ -1270,7 +1270,18 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
              * 升级路径（按已产生用量部分结算）见设计稿 §3。
              */
             if (signalType == SignalType.CANCEL || signalType == SignalType.ON_ERROR) {
-                aiBillingService.release(billingHandle);
+                /*
+                 * 2026-10-17 产品决策：取消/中断**不按零消耗全额退**，按实际已产生的用量结算。
+                 * 但也不能按预扣硬上限全扣——预扣是硬上限不是花费（实测可放大 100 倍以上），
+                 * 正确口径是「结算实际用量、退回多占的差额」。
+                 * replyUsage 走流式峰值法累计，中断时已消耗的部分同样已提交进来；
+                 * 首字节前取消 / 首步失败这类真正零消耗的请求仍然全额退，保证账实相符。
+                 */
+                if (replyUsage.getTotalTokens() > 0) {
+                    aiBillingService.settle(billingHandle, replyUsage);
+                } else {
+                    aiBillingService.release(billingHandle);
+                }
             }
             if(signalType == SignalType.CANCEL
             && fullReply.length() > 0
@@ -2971,10 +2982,31 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
 
         // WAITING_REQUIREMENT_CONFIRM：用户输入当作补充需求，走 reject 流程
         if (status == AiWorkflowStatus.WAITING_REQUIREMENT_CONFIRM) {
+            /*
+             * 2026-10-17 计费补口：这条路径直接调 aiWorkflowRunService.reject
+             * （同步跑 MEMORY / RAG / 重新生成大纲等 LLM 步骤），绕开了
+             * AiWorkflowStreamServiceImpl 的计费壳（B1），审计实测无任何 ai_billing_order。
+             * 补法与该壳同口径：预扣 → reject → 按 run 的 token 差量结算；异常全额退回。
+             * 余额不足会在 reject 之前抛 402，不会先烧完 LLM 再扣。
+             */
+            BillingHandle rejectBilling = reserveWorkflowStart(userMessage.getId(), userId);
             try {
+                AiWorkflowRun before = workflowRunManager.getOwnedRun(workflowRunId, userId);
+                long inputBefore = before == null ? 0L : safeTokens(before.getInputTokens());
+                long outputBefore = before == null ? 0L : safeTokens(before.getOutputTokens());
+
                 workflow = aiWorkflowRunService.reject(workflowRunId, message);
+
+                AiWorkflowRun after = workflowRunManager.getOwnedRun(workflowRunId, userId);
+                long inputAfter = after == null ? 0L : safeTokens(after.getInputTokens());
+                long outputAfter = after == null ? 0L : safeTokens(after.getOutputTokens());
+                billingSupport.bindResource(rejectBilling, String.valueOf(workflowRunId));
+                billingSupport.close(rejectBilling,
+                        Math.max(0L, inputAfter - inputBefore),
+                        Math.max(0L, outputAfter - outputBefore));
             } catch (Exception e) {
                 log.warn("Workflow 补充需求失败: workflowRunId={}, error={}", workflowRunId, e.getMessage());
+                billingSupport.abort(rejectBilling);
                 // 失败不阻塞，返回当前 workflow 状态让用户看到错误
             }
             return buildWorkflowStopFlux(sessionId, userId, rawPageContextJson, userMessage, workflow);
@@ -3353,11 +3385,16 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                 stopEvent
         ).doFinally(signalType -> {
             /*
-             * 计费释放：取消 / 流异常时全额退回预扣（与主聊天路径同一政策）。
-             * 正常完成时结算已经做过，release 会因 status 不再是 RESERVED 而空转。
+             * 计费处理（2026-10-17 起与主聊天同一政策）：正常完成已在 stopEvent 里结算；
+             * 取消/中断按**实际已产生的用量**结算（取消不退款），零消耗才全额退。
+             * 与主路径同样的理由：不能按预扣硬上限全扣，那不是实际花费。
              */
             if (signalType == SignalType.CANCEL || signalType == SignalType.ON_ERROR) {
-                aiBillingService.release(billingHandle);
+                if (replyUsage.getTotalTokens() > 0) {
+                    aiBillingService.settle(billingHandle, replyUsage);
+                } else {
+                    aiBillingService.release(billingHandle);
+                }
             }
             aiToolActionRegistry.clear(requestId);
         });

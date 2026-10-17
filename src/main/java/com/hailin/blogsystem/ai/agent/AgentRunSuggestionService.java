@@ -4,6 +4,8 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.billing.AiRequestBillingSupport;
+import com.hailin.blogsystem.ai.billing.BillingHandle;
 import com.hailin.blogsystem.ai.task.AiOrchestrationTaskAdmission;
 import com.hailin.blogsystem.ai.task.AiTaskRequest;
 import com.hailin.blogsystem.ai.task.AiTaskType;
@@ -14,6 +16,7 @@ import com.hailin.blogsystem.constants.BlogConstants;
 import com.hailin.blogsystem.constants.RedisConstants;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.AiMessages;
+import com.hailin.blogsystem.entity.AiWorkflowRun;
 import com.hailin.blogsystem.entity.LearningPlans;
 import com.hailin.blogsystem.entity.dto.AiAgentRunStatus;
 import com.hailin.blogsystem.entity.dto.AiWorkflowLearningAssistDTO;
@@ -73,6 +76,8 @@ public class AgentRunSuggestionService {
     private final LearningPlansService learningPlansService;
     /** V3.12：结论锚写点 B（用户确认时刻）。 */
     private final ArticleSessionAnchorService anchorService;
+    /** 2026-10-17 计费补口：确认建议会同步启动 Workflow（多次 LLM），必须计费。 */
+    private final AiRequestBillingSupport billingSupport;
 
     /**
      * 确认建议：校验归属/状态/冲突 → 状态 CAS 一次性消费 → 复用现有 Workflow 创建路径。
@@ -209,7 +214,25 @@ public class AgentRunSuggestionService {
                 // runAdmitted 在当前线程执行，不跨线程、无需恢复 MDC，日志上下文在此用不上
                 null
         );
-        AiWorkflowRunVO vo = admission.runAdmitted(taskRequest, () -> createWorkflow(run, suggestion));
+        /*
+         * 2026-10-17 计费补口：确认建议 = 同步启动 Workflow（runInitialSteps 含 LOAD / ANALYZE /
+         * MEMORY / RAG / GENERATE_PLAN 多次 LLM，几十秒），此前整条路径没有任何计费
+         * （审计见 docs/计费覆盖审计.md）。与聊天入口的 B2 同口径：
+         * 预扣 → 创建 → 按新建 run 的全量 token 结算；创建失败全额退。
+         * 计费服务的 @Transactional 参与当前事务：确认失败整体回滚时预扣一并撤销，不会白扣。
+         */
+        BillingHandle billingHandle = billingSupport.reserve(
+                AiRequestBillingSupport.BIZ_WORKFLOW_ACTION,
+                "WF:CONFIRM:" + agentRunId,
+                userId);
+        AiWorkflowRunVO vo;
+        try {
+            vo = admission.runAdmitted(taskRequest, () -> createWorkflow(run, suggestion));
+            settleConfirmBilling(billingHandle, vo.getId(), userId);
+        } catch (RuntimeException e) {
+            billingSupport.abort(billingHandle);
+            throw e;
+        }
         markConfirmed(run, vo.getId());
         // 同步关联消息的 workflowRunId：刷新后按消息补拉 Workflow 卡（建议卡闭环）
         // 用非 lambda UpdateWrapper：纯 mock 单测环境无 MyBatis-Plus TableInfo 缓存，lambda wrapper 会炸
@@ -219,6 +242,33 @@ public class AgentRunSuggestionService {
         log.info("Agent 建议已确认并启动 Workflow: agentRunId={}, workflowType={}, workflowRunId={}",
                 agentRunId, suggestion.workflowType(), vo.getId());
         return vo;
+    }
+
+    /**
+     * 确认启动的结算：run 是本次请求新建的，run 上的全量即本次用量（与聊天入口 B2 同口径）。
+     * 读不到 run（创建失败）→ 全额退回；读取异常同样退回，宁可少收不能白扣。
+     *
+     * @param workflowRunId 雪花 id 的字符串形态（与 {@link AiWorkflowRunVO#getId()} 一致）
+     */
+    private void settleConfirmBilling(BillingHandle handle, String workflowRunId, Long userId) {
+        if (handle == null) {
+            return;
+        }
+        try {
+            AiWorkflowRun run = workflowRunManager.getOwnedRun(Long.valueOf(workflowRunId), userId);
+            if (run == null) {
+                billingSupport.abort(handle);
+                return;
+            }
+            billingSupport.bindResource(handle, workflowRunId);
+            billingSupport.close(handle,
+                    run.getInputTokens() == null ? 0L : run.getInputTokens(),
+                    run.getOutputTokens() == null ? 0L : run.getOutputTokens());
+        } catch (Exception e) {
+            log.warn("[BILLING] 确认启动 Workflow 的用量读取失败，按零消耗释放：workflowRunId={} orderNo={}",
+                    workflowRunId, handle.orderNo(), e);
+            billingSupport.abort(handle);
+        }
     }
 
     /**

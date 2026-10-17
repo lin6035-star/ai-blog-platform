@@ -6,6 +6,7 @@ import com.hailin.blogsystem.entity.vo.CommentsVO;
 import com.hailin.blogsystem.entity.vo.PageVO;
 import com.hailin.blogsystem.service.CommentsService;
 import com.hailin.blogsystem.utils.ClientIpUtils;
+import com.hailin.blogsystem.utils.PageParamUtils;
 import com.hailin.blogsystem.utils.Result;
 import com.hailin.blogsystem.utils.UserContext;
 import jakarta.servlet.http.HttpServletRequest;
@@ -22,6 +23,9 @@ public class CommentsController {
     @GetMapping("/articles/{articleId}/comments")  //1.获取文章评论列表，游客可访问，每条主评论带前几条回复
     public Result<PageVO<CommentsVO>> getComments(@PathVariable Long articleId, @RequestParam(defaultValue = "1") Long page,
                                                   @RequestParam(defaultValue = "20") Long pageSize, @RequestParam(defaultValue = "time") String sort){
+        // 公开接口：负数/超大分页会把评论列表读穿，入口归一化
+        page = PageParamUtils.clampPage(page);
+        pageSize = PageParamUtils.clampPageSize(pageSize, 20);
         PageVO<CommentsVO> commentsList = commentsService.getComments(articleId,page,pageSize,sort);
 
         return Result.success(commentsList);
@@ -30,6 +34,8 @@ public class CommentsController {
     @GetMapping("/comments/{rootId}/replies")  //2.获取某条主评论下面的更多回复
     public Result<PageVO<CommentsVO>> queryMoreComments(@PathVariable Long rootId,
                                                         @RequestParam(defaultValue = "1") Long page,@RequestParam(defaultValue = "6") Long pageSize ){
+        page = PageParamUtils.clampPage(page);
+        pageSize = PageParamUtils.clampPageSize(pageSize, 6);
         PageVO<CommentsVO> comments = commentsService.queryMoreComments(rootId,page,pageSize);
 
         return Result.success(comments);

@@ -1,5 +1,6 @@
 package com.hailin.blogsystem.service.impl;
 
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hailin.blogsystem.component.UserSetCache;
 import com.hailin.blogsystem.constants.RedisConstants;
@@ -37,9 +38,15 @@ public class LikeCommentsServiceImpl extends ServiceImpl<LikeCommentsMapper, Com
 
         ArticleComments comment = commentsMapper.selectById(commentId);
 
-        comment.setLikeCount(comment.getLikeCount() + 1);
-
-        commentsMapper.updateById(comment);
+        //改为原子自增：原实现「读实体 → like_count+1 → updateById 整行回写」并发会丢更新，
+        //且整行回写会覆盖同一行其他字段。与文章点赞（ArticleLikesServiceImpl）同一写法。
+        int updated = commentsMapper.update(null,
+                new LambdaUpdateWrapper<ArticleComments>()
+                        .eq(ArticleComments::getId, commentId)
+                        .setSql("like_count = like_count + 1"));
+        if (updated != 1) {
+            throw new IllegalStateException("评论点赞计数更新失败");
+        }
 
         CommentLikes commentLikes = new CommentLikes();
         commentLikes.setCommentId(commentId);
@@ -75,11 +82,12 @@ public class LikeCommentsServiceImpl extends ServiceImpl<LikeCommentsMapper, Com
                 .eq(CommentLikes::getUserId, UserContext.get()).one());
 
         if(remove){
-            ArticleComments comment = commentsMapper.selectById(commentId);
-
-            comment.setLikeCount(comment.getLikeCount() - 1);
-
-            commentsMapper.updateById(comment);
+            //原子自减 + 0 下限：原实现读实体后 -1 再整行回写，并发丢更新，
+            //计数已为 0 的脏数据还会被减成负数
+            commentsMapper.update(null,
+                    new LambdaUpdateWrapper<ArticleComments>()
+                            .eq(ArticleComments::getId, commentId)
+                            .setSql("like_count = GREATEST(like_count - 1, 0)"));
         }
 
         //维护用户评论点赞集合：取消最后一项时状态会转为 EMPTY，不留「全量标记 + 空集合」

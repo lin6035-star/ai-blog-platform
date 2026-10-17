@@ -410,7 +410,17 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
          * SQL 的 `IN (...)` 返回顺序是**不保证**的（MySQL 通常按主键，但那是实现细节不是承诺），
          * 直接拿来用会让 ES 辛苦算的相关性排序白做——用户看到的是"按 id 排的搜索结果"。
          */
-        List<Articles> found = lambdaQuery().in(Articles::getId, hits.articleIds()).list();
+        List<Articles> found = lambdaQuery()
+                .in(Articles::getId, hits.articleIds())
+                /*
+                 * 2026-10-17 上线审计补：ES 索引是**异步**的，"文章已隐藏/删除但索引还没更新"
+                 * 的窗口里，只按 id 回查会把隐藏文章透给公开搜索。
+                 * 上文说的「检索期 status 过滤」用的是索引里的旧值，靠不住——
+                 * 这里按 DB 的权威状态再筛一遍，这才算第二道防线。
+                 */
+                .eq(Articles::getStatus, BlogConstants.ArticlesStatus.PUBLISHED)
+                .isNull(Articles::getDeletedAt)
+                .list();
         Map<Long, Articles> byId = new HashMap<>();
         for (Articles a : found) {
             byId.put(a.getId(), a);

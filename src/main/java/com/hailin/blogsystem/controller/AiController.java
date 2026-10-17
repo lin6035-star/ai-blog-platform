@@ -7,6 +7,7 @@ import com.hailin.blogsystem.service.AiConversationSummaryService;
 import com.hailin.blogsystem.service.AiMessageService;
 import com.hailin.blogsystem.service.AiSessionService;
 import com.hailin.blogsystem.utils.Result;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
@@ -32,6 +33,9 @@ public class AiController {
     @GetMapping("/conversations")  //2.查询该用户的历史会话
     public Result<PageVO<AiSessionVO>> getHistoricalSession(@RequestParam(defaultValue = "1") Long page,
                                         @RequestParam(defaultValue = "10") Long pageSize){
+        // 负数/超大 pageSize 会让 MP 跳过分页（会话消息可能很大），入口归一化
+        page = com.hailin.blogsystem.utils.PageParamUtils.clampPage(page);
+        pageSize = com.hailin.blogsystem.utils.PageParamUtils.clampPageSize(pageSize, 10);
         PageVO<AiSessionVO> pageResult = aiSessionService.getHistoricalSession(page,pageSize);
 
         return Result.success(pageResult);
@@ -58,7 +62,7 @@ public class AiController {
     // }
 
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<AiChatEventVO> streamChat(@RequestBody AiChatDTO aiChatDTO) {
+    public Flux<AiChatEventVO> streamChat(@Valid @RequestBody AiChatDTO aiChatDTO) {
         return aiMessageService.streamChat(aiChatDTO);
     }
 
