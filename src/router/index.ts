@@ -1,25 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { createDiscreteApi } from 'naive-ui'
-import HomeView from '@/views/HomeView.vue'
-import SearchView from '@/views/SearchView.vue'
-import ArticleDetailView from '@/views/ArticleDetailView.vue'
-import LoginView from '@/views/LoginView.vue'
-import RegisterView from '@/views/RegisterView.vue'
-import ForgotPasswordView from '@/views/ForgotPasswordView.vue'
-import ResetPasswordView from '@/views/ResetPasswordView.vue'
-import ProfileView from '@/views/ProfileView.vue'
-import PublicProfileView from '@/views/PublicProfileView.vue'
-import EditorView from '@/views/EditorView.vue'
-import DraftsView from '@/views/DraftsView.vue'
-import HotRankView from '@/views/HotRankView.vue'
-import AuthCallbackView from '@/views/AuthCallbackView.vue'
-import LearningPlansView from '@/views/LearningPlansView.vue'
-import WalletView from '@/views/WalletView.vue'
-import NotificationsView from '@/views/NotificationsView.vue'
-import SeckillView from '@/views/SeckillView.vue'
-import LearningPlanDetailView from '@/views/LearningPlanDetailView.vue'
-import DevAgentRunsView from '@/views/DevAgentRunsView.vue'
-import DevAgentRunDetailView from '@/views/DevAgentRunDetailView.vue'
 import { useAuthStore } from '@/stores/auth'
 import { setUnauthorizedHandler } from '@/utils/request'
 
@@ -38,7 +18,7 @@ const router = createRouter({
     {
       path: '/',
       name: 'home',
-      component: HomeView,
+      component: () => import('@/views/HomeView.vue'),
       meta: { title: '首页', keepAlive: true },
     },
     // 搜索独立成页：首页是「浏览信息流」（分类 + 推荐/最新/关注），
@@ -47,74 +27,74 @@ const router = createRouter({
     {
       path: '/search',
       name: 'search',
-      component: SearchView,
+      component: () => import('@/views/SearchView.vue'),
       meta: { title: '搜索' },
     },
     {
       path: '/articles/:id',
       name: 'article-detail',
-      component: ArticleDetailView,
+      component: () => import('@/views/ArticleDetailView.vue'),
       meta: { title: '文章详情' },
     },
     {
       path: '/login',
       name: 'login',
-      component: LoginView,
+      component: () => import('@/views/LoginView.vue'),
       meta: { title: '登录' },
     },
     {
       path: '/register',
       name: 'register',
-      component: RegisterView,
+      component: () => import('@/views/RegisterView.vue'),
       meta: { title: '注册' },
     },
     // 忘记密码：两个页面都**不需要登录**（忘了密码的人本来就登录不进来）
     {
       path: '/forgot-password',
       name: 'forgot-password',
-      component: ForgotPasswordView,
+      component: () => import('@/views/ForgotPasswordView.vue'),
       meta: { title: '忘记密码' },
     },
     {
       path: '/reset-password',
       name: 'reset-password',
-      component: ResetPasswordView,
+      component: () => import('@/views/ResetPasswordView.vue'),
       meta: { title: '重置密码' },
     },
     {
       path: '/me',
       name: 'profile',
-      component: ProfileView,
+      component: () => import('@/views/ProfileView.vue'),
       meta: { title: '个人中心', requiresAuth: true },
     },
     {
       path: '/users/:id',
       name: 'public-profile',
-      component: PublicProfileView,
+      component: () => import('@/views/PublicProfileView.vue'),
       meta: { title: '用户主页' },
     },
     {
       path: '/me/learning-plans',
       name: 'learning-plans',
-      component: LearningPlansView,
+      component: () => import('@/views/LearningPlansView.vue'),
       meta: { title: '我的学习计划', requiresAuth: true },
     },
     {
       path: '/me/learning-plans/:id',
       name: 'learning-plan-detail',
-      component: LearningPlanDetailView,
+      component: () => import('@/views/LearningPlanDetailView.vue'),
       meta: { title: '学习计划详情', requiresAuth: true },
     },
     {
       path: '/me/wallet',
       name: 'wallet',
-      component: WalletView,
+      component: () => import('@/views/WalletView.vue'),
       meta: { title: '我的钱包', requiresAuth: true },
     },
     {
       path: '/me/notifications',
       name: 'notifications',
-      component: NotificationsView,
+      component: () => import('@/views/NotificationsView.vue'),
       meta: { title: '消息', requiresAuth: true },
     },
     // 后端活动列表对游客开放，但前端页面要求登录：抢购本身必须登录，
@@ -122,37 +102,37 @@ const router = createRouter({
     {
       path: '/seckill',
       name: 'seckill',
-      component: SeckillView,
+      component: () => import('@/views/SeckillView.vue'),
       meta: { title: '额度秒杀', requiresAuth: true },
     },
     {
       path: '/editor',
       name: 'editor-new',
-      component: EditorView,
+      component: () => import('@/views/EditorView.vue'),
       meta: { title: '写文章', requiresAuth: true },
     },
     {
       path: '/editor/:id',
       name: 'editor-edit',
-      component: EditorView,
+      component: () => import('@/views/EditorView.vue'),
       meta: { title: '编辑文章', requiresAuth: true },
     },
     {
       path: '/drafts',
       name: 'drafts',
-      component: DraftsView,
+      component: () => import('@/views/DraftsView.vue'),
       meta: { title: '草稿箱', requiresAuth: true },
     },
     {
       path: '/rank/hot',
       name: 'hot-rank',
-      component: HotRankView,
+      component: () => import('@/views/HotRankView.vue'),
       meta: { title: '热度榜' },
     },
     {
       path: '/auth/github/callback',
       name: 'github-oauth-callback',
-      component: AuthCallbackView,
+      component: () => import('@/views/AuthCallbackView.vue'),
       meta: { title: 'GitHub 登录' },
     },
     // V4 第一刀：开发者只读面板。前端只隐藏入口，真正的门禁在后端白名单
@@ -160,13 +140,13 @@ const router = createRouter({
     {
       path: '/dev/agent-runs',
       name: 'dev-agent-runs',
-      component: DevAgentRunsView,
+      component: () => import('@/views/DevAgentRunsView.vue'),
       meta: { title: 'Agent 运行记录', requiresAuth: true },
     },
     {
       path: '/dev/agent-runs/:id',
       name: 'dev-agent-run-detail',
-      component: DevAgentRunDetailView,
+      component: () => import('@/views/DevAgentRunDetailView.vue'),
       meta: { title: 'Agent 运行详情', requiresAuth: true },
     },
   ],

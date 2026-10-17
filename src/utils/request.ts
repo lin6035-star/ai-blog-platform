@@ -126,6 +126,22 @@ export function createRequest(options: CreateRequestOptions = {}): ResultRequest
         handleUnauthorized()
       }
 
+      /*
+       * 2026-10-17 上线审计补：非 2xx 响应里后端其实带了可读的 message
+       * （登录被限流 429、余额不足 402、AI 繁忙 503 都是「HTTP 状态码 + Result」），
+       * 但之前把 axios 的原始 error 直接抛出去，界面显示的是英文
+       * "Request failed with status code 429" —— 后端的中文提示被丢弃了。
+       * 这里把后端 message 提到 error.message，全仓直接展示 error.message 的调用点一起受益。
+       * `response.data` 也可能是字符串（Nginx 的 HTML 错误页），所以先判类型。
+       */
+      const backendMessage = error?.response?.data?.message
+      if (typeof backendMessage === 'string' && backendMessage.trim()) {
+        const normalized = new Error(backendMessage) as Error & { cause?: unknown }
+        // 保留原始错误便于调试；不参与界面展示
+        normalized.cause = error
+        return Promise.reject(normalized)
+      }
+
       return Promise.reject(error)
     },
   )

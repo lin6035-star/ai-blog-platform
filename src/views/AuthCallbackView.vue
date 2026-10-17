@@ -19,14 +19,24 @@ onMounted(async () => {
     return
   }
 
-  const token = route.query.token as string
+  const oneTimeCode = route.query.code as string
 
-  if (!token) {
+  if (!oneTimeCode) {
     error.value = '授权失败：未收到登录凭证'
     return
   }
 
   try {
+    // 2026-10-17 上线审计：回跳 URL 只带一次性 code（60 秒、消费即删），
+    // 用它换 JWT——token 不再经过 URL（那会进 Nginx 日志与浏览器历史）。
+    const exchanged = await request.post<{ token: string }>('/auth/github/exchange', {
+      code: oneTimeCode,
+    })
+    const token = exchanged.data?.token
+    if (!token) {
+      throw new Error('登录凭证换取失败，请重试')
+    }
+
     // 写入 token 供后续请求使用
     localStorage.setItem('blog_token', token)
     localStorage.setItem('blog_user', JSON.stringify({ id: 0 }))

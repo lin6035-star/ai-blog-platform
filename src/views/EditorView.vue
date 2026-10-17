@@ -10,6 +10,7 @@ import { categoryApi } from '@/api/category'
 import { myArticleApi, type ArticleForm } from '@/api/myArticle'
 import { ARTICLE_STATUS, type ArticleStatus } from '@/constants/articleStatus'
 import { extractArticleSummary } from '@/utils/articleSummary'
+import { sanitizeHtml } from '@/utils/sanitizeHtml'
 import type { Category } from '@/types/category'
 import { registerAiEditorHandler, unregisterAiEditorHandler } from '@/utils/aiEditorBus'
 import type { EditorAction } from '@/api/ai'
@@ -404,6 +405,7 @@ onBeforeRouteLeave((_to, _from, next) => {
       <MdEditor
         v-model="form.content"
         :on-upload-img="handleUploadImg"
+        :sanitize="sanitizeHtml"
         preview-theme="github"
         language="zh-CN"
         style="height: 100%"
