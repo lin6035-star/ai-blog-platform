@@ -28,8 +28,10 @@ server:
 
 spring:
   datasource:
-    url: jdbc:mysql://localhost:3306/blog_system?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=utf-8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true
-    username: myRoot
+    # 2026-10-17：地址参数化（部署审计 P2-10）。Docker 部署时后端在容器里、MySQL 是另一个容器，
+    # 写死 localhost 会连不上；默认值仍是「单机裸机」形态，不设 env 时行为与改造前一致。
+    url: ${DB_URL:jdbc:mysql://localhost:3306/blog_system?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=utf-8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true}
+    username: ${DB_USERNAME:myRoot}
     password: ${DB_PASSWORD}
     driver-class-name: com.mysql.cj.jdbc.Driver
     # 同 application.yml：必须明显大于 AI 准入 workerCount（默认 8）。
@@ -39,6 +41,9 @@ spring:
       maximum-pool-size: 20
   data:
     redis:
+      # Docker / 多机部署用 REDIS_HOST/REDIS_PORT 覆盖；默认本机
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
       # ACL 账号名：配了 ACL 就填（deploy/redis.conf.example 里的 blog-app）。
       # 留空 = default 用户，即「只有密码、没有按账号限权」——危险命令仍然全开。
       username: ${REDIS_USERNAME:}
@@ -46,6 +51,10 @@ spring:
       # 强制 fail-fast 会逼着"无密码 Redis"的部署去设一个空变量，没有意义。
       # 反过来说：生产 Redis 若设了密码，这里必须给值，否则连不上。
       password: ${REDIS_PASSWORD:}
+  # Elasticsearch：站内搜索 + RAG 向量索引。Docker 部署时指向 es 服务名
+  # （ES_URI=http://es:9200）；不设则沿用 application.yml 的 localhost:19200。
+  elasticsearch:
+    uris: ${ES_URI:http://localhost:19200}
   mail:
     # 生产：**无默认值**（与其它敏感项一致）。少一个就启动失败，
     # 不允许静默退回 application.yml 里的 QQ 邮箱默认值。
