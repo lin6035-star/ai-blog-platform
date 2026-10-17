@@ -29,7 +29,11 @@ github:
 #
 # 配好后先打一发自检，能立刻区分「配置问题」和「业务问题」：
 #    curl.exe -X POST "http://localhost:8080/api/dev/mail/check?to=你的另一个邮箱@example.com"
+#
+# ⚠️ 本文件是**会被提交的模板**，只放占位符。真实值一律写进同目录的
+#    application.yml（已被 .gitignore 忽略）。2026-10-17 曾把真实 QQ 授权码
+#    误写在这里并提交进 git，属于密钥泄露——已移除，且授权码已作废重生成。
 spring:
   mail:
-    username: 3288114535@qq.com
-    password: yydnjbojodaxdcbe
+    username: your-qq@qq.com
+    password: your_smtp_authorization_code
