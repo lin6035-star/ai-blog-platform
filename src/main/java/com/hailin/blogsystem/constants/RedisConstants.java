@@ -27,6 +27,9 @@ public class RedisConstants
     //AI 接口限流：ai:rate:{bucket}:{user|ip}:{identity}:{window}，bucket = chat / workflow / rag
     public static final String AI_RATE_LIMIT_KEY_PREFIX =
             "ai:rate:";
+    //游客 AI 当日估算用量（token，自然日累计）：ai:guest:usage:{yyyy-MM-dd}
+    //游客不计费，但平台要付真金白银；改造前游客 usage 被直接丢弃，被刷后查不到账
+    public static final String AI_GUEST_USAGE_KEY_PREFIX = "ai:guest:usage:";
     //学习计划列表（ACTIVE）：learning:plan:list:{userId}
     //分类器每条消息都要读这个列表（要"选计划"就得先有选项），写计划/改任务状态时失效
     public static final String LEARNING_PLAN_LIST_KEY_PREFIX = "learning:plan:list:";

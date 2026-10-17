@@ -19,6 +19,7 @@ public class BlogAiProperties {
     private Rag rag = new Rag();
     private Agent agent = new Agent();
     private RateLimit rateLimit = new RateLimit();
+    private Guest guest = new Guest();
     private Inspection inspection = new Inspection();
     private Billing billing = new Billing();
     private Task task = new Task();
@@ -209,6 +210,37 @@ public class BlogAiProperties {
         // 秒杀抢购：比 chat 宽松（网络抖动、手速都会让用户多点几次），
         // 但仍能挡住脚本级频率——真正的防重在更前面（Redis 的 SISMEMBER 一人一单）
         private Limit seckill = new Limit(20, 60);
+
+        /**
+         * 全站 AI 请求每分钟上限（所有 AI 入口共享，0 = 不限制）。
+         *
+         * <p>2026-10-17 上线审计补：分类器在返回 Flux 之前<b>同步</b>跑在 Tomcat 请求线程上
+         * （plus 路径实测 7.8~12s），而 AI 长任务准入池只覆盖 Agent/Workflow、不覆盖聊天。
+         * 没有全站闸门时，几百个并发慢请求就能把 Tomcat 线程占满，拖垮整站。
+         *
+         * <p>这是「止血」闸门，不是替代品：真正把分类器移出请求线程是后续独立改动。
+         * 秒杀抢购不占这个额度（它是独立桶，且 50 库存的正常抢购就可能超过 120/分钟）。
+         */
+        private int globalPerMinute = 120;
+    }
+
+    /**
+     * 游客 AI 额度（2026-10-17 上线审计补）。
+     *
+     * <p>产品决策：<b>游客 AI 保留、不扣用户账单</b>。但游客没有钱包不等于没有成本——
+     * 每次调用都是真金白银付给模型供应商，而改造前游客路径唯一的门禁是「按 IP 5 次/分钟」，
+     * 且 IP 取自客户端可伪造的请求头（见 {@code ClientIpUtils} 类注释），实测换头即可无限调用。
+     *
+     * <p>所以保留游客免费的前提是两道日额度：单 IP 日额度限制单来源，全站日预算兜底
+     * 分布式/代理池刷。超出后游客 AI 关闭到次日 0 点，<b>登录用户不受影响</b>。
+     */
+    @Data
+    public static class Guest {
+        /** 每个 IP 每日游客 AI 请求上限（0 = 不限制）。默认 10 次/天。 */
+        private int dailyLimitPerIp = 10;
+
+        /** 全站游客每日请求总上限（0 = 不限制）。默认 2000 次/天，防分布式刷。 */
+        private int globalDailyLimit = 2000;
     }
 
     @Data

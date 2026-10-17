@@ -56,6 +56,7 @@ import com.hailin.blogsystem.mapper.AiMessageMapper;
 import com.hailin.blogsystem.mapper.AiSessionMapper;
 import com.hailin.blogsystem.mapper.AiWorkflowRunMapper;
 import com.hailin.blogsystem.mapper.AiWorkflowStepLogMapper;
+import com.hailin.blogsystem.security.AiRateLimiter;
 import com.hailin.blogsystem.service.*;
 import com.hailin.blogsystem.utils.MdcContext;
 import com.hailin.blogsystem.utils.UserContext;
@@ -132,6 +133,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
     private final ObjectProvider<Tracer> tracerProvider;
     private final AiBillingService aiBillingService;
     private final ChatReserveCalculator chatReserveCalculator;
+    /** 游客 AI 用量记账（游客不计费，但平台要付真金白银，见 AiRateLimiter#recordGuestUsage） */
+    private final AiRateLimiter aiRateLimiter;
     /** B2：Workflow 启动路径的计费（审计见 docs/计费覆盖审计.md） */
     private final AiRequestBillingSupport billingSupport;
     private final WorkflowRunManager workflowRunManager;
@@ -3761,6 +3764,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                 null,
                 routeUsage
         );
+        // 游客不计费，但分类器这一次 LLM 调用是真实成本：记账到 Redis 当日累计。
+        // 改造前 routeUsage 算完就丢，被刷后既查不到用量，也没法给预算熔断提供依据。
+        aiRateLimiter.recordGuestUsage(routeUsage.getTotalTokens());
 
         String requestId = UUID.randomUUID().toString();
 
@@ -3947,12 +3953,19 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                 ))
                 .build();
 
-        Flux<AiChatEventVO> dataEvents = aiModelService.streamChat(prompt,requestId,new TokenUsageAccumulator())
+        // 游客不计费，但主回答的 usage 必须记账（改造前 new 一个 accumulator 用完就扔）。
+        // 放在 doFinally：流被取消/断线时 StreamCaller 的峰值法也已把已消耗 token 提交进来，
+        // 所以 signalType 只影响日志，不影响记账的完整性。
+        TokenUsageAccumulator guestAnswerUsage = new TokenUsageAccumulator();
+        Flux<AiChatEventVO> dataEvents = aiModelService.streamChat(prompt,requestId,guestAnswerUsage)
                 .doOnNext(fullReply::append)
-                .doFinally(signalType -> log.info(
-                        "游客 dataEvents 结束，signal={}, replyLen={}",
-                        signalType, fullReply.length()
-                ))
+                .doFinally(signalType -> {
+                    log.info(
+                            "游客 dataEvents 结束，signal={}, replyLen={}, tokens={}",
+                            signalType, fullReply.length(), guestAnswerUsage.getTotalTokens()
+                    );
+                    aiRateLimiter.recordGuestUsage(guestAnswerUsage.getTotalTokens());
+                })
                 .map(chunk -> AiChatEventVO.builder()
                         .eventType(AiChatEventType.DATA.getValue())
                         .eventData(chunk)
