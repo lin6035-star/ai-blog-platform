@@ -33,6 +33,9 @@ const authorDisplayName = computed(() =>
   props.article.authorName?.trim() || `#${props.article.authorId}`,
 )
 
+/** 没头像时的兜底：取昵称首字。比一个通用人形图标更能区分作者 */
+const authorInitial = computed(() => authorDisplayName.value.trim().charAt(0) || '?')
+
 /**
  * 标题的高亮 HTML。
  *
@@ -82,6 +85,12 @@ const summaryHtml = computed(() => {
             type="button"
             @click.prevent.stop="emit('author-click', article.authorId)"
           >
+            <!-- 头像放在昵称**前面**：扫列表时先认脸、再认名字 -->
+            <n-avatar :size="22" :src="article.avatarUrl" class="article-author-avatar">
+              <template #fallback>
+                <span class="article-author-initial">{{ authorInitial }}</span>
+              </template>
+            </n-avatar>
             作者：{{ authorDisplayName }}
           </button>
           <span>{{ formatArticleDate(article.publishedAt) }}</span>
@@ -140,3 +149,26 @@ const summaryHtml = computed(() => {
     </div>
   </article>
 </template>
+
+<style scoped>
+/* 头像与昵称对齐。
+   用 inline-flex 是为了**不依赖全局 .article-author-link 的 display** ——
+   那个类原本只装一行文字，display 很可能是 inline，而 n-avatar 是块级，
+   塞进去会掉到下一行（不改全局样式，免得影响别处复用它的地方）。 */
+.article-author-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 窄屏下别把头像压扁成椭圆 */
+.article-author-avatar {
+  flex-shrink: 0;
+}
+
+/* 兜底首字：22px 的圆里放 12px 刚好 */
+.article-author-initial {
+  font-size: 12px;
+  line-height: 1;
+}
+</style>

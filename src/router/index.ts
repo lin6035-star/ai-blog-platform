@@ -1,9 +1,12 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { createDiscreteApi } from 'naive-ui'
 import HomeView from '@/views/HomeView.vue'
+import SearchView from '@/views/SearchView.vue'
 import ArticleDetailView from '@/views/ArticleDetailView.vue'
 import LoginView from '@/views/LoginView.vue'
 import RegisterView from '@/views/RegisterView.vue'
+import ForgotPasswordView from '@/views/ForgotPasswordView.vue'
+import ResetPasswordView from '@/views/ResetPasswordView.vue'
 import ProfileView from '@/views/ProfileView.vue'
 import PublicProfileView from '@/views/PublicProfileView.vue'
 import EditorView from '@/views/EditorView.vue'
@@ -38,6 +41,15 @@ const router = createRouter({
       component: HomeView,
       meta: { title: '首页', keepAlive: true },
     },
+    // 搜索独立成页：首页是「浏览信息流」（分类 + 推荐/最新/关注），
+    // 搜索是「检索」（文章 / 用户两栏）。混在首页会让 HomeView 同时背两套语义。
+    // 不加 requiresAuth：游客也能搜文章和用户
+    {
+      path: '/search',
+      name: 'search',
+      component: SearchView,
+      meta: { title: '搜索' },
+    },
     {
       path: '/articles/:id',
       name: 'article-detail',
@@ -55,6 +67,19 @@ const router = createRouter({
       name: 'register',
       component: RegisterView,
       meta: { title: '注册' },
+    },
+    // 忘记密码：两个页面都**不需要登录**（忘了密码的人本来就登录不进来）
+    {
+      path: '/forgot-password',
+      name: 'forgot-password',
+      component: ForgotPasswordView,
+      meta: { title: '忘记密码' },
+    },
+    {
+      path: '/reset-password',
+      name: 'reset-password',
+      component: ResetPasswordView,
+      meta: { title: '重置密码' },
     },
     {
       path: '/me',

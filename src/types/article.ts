@@ -3,6 +3,11 @@ export interface Article {
   categoryId: string
   authorId: string
   authorName?: string
+  /**
+   * 作者头像。可能为空（用户没上传过，或 GitHub 那边没给）——
+   * 前端要用昵称首字兜底，不要指望它一定存在。
+   */
+  avatarUrl?: string
   categoryName?: string
   title: string
   summary: string

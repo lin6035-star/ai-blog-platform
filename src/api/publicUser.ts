@@ -37,6 +37,17 @@ export const publicUserApi = {
       params: { page, pageSize },
     })
   },
+  /**
+   * 按昵称搜索用户（公开接口，游客可用）。
+   *
+   * 传统分页（page/pageSize + total），与关注/粉丝列表一致——
+   * 用户量小，不需要游标。keyword 为空时后端返回空页而不是全站用户。
+   */
+  searchUsers(keyword: string, page: number, pageSize: number) {
+    return request.get<PageData<UserRelation>>('/users/search', {
+      params: { keyword, page, pageSize },
+    })
+  },
   follow(id: number | string) {
     return request.post(`/users/${id}/follow`)
   },

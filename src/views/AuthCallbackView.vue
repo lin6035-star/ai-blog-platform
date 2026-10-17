@@ -11,6 +11,14 @@ const error = ref('')
 const isPopup = !!window.opener
 
 onMounted(async () => {
+  // 后端校验失败（state 无效 / 过期 / 已被用过）会带着 error 跳回来，
+  // 优先级高于 token：出现了它说明这次回调根本没被受理
+  const upstreamError = route.query.error as string
+  if (upstreamError) {
+    error.value = upstreamError
+    return
+  }
+
   const token = route.query.token as string
 
   if (!token) {
@@ -25,7 +33,9 @@ onMounted(async () => {
 
     // 用 token 换取用户信息
     const result = await request.get<UsersVO>('/users/me')
-    authStore.setAuth(token, result.data)
+    // OAuth 登录没有「记住我」这个选项，按记住处理（与 login 的默认勾选一致）：
+    // 用户刚在 GitHub 上授权过，关掉浏览器就要重来一次说不过去
+    authStore.setAuth(token, result.data, true)
 
     if (isPopup) {
       // 弹窗场景：通知主窗口后关闭弹窗

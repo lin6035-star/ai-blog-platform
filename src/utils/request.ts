@@ -50,26 +50,39 @@ export type ResultRequest = Omit<AxiosInstance, AxiosMethods> & {
   delete<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<Result<T>>
 }
 
-function readLocalAuthToken() {
-  const token = localStorage.getItem(TOKEN_KEY) ?? ''
-  if (!token) {
-    return ''
+/**
+ * 读取登录凭证。
+ *
+ * **两个 storage 都要查**：「记住我」勾选时存 `localStorage`、不勾时存 `sessionStorage`
+ * （见 auth store 的 `setAuth`）。任何一处漏掉都会让一半用户"莫名未登录"，
+ * 而且症状是请求 401 ——很难联想到是存储位置的问题。
+ *
+ * 同一份凭据只会存在于一处（`setAuth` 写入前先清另一处），所以不存在读到旧值的情况。
+ */
+function readAuthToken() {
+  for (const storage of [localStorage, sessionStorage]) {
+    const token = storage.getItem(TOKEN_KEY) ?? ''
+    if (!token) {
+      continue
+    }
+
+    const rawUser = storage.getItem(USER_KEY)
+    if (!rawUser) {
+      // 有 token 没用户信息：手工改过的残留状态，丢掉，免得带着脏数据发请求
+      storage.removeItem(TOKEN_KEY)
+      continue
+    }
+
+    try {
+      JSON.parse(rawUser)
+      return token
+    } catch {
+      storage.removeItem(TOKEN_KEY)
+      storage.removeItem(USER_KEY)
+    }
   }
 
-  const rawUser = localStorage.getItem(USER_KEY)
-  if (!rawUser) {
-    localStorage.removeItem(TOKEN_KEY)
-    return ''
-  }
-
-  try {
-    JSON.parse(rawUser)
-    return token
-  } catch {
-    localStorage.removeItem(TOKEN_KEY)
-    localStorage.removeItem(USER_KEY)
-    return ''
-  }
+  return ''
 }
 
 export function createRequest(options: CreateRequestOptions = {}): ResultRequest {
@@ -83,7 +96,7 @@ export function createRequest(options: CreateRequestOptions = {}): ResultRequest
   const handleUnauthorized = options.onUnauthorized ?? (() => unauthorizedHandler?.())
 
   instance.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-    const token = options.getToken ? options.getToken() : readLocalAuthToken()
+    const token = options.getToken ? options.getToken() : readAuthToken()
 
     if (token) {
       config.headers.Authorization = `Bearer ${token}`

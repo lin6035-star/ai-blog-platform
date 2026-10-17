@@ -4,8 +4,40 @@ import type { UsersVO } from '@/types/user'
 const TOKEN_KEY = 'blog_token'
 const USER_KEY = 'blog_user'
 
+/**
+ * 「记住我」决定凭据放哪个 storage：
+ * - 勾选 → `localStorage`：关掉浏览器再打开仍是登录态
+ * - 不勾 → `sessionStorage`：**关掉标签页就没了**（公用电脑上的正确姿势）
+ *
+ * 注意这只是**客户端的一半**：登录态能不能长期保持，最终由后端签发的 token 有效期决定
+ * （勾选 30 天 / 不勾 24 小时，见 `application.yml` 的 `jwt.expire`）。
+ * 客户端存哪儿只解决"浏览器关掉后还在不在"。
+ *
+ * 两处都读、两处都清，是为了兼容"上次勾了、这次没勾"的切换：只认一个 storage 的话，
+ * 切换选项后会出现「旧的那份还在、新的读不到」的诡异状态。
+ */
+function allStorages(): Storage[] {
+  return [localStorage, sessionStorage]
+}
+
+function readItem(key: string): string | null {
+  for (const storage of allStorages()) {
+    const value = storage.getItem(key)
+    if (value) {
+      return value
+    }
+  }
+  return null
+}
+
+function removeItem(key: string) {
+  for (const storage of allStorages()) {
+    storage.removeItem(key)
+  }
+}
+
 function readStoredUser(): UsersVO | null {
-  const rawUser = localStorage.getItem(USER_KEY)
+  const rawUser = readItem(USER_KEY)
 
   if (!rawUser) {
     return null
@@ -14,7 +46,7 @@ function readStoredUser(): UsersVO | null {
   try {
     return JSON.parse(rawUser) as UsersVO
   } catch {
-    localStorage.removeItem(USER_KEY)
+    removeItem(USER_KEY)
     return null
   }
 }
@@ -60,7 +92,7 @@ export const useAuthStore = defineStore('auth', {
   },
   actions: {
     restoreAuth() {
-      const token = localStorage.getItem(TOKEN_KEY) ?? ''
+      const token = readItem(TOKEN_KEY) ?? ''
       const usersVO = readStoredUser()
 
       if (!token || !usersVO || isTokenExpired(token)) {
@@ -71,21 +103,33 @@ export const useAuthStore = defineStore('auth', {
       this.token = token
       this.usersVO = usersVO
     },
-    setAuth(token: string, usersVO: UsersVO) {
+    /**
+     * @param remember 记住我：`true` → localStorage，`false` → sessionStorage
+     */
+    setAuth(token: string, usersVO: UsersVO, remember: boolean) {
       this.token = token
       this.usersVO = usersVO
-      localStorage.setItem(TOKEN_KEY, token)
-      localStorage.setItem(USER_KEY, JSON.stringify(usersVO))
+
+      // **先清掉另一处再写**：从「记住」切到「不记住」时，localStorage 里那份必须消失，
+      // 否则下次打开浏览器它会被重新读出来 —— "不记住"等于没生效
+      removeItem(TOKEN_KEY)
+      removeItem(USER_KEY)
+
+      const target = remember ? localStorage : sessionStorage
+      target.setItem(TOKEN_KEY, token)
+      target.setItem(USER_KEY, JSON.stringify(usersVO))
     },
     updateUser(usersVO: UsersVO) {
       this.usersVO = usersVO
-      localStorage.setItem(USER_KEY, JSON.stringify(usersVO))
+      // 写回原来那一处（哪边存着 token 就写哪边），不要凭空造出第二份
+      const target = localStorage.getItem(TOKEN_KEY) ? localStorage : sessionStorage
+      target.setItem(USER_KEY, JSON.stringify(usersVO))
     },
     clearAuth() {
       this.token = ''
       this.usersVO = null
-      localStorage.removeItem(TOKEN_KEY)
-      localStorage.removeItem(USER_KEY)
+      removeItem(TOKEN_KEY)
+      removeItem(USER_KEY)
     },
   },
 })

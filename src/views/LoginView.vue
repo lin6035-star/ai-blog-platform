@@ -5,6 +5,7 @@ import { useMessage } from 'naive-ui'
 import { authApi } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import AnimatedCharacters from '@/components/auth/AnimatedCharacters.vue'
+import SliderCaptcha from '@/components/auth/SliderCaptcha.vue'
 import { useEyeTracking } from '@/composables/useEyeTracking'
 import type { LoginDTO } from '@/types/user'
 
@@ -19,8 +20,18 @@ const message = useMessage()
 /* ---- 表单状态 ---- */
 const loading = ref(false)
 const githubLoading = ref(false)
-const form = reactive<LoginDTO>({ username: '', password: '' })
+// 默认勾选「记住登录状态」：与改造前的实际行为保持一致（那时复选框写死 checked、
+// token 也存 localStorage），不给用户"升级后反而要天天重新登录"的倒退感
+const form = reactive<LoginDTO>({
+  username: '',
+  password: '',
+  captchaVerification: '',
+  rememberMe: true,
+})
 const formEl = ref<HTMLFormElement>()
+
+/* ---- 滑块验证码 ---- */
+const captchaVisible = ref(false)
 
 /* ---- 角色交互状态 ---- */
 type FocusType = 'none' | 'email' | 'password'
@@ -84,11 +95,31 @@ async function submit(e: Event) {
     return
   }
 
+  // 登录改成两步：先过滑块拿一次性凭证，再带凭证提交。
+  // 服务端强制校验（CaptchaVerifier），没有凭证的登录请求会被 40002 拒绝——
+  // 这不是「可选加强」，所以不能在这里直接调 login。
+  captchaVisible.value = true
+}
+
+/** 滑块通过：拿到一次性凭证后立刻提交登录 */
+async function onCaptchaSuccess(token: string) {
+  captchaVisible.value = false
+  form.captchaVerification = token
+  await doLogin()
+}
+
+/** SDK 加载 / 初始化失败：关掉弹窗并提示，不要让遮罩把页面卡死 */
+function onCaptchaError(msg: string) {
+  captchaVisible.value = false
+  message.error(msg)
+}
+
+async function doLogin() {
   loading.value = true
 
   try {
     const result = await authApi.login(form)
-    authStore.setAuth(result.data.token, result.data.usersVO)
+    authStore.setAuth(result.data.token, result.data.usersVO, form.rememberMe)
 
     // 触发成功动画
     loginSuccess.value = true
@@ -117,6 +148,10 @@ async function submit(e: Event) {
   } catch (error) {
     const msg = error instanceof Error ? error.message : '登录失败'
     message.error(msg)
+
+    // 凭证是一次性的（服务端 getAndRemove）：这次已经消费掉了，不清空的话
+    // 用户再点登录会拿着过期凭证来回撞 40002
+    form.captchaVerification = ''
 
     // 触发失败动画
     loginFail.value = true
@@ -258,9 +293,9 @@ async function handleGitHubLogin() {
           <!-- 选项 -->
           <div class="login-options anim-item d-6">
             <label class="login-checkbox-label">
-              <input type="checkbox" checked /> 记住登录状态
+              <input v-model="form.rememberMe" type="checkbox" /> 记住登录状态
             </label>
-            <a href="#" class="login-forgot">忘记密码？</a>
+            <router-link to="/forgot-password" class="login-forgot">忘记密码？</router-link>
           </div>
 
           <!-- 登录按钮 -->
@@ -309,6 +344,14 @@ async function handleGitHubLogin() {
         top: `${s.y - s.size / 2}px`,
         background: s.color,
       }"
+    />
+
+    <!-- 滑块验证码弹窗（SDK 自身没有遮罩，遮罩与居中由组件提供） -->
+    <SliderCaptcha
+      :visible="captchaVisible"
+      @success="onCaptchaSuccess"
+      @close="captchaVisible = false"
+      @error="onCaptchaError"
     />
 
     <!-- 白色遮罩 -->

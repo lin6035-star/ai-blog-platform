@@ -30,14 +30,20 @@ onMounted(async () => {
 
 <template>
   <div v-if="stats" class="site-activity">
-    <div class="site-activity-title">站点活跃</div>
+    <!-- 「全站去重人数」这几个字是必须的：这组数字全是**站点级**口径，
+         但它挂在头像弹层里，很容易被读成"我的活跃情况"（真实误读过：
+         新注册的账号看到「近 7 天 1」，以为是说自己有 7 天记录）。 -->
+    <div class="site-activity-title">
+      站点活跃
+      <span class="site-activity-scope">全站去重人数</span>
+    </div>
     <div class="site-activity-row">
       <span>今日活跃</span>
-      <strong>{{ stats.todayActive }}</strong>
+      <strong>{{ stats.todayActive }} 人</strong>
     </div>
     <div class="site-activity-row">
       <span>近 7 天</span>
-      <strong>{{ stats.weekActive }}</strong>
+      <strong>{{ stats.weekActive }} 人</strong>
     </div>
     <div class="site-activity-row">
       <span>昨日留存</span>
@@ -57,6 +63,12 @@ onMounted(async () => {
 .site-activity-title {
   color: #94a3b8;
   font-size: 12px;
+}
+
+.site-activity-scope {
+  margin-left: 6px;
+  color: #cbd5e1;
+  font-size: 11px;
 }
 
 .site-activity-row {

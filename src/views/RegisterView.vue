@@ -5,6 +5,7 @@ import { useMessage } from 'naive-ui'
 import { authApi } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import AnimatedCharacters from '@/components/auth/AnimatedCharacters.vue'
+import SliderCaptcha from '@/components/auth/SliderCaptcha.vue'
 import { useEyeTracking } from '@/composables/useEyeTracking'
 import type { RegisterDTO } from '@/types/user'
 
@@ -22,10 +23,15 @@ const githubLoading = ref(false)
 const form = reactive<RegisterDTO>({
   username: '',
   nickname: '',
+  email: '',
   password: '',
   confirmPassword: '',
+  captchaVerification: '',
 })
 const formEl = ref<HTMLFormElement>()
+
+/* ---- 滑块验证码 ---- */
+const captchaVisible = ref(false)
 
 /* ---- 角色交互状态 ---- */
 type FocusType = 'none' | 'email' | 'password'
@@ -51,6 +57,12 @@ function validateForm(): boolean {
   }
   if (!form.nickname.trim()) {
     message.warning('请输入昵称')
+    return false
+  }
+  // 邮箱只做「非空」检查：格式交给后端 @Email（两边规则不一致时，
+  // 前端拦下来的和后端拒绝的会不一样，用户看到两种口径反而更困惑）
+  if (!form.email.trim()) {
+    message.warning('请输入邮箱')
     return false
   }
   if (!form.password) {
@@ -111,11 +123,30 @@ async function submit(e: Event) {
 
   if (!validateForm()) return
 
+  // 同登录：先过滑块拿一次性凭证，再提交注册。服务端 RegistrationDTO 上
+  // captchaVerification 是 @NotBlank，缺了直接 40001
+  captchaVisible.value = true
+}
+
+async function onCaptchaSuccess(token: string) {
+  captchaVisible.value = false
+  form.captchaVerification = token
+  await doRegister()
+}
+
+/** SDK 加载 / 初始化失败：关掉弹窗并提示，不要让遮罩把页面卡死 */
+function onCaptchaError(msg: string) {
+  captchaVisible.value = false
+  message.error(msg)
+}
+
+async function doRegister() {
   loading.value = true
 
   try {
     const result = await authApi.register(form)
-    authStore.setAuth(result.data.token, result.data.usersVO)
+    // 注册后必然还在自己的设备上 → 与后端 buildAuthVO(user, longTokenTtl) 对齐
+    authStore.setAuth(result.data.token, result.data.usersVO, true)
     loginSuccess.value = true
 
     // // 1s 后彩色飞溅（暂时关闭）
@@ -135,6 +166,10 @@ async function submit(e: Event) {
   } catch (error) {
     const msg = error instanceof Error ? error.message : '注册失败'
     message.error(msg)
+
+    // 凭证一次性，消费后必须清掉，否则用户重试会一直撞「验证已失效」
+    form.captchaVerification = ''
+
     loginFail.value = true
     setTimeout(() => { loginFail.value = false }, 800)
   } finally {
@@ -239,6 +274,22 @@ async function handleGitHubLogin() {
                 v-model="form.nickname"
                 type="text"
                 placeholder="给自己取个名字"
+                @focus="onTextFocus"
+                @blur="onBlur"
+              />
+            </div>
+          </div>
+
+          <!-- 邮箱：找回密码的唯一通道，必填 -->
+          <div class="login-input-group anim-item d-4">
+            <label for="email">邮箱</label>
+            <div class="login-input-wrap">
+              <input
+                id="email"
+                v-model="form.email"
+                type="email"
+                placeholder="you@example.com"
+                autocomplete="email"
                 @focus="onTextFocus"
                 @blur="onBlur"
               />
@@ -360,6 +411,14 @@ async function handleGitHubLogin() {
         top: `${s.y - s.size / 2}px`,
         background: s.color,
       }"
+    />
+
+    <!-- 滑块验证码弹窗（SDK 自身没有遮罩，遮罩与居中由组件提供） -->
+    <SliderCaptcha
+      :visible="captchaVisible"
+      @success="onCaptchaSuccess"
+      @close="captchaVisible = false"
+      @error="onCaptchaError"
     />
 
     <!-- 白色遮罩 -->

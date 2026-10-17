@@ -119,8 +119,9 @@ function handleSeckillClick() {
 
 function handleSearch() {
   const kw = searchKeyword.value.trim()
+  // 搜索是独立页（文章 / 用户两个 tab），不再复用首页信息流
   if (kw) {
-    router.push({ path: '/', query: { keyword: kw } })
+    router.push({ path: '/search', query: { keyword: kw } })
   } else {
     router.push({ path: '/' })
   }
@@ -147,11 +148,11 @@ function goHomeFresh() {
     </a>
 
     <div class="header-actions">
-      <label class="header-search" aria-label="搜索文章">
+      <label class="header-search" aria-label="搜索文章或用户">
         <input
           v-model="searchKeyword"
           type="search"
-          placeholder="搜索文章标题"
+          placeholder="搜索文章或用户"
           @keyup.enter="handleSearch"
         />
         <n-icon @click="handleSearch" style="cursor: pointer"><SearchOutline /></n-icon>
