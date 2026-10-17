@@ -103,8 +103,13 @@ spring:
 
   ai:
     openai:
+      # 阿里云百炼 API Key。**一个 key 同时服务三处**：
+      #   ① 对话模型（生成链） ② embedding（RAG 向量化） ③ RAG rerank（GteRerankV2ArticleRagRanker 直接复用本 key）
+      # 所以换 key 只改这一个变量；OSS 用的是独立的 OSS_ACCESS_KEY_ID/SECRET，不受影响。
       api-key: ${ALIYUN_API_KEY}
-      base-url: https://dashscope.aliyuncs.com/compatible-mode
+      # DashScope 兼容模式地址。国内站默认值；若 key 属于国际站，用 ALIYUN_BASE_URL 覆盖：
+      #   国际站 https://dashscope-intl.aliyuncs.com/compatible-mode
+      base-url: ${ALIYUN_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode}
       connect-timeout: 30s
       read-timeout: 60s
       chat:
