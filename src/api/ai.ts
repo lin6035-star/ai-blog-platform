@@ -1,4 +1,4 @@
-import request from '@/utils/request'
+import request, { readAuthToken } from '@/utils/request'
 import type { PageData } from '@/types/result'
 
 // ============================================================
@@ -732,7 +732,9 @@ async function streamChat(
   callbacks: StreamCallbacks,
   signal?: AbortSignal,
 ): Promise<void> {
-  const token = localStorage.getItem('blog_token') ?? ''
+  // 与 axios 走同一个 token 读取出口：不勾「记住我」时 token 只在 sessionStorage，
+  // 只读 localStorage 会让这类用户被当成游客（不落库、不计费、Workflow 401）。
+  const token = readAuthToken()
 
   const body: Record<string, unknown> = { message }
   if (sessionId) body.sessionId = sessionId
@@ -880,7 +882,9 @@ async function streamWorkflowAction(
   callbacks: WorkflowStreamCallbacks,
   signal?: AbortSignal,
 ): Promise<void> {
-  const token = localStorage.getItem('blog_token') ?? ''
+  // 与 axios 走同一个 token 读取出口：不勾「记住我」时 token 只在 sessionStorage，
+  // 只读 localStorage 会让这类用户被当成游客（不落库、不计费、Workflow 401）。
+  const token = readAuthToken()
 
   let response: Response
   try {

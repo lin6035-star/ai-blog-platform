@@ -59,7 +59,7 @@ export type ResultRequest = Omit<AxiosInstance, AxiosMethods> & {
  *
  * 同一份凭据只会存在于一处（`setAuth` 写入前先清另一处），所以不存在读到旧值的情况。
  */
-function readAuthToken() {
+export function readAuthToken() {
   for (const storage of [localStorage, sessionStorage]) {
     const token = storage.getItem(TOKEN_KEY) ?? ''
     if (!token) {
