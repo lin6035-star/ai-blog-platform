@@ -30,7 +30,7 @@ public class AiEditorDraftGeneratorImpl implements AiEditorDraftGenerator {
                                     JSON 字段：
                                     type 固定为 fillArticle
                                     title：文章标题
-                                    categoryName：分类名称，不确定则为代码人生
+                                    categoryName：分类名称，不确定则为阅读
                                     summary：文章摘要
                                     content：Markdown 格式正文
                                     """

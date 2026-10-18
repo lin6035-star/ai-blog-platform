@@ -13,7 +13,7 @@ public class AiEditorTools {
     @Tool(description = "为写文章页面生成并填充一篇博客草稿。用户要求帮他写一篇文章、生成博文、起草博客时调用。")
     public String fillArticleDraft(
             @ToolParam(description = "文章标题") String title,
-            @ToolParam(description = "文章分类名称，只能使用站内已有分类名，无法确定则默认为代码人生") String categoryName,
+            @ToolParam(description = "文章分类名称，只能使用站内已有分类名，无法确定则默认为阅读") String categoryName,
             @ToolParam(description = "文章摘要") String summary,
             @ToolParam(description = "Markdown 格式文章正文") String content
     )
