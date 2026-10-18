@@ -49,8 +49,9 @@ const articleLoaded = ref(false)
 let pendingFillAction: EditorAction | null = null
 
 /* ---- 分类 ---- */
-const DEFAULT_CATEGORY_CODE = 'notes'
-const DEFAULT_CATEGORY_NAME = '随笔'
+// 2026-10-18 分类改版：默认分类从「随笔」改为「代码人生」（承接原随笔语义）
+const DEFAULT_CATEGORY_CODE = 'code-life'
+const DEFAULT_CATEGORY_NAME = '代码人生'
 const categories = ref<Category[]>([])
 
 function resolveSubmitCategoryId() {

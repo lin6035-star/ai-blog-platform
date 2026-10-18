@@ -52,10 +52,12 @@ const loadedAuthSignature = ref('')
 const allCategory: Category = { id: '0', name: '综合', code: 'all', description: '全部内容' }
 
 const fallbackCategories: Category[] = [
-  { id: '1', name: 'AI / Agent', code: 'ai-agent', description: 'AI、Agent、coding agent 相关内容' },
-  { id: '2', name: 'Java 后端', code: 'java-backend', description: 'Java、Spring Boot、后端开发相关内容' },
-  { id: '3', name: '项目实战', code: 'project-practice', description: '项目开发、部署、踩坑记录' },
-  { id: '4', name: '随笔', code: 'notes', description: '临时想法、学习记录、杂谈' },
+  { id: '1', name: '后端', code: 'backend', description: 'Java、Spring Boot、后端开发相关内容' },
+  { id: '2', name: '前端', code: 'frontend', description: 'Vue、TypeScript、前端工程化相关内容' },
+  { id: '3', name: 'AI / Agent', code: 'ai-agent', description: 'AI、Agent、coding agent 相关内容' },
+  { id: '4', name: '开发工具', code: 'dev-tools', description: '开发工具、效率工具、部署与运维' },
+  { id: '5', name: '代码人生', code: 'code-life', description: '程序员成长、职业感悟、杂谈' },
+  { id: '6', name: '阅读', code: 'reading', description: '读书笔记、技术书籍、文章分享' },
 ]
 
 const categoryItems = computed(() =>
