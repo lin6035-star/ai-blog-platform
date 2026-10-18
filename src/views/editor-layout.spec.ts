@@ -37,11 +37,11 @@ describe('editor publish state actions', () => {
     expect(editorView).toContain('initialCategoryId.value = form.categoryId')
   })
 
-  it('keeps the category selector empty by default but submits uncategorized articles as code-life', () => {
+  it('keeps the category selector empty by default but submits uncategorized articles as reading', () => {
     expect(editorView).toContain('categoryId: null')
     expect(editorView).toContain('placeholder="选择分类"')
-    expect(editorView).toContain("const DEFAULT_CATEGORY_CODE = 'code-life'")
-    expect(editorView).toContain("const DEFAULT_CATEGORY_NAME = '代码人生'")
+    expect(editorView).toContain("const DEFAULT_CATEGORY_CODE = 'reading'")
+    expect(editorView).toContain("const DEFAULT_CATEGORY_NAME = '阅读'")
     expect(editorView).toContain('function resolveSubmitCategoryId()')
     expect(editorView).toContain('category.code === DEFAULT_CATEGORY_CODE')
     expect(editorView).toContain('category.name === DEFAULT_CATEGORY_NAME')
