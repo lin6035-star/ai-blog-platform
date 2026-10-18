@@ -180,7 +180,7 @@ final class ClassifierPromptBlocks {
                      - suggestedWorkflowType=null
                      Agent 会读取计划内容后给出分析与改进建议（不改任何数据）。
                      三条分界（易混，务必按判据选）：
-                     - 问"有哪些计划 / 进行到哪了" → LEARNING_PLAN_QUERY（查状态）
+                     - 问"有哪些计划 / 进行到哪了"，或要求"讲讲 / 看看计划内容" → LEARNING_PLAN_QUERY（只读，看内容）
                      - 问"好不好 / 有没有问题 / 哪里不合理" → 本类（要分析结论）
                      - **要求动手改计划本身** → LEARNING_PROGRESS（要执行），不是本类。
                        典型措辞：优化 / 调整 / 改一下 / 压缩 / 重排 + 计划，
@@ -215,6 +215,7 @@ final class ClassifierPromptBlocks {
                      - “把 Redis 计划的缓存击穿任务改名为缓存击穿防护” -> LEARNING_AGENT（受控写改名，旧名新名都来自用户原话）
                      - “第二阶段太难，帮我加几个练习任务” -> LEARNING_ASSIST（任务名要 AI 生成）
                      - “我有几个学习规划” -> LEARNING_PLAN_QUERY（查询已有计划，不是 Agent）
+                     - “讲讲我的 Redis 学习计划” -> LEARNING_PLAN_QUERY（读取已有计划内容，不是制定）
                      - “Redis 是什么” -> GENERAL_CHAT
     
                      对 LEARNING_AGENT：learningPlanRef 只能摘录用户原话中的计划名称或关键词，
@@ -330,14 +331,19 @@ final class ClassifierPromptBlocks {
                      - suggestedAction=CHAT
                      - suggestedWorkflowType=null
     
-                     当用户询问或查看自己已有的学习计划、阶段或进度
-                     （例如"我有几个学习规划""我的 MySQL 学习计划学到哪了"）时：
+                     当用户询问、查看或要求讲解自己已有的学习计划、阶段或进度
+                     （例如"我有几个学习规划""我的 MySQL 学习计划学到哪了"
+                     "讲讲我的 Redis 学习计划""帮我看看我的X学习计划"）时：
                      - intent=LEARNING_PLAN_QUERY
                      - suggestedAction=TOOL
                      - suggestedWorkflowType=null
-                     边界：本类只处理「有哪些计划 / 某个计划进行到哪了」这类**列表与状态查询**。
-                     用户要求对计划**内容**做分析、评价、挑问题、给改进建议时，
+                     - requestKind=CHAT、taskGoals=null（只读查询不是任务）
+                     本类只负责**读取**：列清单、报进度、把已有计划的内容讲清楚。
+                     边界：用户要求对计划**内容**做分析、评价、挑问题、给改进建议时，
                      即使句子里出现"我的X学习计划"，也**不是**本类 → 走 LEARNING_AGENT（见上）。
+                     边界："讲讲 / 看看 / 说说我的X学习计划"是读取已有内容，
+                     **不是制定新计划**（LEARNING_PLAN）；只有"我想学X，帮我制定学习计划""帮我规划学习路线"
+                     这类从零规划的诉求才是 LEARNING_PLAN。
     
                      当用户要求调整、压缩、重排、延长、缩短、
                      重新生成已有学习计划或进度时：
@@ -474,7 +480,7 @@ final class ClassifierPromptBlocks {
                      输出示例：
     
                      普通聊天（直达）：
-                     {"intent":"GENERAL_CHAT","confidence":0.98,"learningPlanRef":null,"learningStageRef":null,"actionType":null,"articleId":null,"userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"suggestedAction":"CHAT","suggestedWorkflowType":null,"risk":"LOW","reason":"普通知识问答","needsThinking":false,"needsThinkingReason":null}
+                     {"intent":"GENERAL_CHAT","confidence":0.98,"learningPlanRef":null,"learningStageRef":null,"actionType":null,"articleId":null,"userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"requestKind":"CHAT","taskGoals":null,"suggestedAction":"CHAT","suggestedWorkflowType":null,"risk":"LOW","reason":"普通知识问答","needsThinking":false,"needsThinkingReason":null}
     
                      普通聊天（需思考，进通用 Agent）：
                      {"intent":"GENERAL_CHAT","confidence":0.85,"learningPlanRef":null,"learningStageRef":null,"actionType":null,"articleId":null,"userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"suggestedAction":"CHAT","suggestedWorkflowType":null,"risk":"LOW","reason":"依赖前文方案状态","needsThinking":true,"needsThinkingReason":"问题指向前文讨论的方案，需结合记忆与上下文先查再答"}
@@ -489,7 +495,7 @@ final class ClassifierPromptBlocks {
                      {"intent":"ARTICLE_AGENT","confidence":0.9,"learningPlanRef":null,"learningStageRef":null,"actionType":null,"articleId":"12","userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"suggestedAction":"AGENT","suggestedWorkflowType":null,"risk":"LOW","reason":"用户对当前文章表达模糊优化诉求","needsThinking":false,"needsThinkingReason":null}
     
                      文章查询：
-                     {"intent":"ARTICLE_SEARCH","confidence":0.96,"learningPlanRef":null,"learningStageRef":null,"actionType":null,"articleId":null,"userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"suggestedAction":"CHAT","suggestedWorkflowType":null,"risk":"LOW","reason":"用户明确查询站内文章","needsThinking":false,"needsThinkingReason":null}
+                     {"intent":"ARTICLE_SEARCH","confidence":0.96,"learningPlanRef":null,"learningStageRef":null,"actionType":null,"articleId":null,"userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"requestKind":"CHAT","taskGoals":null,"suggestedAction":"CHAT","suggestedWorkflowType":null,"risk":"LOW","reason":"用户明确查询站内文章","needsThinking":false,"needsThinkingReason":null}
     
                      文章动作 + 分析（复合目标）：
                      {"intent":"ARTICLE_ACTION","confidence":0.95,"learningPlanRef":null,"learningStageRef":null,"actionType":"likeArticle","articleId":"12","userId":null,"content":null,"target":null,"param":null,"topic":null,"topicEvidence":null,"categoryName":null,"requirements":null,"requestedActions":["likeArticle"],"analysisGoalEvidence":"分析一下它写得怎么样","suggestedAction":"CHAT","suggestedWorkflowType":null,"risk":"LOW","reason":"用户要求点赞并分析当前文章","needsThinking":false,"needsThinkingReason":null}
@@ -558,6 +564,15 @@ final class ClassifierPromptBlocks {
                        **反例**：讨论机制（"分析这篇文章里的点赞机制"）不是在要求执行动作，
                        不要产出 taskGoals；问余额、问比例这类同理。
                      【requestKind】是任务时为 TASK；普通问答 / 闲聊 / 纯粹讨论时为 CHAT 且 taskGoals=null。
+                     【只读查询不是任务】taskGoals 只表达「需要后端执行的动作或流程」
+                     （文章写动作 / 站内检索 / 导航 / 文章分析 / Workflow）。
+                     只读查询即使要调用工具，也一律 requestKind=CHAT、taskGoals=null：
+                     查看已有学习计划 / 进度 / 内容（intent=LEARNING_PLAN_QUERY、suggestedAction=TOOL）、
+                     查余额、查记忆、问当前文章内容。
+                     禁止为了填 taskGoals 把"查看学习计划"近似成 ARTICLE_SEARCH——
+                     站内检索只用于用户明确要找文章。
+                     如果整句确实还包含要执行的动作或流程，才按 TASK + taskGoals 输出，
+                     只读部分仍由对应 intent 表达。
                      讨论 Workflow 机制本身（如"Workflow 和 Agent 有什么区别"）属于**纯粹讨论**，
                      判 CHAT、不产出 taskGoals，也不要产出 WORKFLOW_HANDOFF。
                      所有字段都必须输出。

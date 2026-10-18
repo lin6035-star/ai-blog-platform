@@ -29,6 +29,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 @Component
 @RequiredArgsConstructor
@@ -86,7 +87,7 @@ public class AiLearningDashboardTool implements ToolCallback {
             boolean hasActiveWorkflow = hasActiveWorkflow(userId, sessionId);
 
             ActivePlanData activePlanData =
-                    buildActivePlanData(activePlans, userId);
+                    buildActivePlanData(activePlans, userId, question);
 
             Map<String, Object> summary = new LinkedHashMap<>();
             summary.put("totalPlanCount", plans.size());
@@ -193,19 +194,26 @@ public class AiLearningDashboardTool implements ToolCallback {
     /**
      * 构造当前活跃计划的数据。
      *
-     * 多个 ACTIVE 计划时，仍然取最新的一个作为 snapshot，
-     * 但 emptyState 会返回 MULTIPLE_ACTIVE，提醒模型不要擅自修改计划。
+     * <p><b>用户点名了某个计划时，snapshot 必须是那个计划</b>（2026-10-18 修）。
+     * 事故背景：「帮我看看我的 Redis 学习计划」此前走不到这里；修通路由后发现问题还在——
+     * 用户有 9 个 ACTIVE 计划，snapshot 却固定取"最新活跃"（C++ 计划），
+     * 模型被喂错上下文，回答就成了"你的 C++ 计划…"，照样答非所问。
+     * 这里复用既有的计划名匹配（与入口锚、Workflow 定位同一套 `matchPlansByMessage`）：
+     * 问句唯一命中一个 ACTIVE 计划 → 用它；命中多个/没命中 → 维持原行为（取最新活跃）。
+     *
+     * <p>多个 ACTIVE 且问句没点名时仍取最新一个，但 emptyState 返回 MULTIPLE_ACTIVE，
+     * 提醒模型不要擅自修改计划。
      */
     private ActivePlanData buildActivePlanData(
             List<LearningPlans> activePlans,
-            Long userId
+            Long userId,
+            String question
     ) {
         if (activePlans.isEmpty()) {
             return null;
         }
 
-        // listByUser 当前按 createdAt 倒序，第一条就是最新活跃计划。
-        LearningPlans activePlan = activePlans.get(0);
+        LearningPlans activePlan = selectPlanByQuestion(activePlans, userId, question);
 
         LearningPlansDetailVO detail =
                 safeGetDetail(activePlan.getId(), userId);
@@ -216,6 +224,38 @@ public class AiLearningDashboardTool implements ToolCallback {
                         : findCurrentStage(detail.getStages());
 
         return new ActivePlanData(activePlan, detail, currentStage);
+    }
+
+    /**
+     * 问句唯一命中一个 ACTIVE 计划时返回它，否则返回最新活跃计划。
+     *
+     * <p>匹配只用于**选择展示对象**，不参与任何写操作授权；命中多个一律不猜（取最新只为保持旧行为）。
+     */
+    private LearningPlans selectPlanByQuestion(
+            List<LearningPlans> activePlans,
+            Long userId,
+            String question
+    ) {
+        // listByUser 当前按 createdAt 倒序，第一条就是最新活跃计划。
+        LearningPlans latest = activePlans.get(0);
+        if (question == null || question.isBlank()) {
+            return latest;
+        }
+        try {
+            List<LearningPlans> matched =
+                    learningPlansService.matchPlansByMessage(userId, question);
+            Set<Long> activeIds = activePlans.stream()
+                    .map(LearningPlans::getId)
+                    .collect(Collectors.toSet());
+            List<LearningPlans> activeMatched = matched.stream()
+                    .filter(plan -> activeIds.contains(plan.getId()))
+                    .toList();
+            return activeMatched.size() == 1 ? activeMatched.get(0) : latest;
+        } catch (Exception e) {
+            // 匹配失败不影响总览——退回旧行为，绝不因为这一处失败让整个工具不可用
+            log.warn("学习 Dashboard 按问句选择计划失败，退回最新活跃计划: userId={}", userId, e);
+            return latest;
+        }
     }
 
     /**

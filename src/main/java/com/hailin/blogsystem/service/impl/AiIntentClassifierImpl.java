@@ -25,6 +25,7 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -144,13 +145,15 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
 
             resolveLearningPlanId(aiIntent, plans);
             backfillWorkflowFields(aiIntent);
+            reconcileReadOnlyContract(aiIntent);
             log.info(
                     "AI意图识别结果: intent={}, confidence={}, "
                             + "suggestedAction={}, suggestedWorkflowType={}, "
                             + "risk={}, reason={}, planRef={}, stageRef={}, "
                             + "planIndex={}, planId={}, "
                             + "actionType={}, articleId={}, authorId={}, userId={}, "
-                            + "needsThinking={}, needsThinkingReason={}",
+                            + "needsThinking={}, needsThinkingReason={}, "
+                            + "requestKind={}, taskGoalTypes={}",
                     aiIntent.getIntent(),
                     aiIntent.getConfidence(),
                     aiIntent.getSuggestedAction(),
@@ -166,7 +169,9 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
                     aiIntent.getAuthorId(),
                     aiIntent.getUserId(),
                     aiIntent.getNeedsThinking(),
-                    aiIntent.getNeedsThinkingReason()
+                    aiIntent.getNeedsThinkingReason(),
+                    aiIntent.getRequestKind(),
+                    taskGoalTypes(aiIntent.getTaskGoals())
             );
 
             timing.outcome = "success";
@@ -447,6 +452,59 @@ public class AiIntentClassifierImpl implements AiIntentClassifier
             case "LEARNING_ASSIST" -> "LEARNING_ASSIST";
             default -> null;
         };
+    }
+
+    /**
+     * 只读意图一致性收口（2026-10-18 生产事故）。
+     *
+     * <p><b>事故原样</b>：一句话被 plus 分类器同时判成
+     * 「{@code intent=LEARNING_PLAN_QUERY / suggestedAction=TOOL}」（正确，走 dashboard 只读工具）
+     * 和「{@code requestKind=TASK / taskGoals=[ARTICLE_SEARCH]}」（多余）。
+     * 后者的执行器抢在旧链之前执行，用户看到的是"已全部完成：没有找到与「Redis学习计划」相关的文章"。
+     *
+     * <p><b>为什么不改 prompt 了事</b>：任务协议（{@code EXAMPLES_AND_SCHEMA}）一直是常装块，
+     * 而学习域在 {@code taskGoals} 里根本没有可表达的类型——模型只能拿最像的
+     * {@code ARTICLE_SEARCH} 去凑。这是协议层的结构缺口，不能靠"让模型别写"保证。
+     * 所以后端按事实判：**只读意图不可能是任务**，冲突时丢弃 taskGoals、保留主意图。
+     *
+     * <p>丢弃是安全的：主意图仍在，由 Planner 的既有只读链执行；
+     * 被丢弃的只是模型候选，不是用户目标（判据只拦不补）。
+     */
+    static void reconcileReadOnlyContract(AiIntent intent) {
+        if (intent == null) {
+            return;
+        }
+        String intentName = intent.getIntent() == null ? "" : intent.getIntent().trim();
+        String action = intent.getSuggestedAction() == null ? "" : intent.getSuggestedAction().trim();
+        boolean readOnly = "TOOL".equalsIgnoreCase(action)
+                || "LEARNING_PLAN_QUERY".equalsIgnoreCase(intentName);
+        if (!readOnly || intent.getTaskGoals() == null || intent.getTaskGoals().isEmpty()) {
+            return;
+        }
+        List<String> goalTypes = taskGoalTypes(intent.getTaskGoals());
+        log.warn("[CLASSIFIER] 只读意图携带任务目标，按事实丢弃 taskGoals: "
+                        + "intent={}, action={}, taskGoalTypes={}",
+                intent.getIntent(), intent.getSuggestedAction(), goalTypes);
+        intent.setTaskGoals(null);
+        intent.setRequestKind("CHAT");
+    }
+
+    /** 仅用于日志/诊断：taskGoals 的类型串（不参与任何判定） */
+    static List<String> taskGoalTypes(List<Map<String, Object>> goals) {
+        List<String> types = new ArrayList<>();
+        if (goals == null) {
+            return types;
+        }
+        for (Map<String, Object> goal : goals) {
+            if (goal == null) {
+                continue;
+            }
+            Object type = goal.get("type");
+            if (type != null && !String.valueOf(type).isBlank()) {
+                types.add(String.valueOf(type));
+            }
+        }
+        return types;
     }
 
     private AiIntent tryParse(String json) {

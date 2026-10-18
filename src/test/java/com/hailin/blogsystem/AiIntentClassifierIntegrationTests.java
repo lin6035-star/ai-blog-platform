@@ -89,6 +89,11 @@ class AiIntentClassifierIntegrationTests {
             String expectedRequestKind,
             List<String> expectedTaskGoalTypesContains,
             Integer expectedTaskGoalCountAtLeast,
+            // 只读查询反例（2026-10-18）：必须完全没有 taskGoals。
+            // 事故是「LEARNING_PLAN_QUERY + requestedKind=TASK + taskGoals=[ARTICLE_SEARCH]」——
+            // 前者判对、后者多余，任务编排据此抢跑。只断言 Contains/CountAtLeast 抓不到"多出来"，
+            // 所以单独加"必须为空"这一维。
+            Boolean expectedTaskGoalsBlank,
             // 「页面缺文章上下文」反例：断言 articleId 必须为空——ID 只能由后端解析，模型不许硬编
             Boolean expectedArticleIdBlank,
             // 5a（2026-10-01）：WORKFLOW_HANDOFF 契约——**旧字段与新字段都要断言**。
@@ -306,6 +311,12 @@ class AiIntentClassifierIntegrationTests {
             assertThat(actualTypes)
                     .as("用例 %s：taskGoals 类型集合", caseName)
                     .containsAll(c.expectedTaskGoalTypesContains());
+        }
+        if (Boolean.TRUE.equals(c.expectedTaskGoalsBlank())) {
+            assertThat(intent.getTaskGoals())
+                    .as("用例 %s：只读查询不是任务——taskGoals 必须为空（多出来的就是编排抢跑的入口）",
+                            caseName)
+                    .isNullOrEmpty();
         }
         if (c.expectedTaskGoalTypesNotContains() != null) {
             List<String> actualTypes = intent.getTaskGoals() == null

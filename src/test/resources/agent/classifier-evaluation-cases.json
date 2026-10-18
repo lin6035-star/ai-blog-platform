@@ -270,6 +270,35 @@
     "expectedConfidenceMin": 0.55
   },
   {
+    "name": "回归：讲讲已有计划内容走 LEARNING_PLAN_QUERY，不是制定新计划（2026-10-18 事故句）",
+    "category": "regression",
+    "message": "讲讲我的Redis学习计划",
+    "expectedIntent": "LEARNING_PLAN_QUERY",
+    "expectedSuggestedAction": "TOOL",
+    "expectedRequestKind": "CHAT",
+    "expectedTaskGoalsBlank": true,
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "回归：看看已有计划走 LEARNING_PLAN_QUERY，且不得产出文章检索任务（2026-10-18 事故句）",
+    "category": "regression",
+    "message": "帮我看看我的Redis学习计划",
+    "expectedIntent": "LEARNING_PLAN_QUERY",
+    "expectedSuggestedAction": "TOOL",
+    "expectedRequestKind": "CHAT",
+    "expectedTaskGoalsBlank": true,
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "回归：看看XX的学习计划不得漂成 ARTICLE_SEARCH（2026-10-18 事故句）",
+    "category": "regression",
+    "message": "看看Redis的学习计划",
+    "expectedIntent": "LEARNING_PLAN_QUERY",
+    "expectedRequestKind": "CHAT",
+    "expectedTaskGoalsBlank": true,
+    "expectedConfidenceMin": 0.55
+  },
+  {
     "name": "充值进入 WALLET_AGENT（2026-09-21）",
     "category": "boundary",
     "message": "帮我充10块钱",

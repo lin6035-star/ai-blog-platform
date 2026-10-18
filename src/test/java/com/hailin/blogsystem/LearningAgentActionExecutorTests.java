@@ -14,6 +14,7 @@ import com.hailin.blogsystem.entity.dto.ArticleRagSearchStrategy;
 import com.hailin.blogsystem.entity.dto.AgentStepActionType;
 import com.hailin.blogsystem.entity.dto.EpisodicMemoryRagContext;
 import com.hailin.blogsystem.entity.dto.MemoryRagContext;
+import com.hailin.blogsystem.entity.vo.LearningPlansDetailVO;
 import com.hailin.blogsystem.service.AiUserMemoryService;
 import com.hailin.blogsystem.service.LearningPlansService;
 import org.junit.jupiter.api.BeforeEach;
@@ -102,6 +103,34 @@ class LearningAgentActionExecutorTests {
         assertThat(observation).contains("Java 并发计划");
     }
 
+    /**
+     * 2026-10-18 修：计划详情必须进结构化事实（Token 优化后模型只看 payload）。
+     *
+     * <p>事故：payload 只有元数据，模型回答"观察仅含计划元数据"并反复重查被去重跳过。
+     */
+    @Test
+    void dashboardPlanDetailIsExposedInPayload() {
+        LearningPlans plan = plan(1L, "两个月 Agent 开发入门到实战计划", "ACTIVE");
+        when(learningPlansService.listByUser(100L)).thenReturn(List.of(plan));
+        when(learningPlansService.matchPlansByMessage(eq(100L), any()))
+                .thenReturn(List.of(plan));
+        when(learningPlansService.getDetail(1L, 100L)).thenReturn(detailWithOneStage());
+
+        AgentActionResult result = executor.execute(
+                AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD)
+                        .withInput(Map.of("planRef", "两个月 Agent 开发入门到实战计划")),
+                100L,
+                null
+        );
+
+        assertThat(result.payload().get("planDetail")).asString()
+                .contains("目标计划《两个月 Agent 开发入门到实战计划》")
+                .contains("总进度：1/2")
+                .contains("阶段《第1周：基础》")
+                .contains("[x] 已完成任务")
+                .contains("[ ] 未完成任务");
+    }
+
     @Test
     void dashboardWithPlanRefShowsTargetPlanDetail() {
         LearningPlans plan = plan(1L, "Redis 学习计划", "ACTIVE");
@@ -136,17 +165,20 @@ class LearningAgentActionExecutorTests {
         when(learningPlansService.matchPlansByMessage(eq(100L), any()))
                 .thenReturn(List.of(planA, planB));
 
-        String observation = executor.execute(
+        AgentActionResult result = executor.execute(
                 AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD)
                         .withInput(Map.of("planRef", "Redis")),
                 100L,
                 null
-        ).summary();
+        );
 
         // 并列 = 歧义：只列候选，不猜（Agent 下一步应 ASK_USER）
-        assertThat(observation).contains("请确认具体是哪个");
-        assertThat(observation).contains("Redis 学习计划");
-        assertThat(observation).contains("Redis 进阶计划");
+        assertThat(result.summary()).contains("请确认具体是哪个");
+        assertThat(result.summary()).contains("Redis 学习计划");
+        assertThat(result.summary()).contains("Redis 进阶计划");
+        assertThat(result.payload().get("planCandidates")).asString()
+                .contains("Redis 学习计划")
+                .contains("Redis 进阶计划");
     }
 
     @Test
@@ -210,6 +242,9 @@ class LearningAgentActionExecutorTests {
                 .containsEntry("activePlanCount", 1)
                 .containsEntry("matchedCount", 0)
                 .containsEntry("selectedPlanId", null);
+        assertThat(result.payload().get("planCandidates")).asString()
+                .as("候选也要进结构化事实，模型才能重试正确标题或向用户确认")
+                .contains("Redis 学习计划");
     }
 
     @Test
@@ -274,6 +309,9 @@ class LearningAgentActionExecutorTests {
                 .containsEntry("status", "PARTIAL_FAILURE")
                 .containsEntry("query", "学习偏好")
                 .containsEntry("hitCount", 1);
+        assertThat(result.payload().get("memoryContent")).asString()
+                .as("命中的记忆内容要进结构化事实（模型只看 payload）")
+                .contains("回答直接一点");
     }
 
     @Test
@@ -325,6 +363,10 @@ class LearningAgentActionExecutorTests {
                 .containsEntry("status", "SUCCESS")
                 .containsEntry("keyword", "Redis 缓存击穿")
                 .containsEntry("hitCount", 1);
+        assertThat(result.payload().get("ragContent")).asString()
+                .as("检索片段要进结构化事实（模型只看 payload）")
+                .contains("Redis 缓存")
+                .contains("缓存击穿的处理方式");
     }
 
     @Test
@@ -342,5 +384,25 @@ class LearningAgentActionExecutorTests {
         plan.setTitle(title);
         plan.setStatus(status);
         return plan;
+    }
+
+    private LearningPlansDetailVO detailWithOneStage() {
+        LearningPlansDetailVO detail = new LearningPlansDetailVO();
+        detail.setDoneTasks(1);
+        detail.setTotalTasks(2);
+
+        LearningPlansDetailVO.TaskItem done = new LearningPlansDetailVO.TaskItem();
+        done.setTitle("已完成任务");
+        done.setDone(true);
+        LearningPlansDetailVO.TaskItem pending = new LearningPlansDetailVO.TaskItem();
+        pending.setTitle("未完成任务");
+        pending.setDone(false);
+
+        LearningPlansDetailVO.StageProgress stage = new LearningPlansDetailVO.StageProgress();
+        stage.setTitle("第1周：基础");
+        stage.setTasks(List.of(done, pending));
+
+        detail.setStages(List.of(stage));
+        return detail;
     }
 }

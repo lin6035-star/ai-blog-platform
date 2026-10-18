@@ -94,6 +94,13 @@ class TaskPlanningFacadeTests {
         AiIntent intent = new AiIntent();
         intent.setRequestKind(requestKind);
         intent.setTaskGoals(List.of(goals));
+        /*
+         * 默认主意图给文章域：2026-10-18 起 Facade 会先做**域仲裁**——
+         * 非文章域意图（学习 / 钱包 / 泛闲聊）即使带着可执行候选也不进编排。
+         * 这些用例测的是计划本身的判据，所以默认置于可编排域，避免被仲裁误拦；
+         * 域仲裁本身由专门的用例覆盖。
+         */
+        intent.setIntent("ARTICLE_ACTION");
         return intent;
     }
 
@@ -510,6 +517,88 @@ class TaskPlanningFacadeTests {
 
         assertThat(facadeWithSearch.decide(message, intent, 1L).route())
                 .isEqualTo(TaskRoute.Route.LEGACY);
+    }
+
+    // ==================== 域仲裁：非文章域主意图不得进入编排（2026-10-18 生产事故） ====================
+
+    /**
+     * 事故原句（2026-10-18 日志 09:48）：分类器同时给出
+     * {@code intent=LEARNING_PLAN_QUERY + suggestedAction=TOOL}（正确）和
+     * {@code taskGoals=[ARTICLE_SEARCH(query=Redis学习计划)]}（多余）。
+     *
+     * <p>没有域仲裁时：单步 ARTICLE_SEARCH 有执行器 → ORCHESTRATE 抢在 Planner 的
+     * dashboard TOOL 之前执行 → 用户看到"已全部完成：没有找到与「Redis学习计划」相关的文章"。
+     * 现在必须先按主意图拦下，把执行权交回既有链路。
+     */
+    @Test
+    void readOnlyLearningQueryWithArticleSearchGoalDoesNotOrchestrate() {
+        String message = "帮我看看我的Redis学习计划";
+        AiIntent intent = intent("TASK",
+                goalOf("ARTICLE_SEARCH", Map.of("query", "Redis学习计划"), message));
+        intent.setIntent("LEARNING_PLAN_QUERY");
+        intent.setSuggestedAction("TOOL");
+
+        TaskRoute route = facadeWithSearch.decide(message, intent, 1L);
+
+        assertThat(route.isOrchestrate()).isFalse();
+        assertThat(route.route()).isEqualTo(TaskRoute.Route.LEGACY);
+        assertThat(route.reason()).contains("可编排域");
+    }
+
+    /** 多步版本同理：只读意图 + 文章目标（哪怕全都有执行器）也不能占掉主意图。 */
+    @Test
+    void readOnlyLearningQueryWithMultipleArticleGoalsDoesNotOrchestrate() {
+        AiIntent intent = intent("TASK",
+                goalOf("ARTICLE_SEARCH", Map.of("query", "Redis"), "看看Redis的学习计划"),
+                goalOf("ARTICLE_ANALYSIS", Map.of(), "看看Redis的学习计划"));
+        intent.setIntent("LEARNING_PLAN_QUERY");
+        intent.setSuggestedAction("TOOL");
+
+        assertThat(facadeWithAnalysis.decide("看看Redis的学习计划", intent, 1L).route())
+                .isEqualTo(TaskRoute.Route.LEGACY);
+    }
+
+    /** 学习类 Workflow 意图同样不是编排域：主意图该启动工作流，而不是被文章步骤抢走。 */
+    @Test
+    void learningWorkflowIntentWithArticleGoalDoesNotOrchestrate() {
+        AiIntent intent = intent("TASK",
+                goalOf("ARTICLE_SEARCH", Map.of("query", "Redis"), "帮我制定Redis学习计划"));
+        intent.setIntent("LEARNING_PLAN");
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setSuggestedWorkflowType("LEARNING_PLAN");
+
+        assertThat(facadeWithSearch.decide("帮我制定Redis学习计划", intent, 1L).route())
+                .isEqualTo(TaskRoute.Route.LEGACY);
+    }
+
+    /** 钱包域同理：没有执行器的域不该被文章候选"拖进"编排。 */
+    @Test
+    void walletAgentIntentWithArticleGoalDoesNotOrchestrate() {
+        AiIntent intent = intent("TASK",
+                goalOf("ARTICLE_SEARCH", Map.of("query", "Redis"), "查完余额再搜 Redis 文章"));
+        intent.setIntent("WALLET_AGENT");
+
+        assertThat(facadeWithSearch.decide("查完余额再搜 Redis 文章", intent, 1L).route())
+                .isEqualTo(TaskRoute.Route.LEGACY);
+    }
+
+    /** 缺主意图 = 没有"计划归谁"的依据 → fail-closed，不能让模型候选覆盖旧链决策。 */
+    @Test
+    void missingIntentWithExecutablePlanDoesNotOrchestrate() {
+        AiIntent intent = intent("TASK", goal("ARTICLE_WRITE", "点赞这篇文章"));
+        intent.setIntent(null);
+
+        assertThat(facadeWithSearch.decide(MESSAGE, intent, 1L).route())
+                .isEqualTo(TaskRoute.Route.LEGACY);
+    }
+
+    /** 反例：文章域主意图不得被域仲裁误伤（域判据只拦非文章域）。 */
+    @Test
+    void articleDomainIntentStillOrchestrates() {
+        AiIntent intent = intent("TASK", goal("ARTICLE_WRITE", "点赞这篇文章"));
+        intent.setIntent("ARTICLE_ACTION");
+
+        assertThat(facadeWithSearch.decide(MESSAGE, intent, 1L).isOrchestrate()).isTrue();
     }
 
     @Test

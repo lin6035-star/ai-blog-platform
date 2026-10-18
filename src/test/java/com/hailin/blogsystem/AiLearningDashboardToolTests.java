@@ -307,14 +307,60 @@ class AiLearningDashboardToolTests {
                 .isTrue();
     }
 
+    /**
+     * 2026-10-18 事故后续修复：用户点名了某个计划时，snapshot 必须是那个计划。
+     *
+     * <p>事故用户有 9 个 ACTIVE 计划，Redis 计划创建最早；旧实现固定取"最新活跃"（C++），
+     * 于是「帮我看看我的Redis学习计划」即使路由修好，模型拿到的也是 C++ 计划的上下文。
+     */
+    @Test
+    void snapshotPrefersPlanNamedInQuestion() throws Exception {
+        UserContext.set(TEST_USER);
+
+        LearningPlans redis = createPlanAt(
+                TEST_USER, "Redis 核心原理与工程化实战计划", LearningPlans.STATUS_ACTIVE,
+                LocalDateTime.now().minusDays(3));
+        createPlanAt(
+                TEST_USER, "Java 后端学习计划", LearningPlans.STATUS_ACTIVE,
+                LocalDateTime.now());
+
+        LearningStages stage = new LearningStages();
+        stage.setPlanId(redis.getId());
+        stage.setOrderNum(1);
+        stage.setTitle("Redis 基础");
+        stage.setTasks("""
+                [
+                  {"title":"Redis 数据类型","done":true},
+                  {"title":"Hash 底层结构","done":false}
+                ]
+                """);
+        stage.setCreatedAt(LocalDateTime.now());
+        stage.setUpdatedAt(LocalDateTime.now());
+        learningStageMapper.insert(stage);
+
+        JsonNode result = readJson(
+                dashboardTool.call("{\"question\":\"帮我看看我的Redis学习计划\"}"));
+
+        assertThat(result.path("activePlanSnapshot").path("planId").asLong())
+                .as("snapshot 必须是被点名的 Redis 计划，而不是最新活跃的 Java 计划")
+                .isEqualTo(redis.getId());
+        assertThat(result.path("activePlanSnapshot").path("currentStage").path("title").asText())
+                .isEqualTo("Redis 基础");
+    }
+
     private LearningPlans createPlan(Long userId, String title, String status) {
+        return createPlanAt(userId, title, status, LocalDateTime.now());
+    }
+
+    private LearningPlans createPlanAt(Long userId, String title, String status,
+                                       LocalDateTime createdAt) {
         LearningPlans plan = new LearningPlans();
         plan.setUserId(userId);
         plan.setTitle(title);
         plan.setGoal("学习目标");
         plan.setStatus(status);
-        plan.setCreatedAt(LocalDateTime.now());
-        plan.setUpdatedAt(LocalDateTime.now());
+        plan.setCreatedAt(createdAt);
+        plan.setUpdatedAt(createdAt);
         learningPlanMapper.insert(plan);
         return plan;
     }

@@ -168,7 +168,15 @@ public class TaskPlanner {
         }
 
         TaskPlan plan = new TaskPlan(candidate.goal(), steps, uncovered, uncoveredTypes);
-        log.info("[TASK-PLAN] 计划生成: steps={}, uncovered={}", steps.size(), uncovered.size());
+        /*
+         * 日志必须能回答"这一步是什么类型"——2026-10-18 排障时只有 steps=1，
+         * 只能靠后面的 RAG 日志反推那一步是 ARTICLE_SEARCH。类型/未覆盖类型是最小事实集。
+         */
+        log.info("[TASK-PLAN] 计划生成: steps={}, stepTypes={}, uncovered={}, uncoveredTypes={}",
+                steps.size(),
+                steps.stream().map(step -> step.type().name()).toList(),
+                uncovered.size(),
+                LogValues.safe(uncoveredTypes.toString(), 120));
         return PlanningResult.task(plan);
     }
 

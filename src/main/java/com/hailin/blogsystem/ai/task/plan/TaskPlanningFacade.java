@@ -37,6 +37,23 @@ public class TaskPlanningFacade {
             "并比较", "再比较", "并对比", "再对比",
             "比较各", "对比各", "比较这些", "对比这些");
 
+    /**
+     * 可进入任务编排的主意图域——**白名单**（2026-10-18 域仲裁）。
+     *
+     * <p><b>为什么必须是白名单</b>：任务编排第一版只承接过文章域目标
+     * （设计稿 §5.1「没有 Workflow、文章分析、学习域、钱包域或跨域目标」）。
+     * 但实现此前只校验了"每个步骤有没有执行器"，没有校验"主意图是不是文章域"——
+     * 于是分类器给出「intent=LEARNING_PLAN_QUERY + taskGoals=[ARTICLE_SEARCH]」时，
+     * 一个只读的学习计划查询会被编排成站内文章搜索，并回"已全部完成"。
+     *
+     * <p><b>白名单优于黑名单</b>：新增域默认无权编排，避免每加一个域都要回来补黑名单。
+     * 判据只拦不补——被忽略的是**模型候选**，不是用户目标（主意图仍由旧链裁决执行）。
+     */
+    private static final Set<String> ORCHESTRATABLE_INTENTS = Set.of(
+            "ARTICLE_SEARCH", "ARTICLE_ACTION", "ARTICLE_AGENT", "ARTICLE_DETAIL_QA",
+            "NAVIGATE", "EDITOR_ACTION",
+            "CREATE_ARTICLE_WORKFLOW", "OPTIMIZE_ARTICLE_WORKFLOW");
+
     private final TaskPlanner planner;
 
     /**
@@ -49,6 +66,23 @@ public class TaskPlanningFacade {
         TaskPlanCandidate candidate = toCandidate(message, intent);
         if (candidate == null) {
             return TaskRoute.chat("没有候选计划");
+        }
+
+        /*
+         * 域仲裁（2026-10-18）：先确认主意图是否属于可编排域，再谈计划能不能执行。
+         *
+         * 这一步必须发生在 planner.plan() 之前：一旦计划成立且每一步都有执行器，
+         * routeTask 在构造上就没有"退回旧链"的出口（ORCHESTRATE 是独占式结论）。
+         * 此前"单一 ARTICLE_SEARCH 退 LEGACY"只认 intent=ARTICLE_SEARCH，恰好漏掉了
+         * "只读学习查询 + 文章检索目标"这种跨域冲突；那正是生产事故的路径。
+         */
+        if (candidate.requestKind() == TaskPlanCandidate.RequestKind.TASK
+                && !isOrchestratableDomain(intent)) {
+            log.warn("[TASK-PLAN] 主意图不属于可编排域，忽略任务候选（交给既有链路）: "
+                            + "intent={}, taskGoalTypes={}",
+                    LogValues.safe(intent == null ? null : intent.getIntent()),
+                    LogValues.safe(goalTypesOf(candidate).toString(), 120));
+            return TaskRoute.legacy("主意图不属于可编排域，任务候选已忽略，交给既有链路");
         }
 
         PlanningResult planning = planner.plan(message, candidate);
@@ -463,6 +497,28 @@ public class TaskPlanningFacade {
         }
         // 有已覆盖步骤时：必须全是文章写动作，才是第二刀那个「动作 + 分析」组合
         return allStepsAreWrites(plan);
+    }
+
+    /**
+     * 主意图是否属于任务编排可承接的域。
+     *
+     * <p>缺 intent（分类器失败降级）或未登记的新域一律返回 false——fail-closed：
+     * 没有主意图就没有"计划归谁"的依据，此时用模型候选覆盖旧链决策正是要消灭的插队行为。
+     */
+    private boolean isOrchestratableDomain(AiIntent intent) {
+        if (intent == null || intent.getIntent() == null) {
+            return false;
+        }
+        return ORCHESTRATABLE_INTENTS.contains(intent.getIntent().trim().toUpperCase(Locale.ROOT));
+    }
+
+    /** 仅用于日志：候选目标类型串。不参与任何判定。 */
+    private String goalTypesOf(TaskPlanCandidate candidate) {
+        return candidate.goals().stream()
+                .map(goal -> goal == null || goal.type() == null ? "" : goal.type())
+                .filter(type -> !type.isBlank())
+                .collect(Collectors.toList())
+                .toString();
     }
 
     /** {@code AiIntent} 的候选字段 → 领域对象。字段缺失一律按"不是任务"处理 */

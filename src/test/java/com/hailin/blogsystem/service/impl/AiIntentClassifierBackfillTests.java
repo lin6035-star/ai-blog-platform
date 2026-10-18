@@ -112,6 +112,78 @@ class AiIntentClassifierBackfillTests {
         assertThat(intent.getIntent()).isEqualTo("OPTIMIZE_ARTICLE_WORKFLOW");
     }
 
+    // ============ 只读意图一致性收口（2026-10-18 生产事故） ============
+
+    /**
+     * 事故原样：一次输出同时是「只读计划查询（TOOL）」和「TASK + 文章检索目标」。
+     * 后端判事实：只读意图不可能是任务 → 丢弃 taskGoals、保留主意图。
+     */
+    @Test
+    void dropsTaskGoalsWhenIntentIsReadOnlyToolQuery() {
+        AiIntent intent = intent("LEARNING_PLAN_QUERY", "TOOL", null,
+                List.of(goal("ARTICLE_SEARCH", null)));
+        intent.setRequestKind("TASK");
+
+        AiIntentClassifierImpl.reconcileReadOnlyContract(intent);
+
+        assertThat(intent.getTaskGoals()).isNull();
+        assertThat(intent.getRequestKind()).isEqualTo("CHAT");
+        assertThat(intent.getIntent()).as("主意图必须保留——它是旧链执行的依据").isEqualTo("LEARNING_PLAN_QUERY");
+        assertThat(intent.getSuggestedAction()).isEqualTo("TOOL");
+    }
+
+    /** 即使 suggestedAction 没写 TOOL，LEARNING_PLAN_QUERY 也属于只读意图。 */
+    @Test
+    void dropsTaskGoalsWhenIntentIsLearningPlanQueryRegardlessOfAction() {
+        AiIntent intent = intent("LEARNING_PLAN_QUERY", "CHAT", null,
+                List.of(goal("ARTICLE_SEARCH", null)));
+        intent.setRequestKind("TASK");
+
+        AiIntentClassifierImpl.reconcileReadOnlyContract(intent);
+
+        assertThat(intent.getTaskGoals()).isNull();
+        assertThat(intent.getRequestKind()).isEqualTo("CHAT");
+    }
+
+    /** 反例：文章域可执行意图必须保留 taskGoals（多目标编排依赖它）。 */
+    @Test
+    void keepsTaskGoalsForOrchestratableArticleIntent() {
+        AiIntent intent = intent("ARTICLE_ACTION", "CHAT", null,
+                List.of(goal("ARTICLE_WRITE", null)));
+        intent.setRequestKind("TASK");
+
+        AiIntentClassifierImpl.reconcileReadOnlyContract(intent);
+
+        assertThat(intent.getTaskGoals()).hasSize(1);
+        assertThat(intent.getRequestKind()).isEqualTo("TASK");
+    }
+
+    /** 反例：Workflow 意图的 taskGoals 是 5a/5b 的冻结契约，不能被误清。 */
+    @Test
+    void keepsTaskGoalsForWorkflowIntent() {
+        AiIntent intent = intent("OPTIMIZE_ARTICLE_WORKFLOW", "WORKFLOW", "OPTIMIZE_ARTICLE",
+                List.of(goal("WORKFLOW_HANDOFF", "OPTIMIZE_ARTICLE")));
+        intent.setRequestKind("TASK");
+
+        AiIntentClassifierImpl.reconcileReadOnlyContract(intent);
+
+        assertThat(intent.getTaskGoals()).hasSize(1);
+        assertThat(intent.getRequestKind()).isEqualTo("TASK");
+    }
+
+    @Test
+    void reconcileIsNoopWithoutTaskGoals() {
+        AiIntent readOnly = intent("LEARNING_PLAN_QUERY", "TOOL", null, null);
+        AiIntentClassifierImpl.reconcileReadOnlyContract(readOnly);
+        assertThat(readOnly.getTaskGoals()).isNull();
+
+        AiIntent empty = intent("LEARNING_PLAN_QUERY", "TOOL", null, List.of());
+        AiIntentClassifierImpl.reconcileReadOnlyContract(empty);
+        assertThat(empty.getTaskGoals()).isEmpty();
+
+        AiIntentClassifierImpl.reconcileReadOnlyContract(null);
+    }
+
     private static AiIntent intent(String intentName, String suggestedAction, String suggestedWorkflowType,
                                    List<Map<String, Object>> goals) {
         AiIntent intent = new AiIntent();

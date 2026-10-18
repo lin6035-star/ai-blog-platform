@@ -120,15 +120,15 @@ class JevFastPathMapperTests {
     }
 
     /**
-     * 5 个 Workflow goal → Planner 的字段契约。
+     * 文章类 Workflow 仍是快速路径：动词明确（写/创建/优化），与只读意图分开判定。
      *
      * <p>锁的是**每个字段都有下游硬判据**：{@code suggestedAction=WORKFLOW} 决定
      * {@code isWorkflowSuggestion}；{@code suggestedWorkflowType} 必须等于
      * {@code AiWorkflowType.name()}，否则 {@code hasWorkflowSuggestion} 不通过而降级 CTA；
-     * {@code intent} 名的后缀规则（文章带 {@code _WORKFLOW}、学习类不带）是既有协议。
+     * {@code intent} 名的后缀规则（文章带 {@code _WORKFLOW}）是既有协议。
      */
     @Test
-    void mapsAllFiveWorkflowGoalsToPlannerContract() {
+    void mapsArticleWorkflowGoalsToPlannerContract() {
         PageContextDTO page = articlePage();
 
         assertWorkflowIntent(mapper.map(
@@ -138,18 +138,30 @@ class JevFastPathMapperTests {
         assertWorkflowIntent(mapper.map(
                 result("workflow_optimize", 0.99, Map.of("workflow_optimize", 1.00), false), page),
                 "OPTIMIZE_ARTICLE_WORKFLOW", "OPTIMIZE_ARTICLE");
+    }
 
-        assertWorkflowIntent(mapper.map(
+    /**
+     * 学习类 Workflow **一律回退 plus**（2026-10-18 生产事故）。
+     *
+     * <p>实测：用户「讲讲我的 Redis 学习计划」「讲一讲我的 Redis 学习计划」被 Jev 以
+     * 0.83 / 0.76 判成 {@code workflow_learning_plan}，直接拉起"制定新计划"工作流——
+     * 代价不是"多问一次"，而是 17 秒规划 + 错误计划卡 + 真实计费。
+     * Jev 的独立二元 goal 无法区分「看/讲已有计划」与「制定新计划」，
+     * 写意图必须交给带完整语义分界的 plus 分类器。
+     *
+     * <p>这条测试是白名单的**回归锁**：谁把学习类 Workflow 加回快速路径，这里就红。
+     */
+    @Test
+    void learningWorkflowGoalsAlwaysFallBackToPlus() {
+        assertFallback(mapper.map(
                 result("workflow_learning_plan", 0.99, Map.of("workflow_learning_plan", 1.00), false), null),
-                "LEARNING_PLAN", "LEARNING_PLAN");
-
-        assertWorkflowIntent(mapper.map(
+                "UNSUPPORTED_GOAL");
+        assertFallback(mapper.map(
                 result("workflow_learning_progress", 0.99, Map.of("workflow_learning_progress", 0.99), false), null),
-                "LEARNING_PROGRESS", "LEARNING_PROGRESS");
-
-        assertWorkflowIntent(mapper.map(
+                "UNSUPPORTED_GOAL");
+        assertFallback(mapper.map(
                 result("workflow_learning_assist", 0.93, Map.of("workflow_learning_assist", 0.93), false), null),
-                "LEARNING_ASSIST", "LEARNING_ASSIST");
+                "UNSUPPORTED_GOAL");
     }
 
     /** 创建文章只需要用户原话，不要求当前文章上下文（requirement 用的是 message）。 */

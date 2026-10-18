@@ -18,6 +18,7 @@ public class LoggingAgentDecisionTraceSink
                 "AgentDecisionTrace requestId={}, userId={}, sessionId={}, "
                         + "message={}, intent={}, confidence={}, "
                         + "suggestedAction={}, suggestedWorkflow={}, risk={}, "
+                        + "requestKind={}, taskGoalTypes={}, "
                         + "action={}, workflowType={}, toolName={}, "
                         + "ruleHits={}, reason={}",
                 trace.getRequestId(),
@@ -29,6 +30,8 @@ public class LoggingAgentDecisionTraceSink
                 trace.getSuggestedAction(),
                 trace.getSuggestedWorkflowType(),
                 trace.getRisk(),
+                trace.getRequestKind(),
+                trace.getTaskGoalTypes(),
                 trace.getAction(),
                 trace.getWorkflowType(),
                 trace.getToolName(),

@@ -114,7 +114,7 @@ spring:
       read-timeout: 60s
       chat:
         options:
-          model: ${AI_CHAT_MODEL:qwen3.7-flash-2026-07-15}
+          model: ${AI_CHAT_MODEL:qwen3.8-flash}
       embedding:
         options:
           model: qwen3.7-text-embedding
@@ -377,7 +377,7 @@ blog:
       handoff-recovery-stale-minutes: 15
     # 判断链模型（分类器 / Agent 决策器 / 证据验证器）：这些环节判错会让整条路走偏，
     # 建议绑一个稳的模型；留空则跟随 spring.ai.openai.chat.options.model（生成链模型）。
-    judge-model: ${AI_JUDGE_MODEL:qwen3.7-plus-2026-05-26}
+    judge-model: ${AI_JUDGE_MODEL:qwen3.7-plus}
     # 思考模式（enable_thinking）统一策略（2026-10-04）。设计说明见 BlogAiProperties.Thinking。
     #   disable=true（默认）：对**所有**模型的 chat 调用注入 enable_thinking=false，
     #     RestClient（非流式）与 WebClient（流式）两条管线都注入。
@@ -436,7 +436,7 @@ blog:
         chunks-per-article: 2
       rerank:
         enabled: true
-        model: qwen3-vl-rerank
+        model: qwen3.7-text-rerank
         workspace-id: ${ALIYUN_WORKSPACE_ID:}
         # ⚠️ top-n 是 **chunk 级**名额，而下游 parseRanked 会按 articleId 折叠成"篇"——
         # 所以名额必须比"想要的篇数"多留余量，否则会被同一篇文章的多个 chunk 吃光。

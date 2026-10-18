@@ -40,22 +40,28 @@ public final class JevFastPathMapper {
             Set.of("article_qa", "article_analysis");
 
     /**
-     * 第二批放行的 Workflow 意图：Jev goal → {@code suggestedWorkflowType}。
+     * 放行的 Workflow 意图：Jev goal → {@code suggestedWorkflowType}。
      *
-     * <p><b>为什么 Workflow 可以放行而写动作不行</b>：这五条都是**确认型 Workflow**——
-     * 启动不等于执行，真正生成/写入仍由确认节点控制，判错的代价是"多问一次"。
-     * 而 {@code article_write} / {@code navigate} / {@code editor_action} 是<b>直接执行</b>、
-     * 没有确认环节，判错就是真实副作用，所以继续回退 plus。
+     * <p><b>2026-10-18 起学习类 Workflow 全部移出快速路径</b>（LEARNING_PLAN /
+     * LEARNING_PROGRESS / LEARNING_ASSIST）。原判断是"确认型 Workflow 判错只是多问一次"，
+     * 实测不成立：用户说「讲讲我的 Redis 学习计划」「讲一讲我的 Redis 学习计划」，
+     * Jev 以 0.83 / 0.76 判成 {@code workflow_learning_plan} 并直接拉起 LEARNING_PLAN 工作流——
+     * 实际代价是 17 秒完整规划 + 一张错误的新计划确认卡 + 真实计费，用户以为系统要重建计划。
+     *
+     * <p><b>为什么靠移出白名单而不是加规则</b>：Jev 是 decision 模型，goal 是独立二元判据，
+     * 没有"只读讲解"这一类目标可承接；「看/讲」与「制定」的语义边界无法由二元概率可靠区分
+     * （单看"学习计划"这个对象就会判真）。写意图交给 plus 分类器（有完整语义分界 + 在线评测门），
+     * 只读意图继续走快速路径——判错只影响一次回答，这是本来就成立的代价不对称。
+     *
+     * <p>保留 {@code workflow_create} / {@code workflow_optimize}：动词明确（写/创建/优化），
+     * 且与只读意图（article_qa / article_analysis）在 Jev 判据里是分开的。
      *
      * <p>键与值都必须与分类器既有协议逐字一致——下游 {@code AgentPlannerSupport} 用
      * {@code suggestedWorkflowType.equals(workflowType.name())} 判定，错一个字就降级 CTA。
      */
     private static final Map<String, String> WORKFLOW_TYPES = Map.of(
             "workflow_create", "CREATE_ARTICLE",
-            "workflow_optimize", "OPTIMIZE_ARTICLE",
-            "workflow_learning_plan", "LEARNING_PLAN",
-            "workflow_learning_progress", "LEARNING_PROGRESS",
-            "workflow_learning_assist", "LEARNING_ASSIST"
+            "workflow_optimize", "OPTIMIZE_ARTICLE"
     );
 
     public JevFastPathDecision map(JevDecisionResult result, PageContextDTO pageContext) {

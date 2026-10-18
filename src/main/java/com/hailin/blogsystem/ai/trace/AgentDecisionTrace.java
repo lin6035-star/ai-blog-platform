@@ -8,6 +8,7 @@ import lombok.Builder;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -31,6 +32,16 @@ public class AgentDecisionTrace {
     private String suggestedAction;
     private String suggestedWorkflowType;
     private String risk;
+
+    /**
+     * 分类器给出的任务字段（2026-10-18 补）。
+     *
+     * <p>事故当天只有 intent/action 被记录，{@code requestKind=TASK + taskGoals=[ARTICLE_SEARCH]}
+     * 只存在于数据库的 task_plan_json 里——排障只能靠"steps=1"反推。
+     * 这两个字段是"分类器到底怎么拆的"的最小证据集，不参与任何判定。
+     */
+    private String requestKind;
+    private List<String> taskGoalTypes;
 
     // Planner 最终裁决
     private AgentAction action;
@@ -59,6 +70,8 @@ public class AgentDecisionTrace {
                 .suggestedAction(intent == null ? null : intent.getSuggestedAction())
                 .suggestedWorkflowType(intent == null ? null : intent.getSuggestedWorkflowType())
                 .risk(intent == null ? null : intent.getRisk())
+                .requestKind(intent == null ? null : intent.getRequestKind())
+                .taskGoalTypes(taskGoalTypes(intent))
                 .action(decision == null ? null : decision.getAction())
                 .workflowType(decision == null ? null : decision.getWorkflowType())
                 .toolName(decision == null ? null : decision.getToolName())
@@ -77,5 +90,23 @@ public class AgentDecisionTrace {
         return value.length() <= maxLength
                 ? value
                 : value.substring(0, maxLength);
+    }
+
+    /** taskGoals 只取 type 列表：够说明"模型拆了什么"，又不把 params 里的长文本灌进日志 */
+    private static List<String> taskGoalTypes(AiIntent intent) {
+        if (intent == null || intent.getTaskGoals() == null) {
+            return List.of();
+        }
+        List<String> types = new ArrayList<>();
+        for (var goal : intent.getTaskGoals()) {
+            if (goal == null) {
+                continue;
+            }
+            Object type = goal.get("type");
+            if (type != null && !String.valueOf(type).isBlank()) {
+                types.add(String.valueOf(type));
+            }
+        }
+        return types;
     }
 }

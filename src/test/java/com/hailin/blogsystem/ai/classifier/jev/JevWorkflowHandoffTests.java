@@ -88,29 +88,29 @@ class JevWorkflowHandoffTests {
         assertThat(decision.getWorkflowType()).isEqualTo(AiWorkflowType.CREATE_ARTICLE);
     }
 
-    /** 学习类走 decideLearning 那条裁决链（Planner 对学习 Workflow 有独立的低风险要求）。 */
+    /**
+     * 学习类 Workflow 不再直通：Mapper 必须回退 plus（2026-10-18 生产事故）。
+     *
+     * <p>原来的用例断言"Jev 学习计划 → Planner 拉起 LEARNING_PLAN"，正是这次事故的路径：
+     * 「讲讲我的 Redis 学习计划」被 Jev 判成制定，直接进工作流。
+     * 现在快速路径只承接文章域 Workflow，学习类一律交给 plus 的语义分界。
+     */
     @Test
-    void jevLearningPlanReachesPlannerAsWorkflow() {
+    void jevLearningPlanNeverReachesPlannerDirectly() {
         JevFastPathDecision jev = mapper.map(
                 result("workflow_learning_plan", 0.99, Map.of("workflow_learning_plan", 1.00)), null);
-        assertThat(jev.accepted()).isTrue();
 
-        AgentDecision decision = planner.decideLearning(jev.intent(), 1L, session());
-
-        assertThat(decision.getAction()).isEqualTo(AgentAction.WORKFLOW);
-        assertThat(decision.getWorkflowType()).isEqualTo(AiWorkflowType.LEARNING_PLAN);
+        assertThat(jev.accepted()).isFalse();
+        assertThat(jev.fallbackReason()).isEqualTo("UNSUPPORTED_GOAL");
     }
 
     @Test
-    void jevLearningAssistReachesPlannerAsWorkflow() {
+    void jevLearningAssistNeverReachesPlannerDirectly() {
         JevFastPathDecision jev = mapper.map(
                 result("workflow_learning_assist", 0.94, Map.of("workflow_learning_assist", 0.94)), null);
-        assertThat(jev.accepted()).isTrue();
 
-        AgentDecision decision = planner.decideLearning(jev.intent(), 1L, session());
-
-        assertThat(decision.getAction()).isEqualTo(AgentAction.WORKFLOW);
-        assertThat(decision.getWorkflowType()).isEqualTo(AiWorkflowType.LEARNING_ASSIST);
+        assertThat(jev.accepted()).isFalse();
+        assertThat(jev.fallbackReason()).isEqualTo("UNSUPPORTED_GOAL");
     }
 
     /** 反向锁：只读意图不能因为这次扩展被误判成 Workflow。 */

@@ -101,7 +101,8 @@ public final class LearningAgentState implements AgentRunState {
             return;
         }
 
-        String fact = planFact(payload, planRef, planCount, activePlanCount, matchedCount, selectedPlanId);
+        String fact = planFact(payload, planRef, planCount, activePlanCount, matchedCount,
+                selectedPlanId, text(payload, "planDetail"), text(payload, "planCandidates"));
         lastStepHadNewEvidence = !Objects.equals(fact, planFacts.get(key));
         planFacts.put(key, fact);
         incrementEvidenceIfNew(Verdict.MissingEvidence.OTHER, lastStepHadNewEvidence);
@@ -322,32 +323,59 @@ public final class LearningAgentState implements AgentRunState {
                 && feedbacks.isEmpty() && latestError == null));
     }
 
+    /**
+     * 学习计划事实。
+     *
+     * <p><b>必须带计划内容</b>（2026-10-18 修）：Token 优化后决策上下文只来自这里，
+     * 早先只拼元数据（planCount / matchedCount / selectedPlanId），模型看不到阶段和任务，
+     * 「分析我的计划」只能回答"观察只有元数据"并反复重查。
+     * 现在把执行器给的有界详情/候选一并带进事实；空值不占位，避免无意义 token。
+     */
     private String planFact(
             Map<String, Object> payload,
             String planRef,
             int planCount,
             int activePlanCount,
             int matchedCount,
-            String selectedPlanId
+            String selectedPlanId,
+            String planDetail,
+            String planCandidates
     ) {
-        return "status=" + text(payload, "status")
-                + ", planRef=" + nullToEmpty(planRef)
-                + ", planCount=" + planCount
-                + ", activePlanCount=" + activePlanCount
-                + ", matchedCount=" + matchedCount
-                + ", selectedPlanId=" + nullToEmpty(selectedPlanId);
+        StringBuilder fact = new StringBuilder("status=").append(text(payload, "status"))
+                .append(", planRef=").append(nullToEmpty(planRef))
+                .append(", planCount=").append(planCount)
+                .append(", activePlanCount=").append(activePlanCount)
+                .append(", matchedCount=").append(matchedCount)
+                .append(", selectedPlanId=").append(nullToEmpty(selectedPlanId));
+        if (planDetail != null && !planDetail.isBlank()) {
+            fact.append("；计划内容：").append(oneLine(planDetail));
+        }
+        if (planCandidates != null && !planCandidates.isBlank()) {
+            fact.append("；候选计划：").append(oneLine(planCandidates));
+        }
+        return fact.toString();
     }
 
     private String memoryFact(Map<String, Object> payload, String query, int hitCount) {
-        return "status=" + text(payload, "status")
-                + ", query=" + query
-                + ", hitCount=" + hitCount;
+        StringBuilder fact = new StringBuilder("status=").append(text(payload, "status"))
+                .append(", query=").append(query)
+                .append(", hitCount=").append(hitCount);
+        String content = text(payload, "memoryContent");
+        if (content != null && !content.isBlank()) {
+            fact.append("；记忆内容：").append(oneLine(content));
+        }
+        return fact.toString();
     }
 
     private String ragFact(Map<String, Object> payload, String keyword, int hitCount) {
-        return "status=" + text(payload, "status")
-                + ", keyword=" + keyword
-                + ", hitCount=" + hitCount;
+        StringBuilder fact = new StringBuilder("status=").append(text(payload, "status"))
+                .append(", keyword=").append(keyword)
+                .append(", hitCount=").append(hitCount);
+        String content = text(payload, "ragContent");
+        if (content != null && !content.isBlank()) {
+            fact.append("；检索片段：").append(oneLine(content));
+        }
+        return fact.toString();
     }
 
     private String structuredFailure(AgentStepDecision decision, Map<String, Object> payload) {
