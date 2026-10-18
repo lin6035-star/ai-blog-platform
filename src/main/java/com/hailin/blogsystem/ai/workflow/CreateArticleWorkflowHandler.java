@@ -703,7 +703,7 @@ public class CreateArticleWorkflowHandler extends AbstractWorkflowHandler {
         draft.put("summary", buildSummaryFromMarkdown(markdown));
         draft.put("content", markdown);
         draft.put("tags", requirement.getOrDefault("keywords", List.of()));
-        draft.put("categoryName", "随笔");
+        draft.put("categoryName", "代码人生");
 
         return draft;
     }
@@ -880,7 +880,7 @@ public class CreateArticleWorkflowHandler extends AbstractWorkflowHandler {
                 %s
                 """.formatted(topic, outline, "无".equals(feedbackSummary) ? "暂无" : feedbackSummary));
         draft.put("tags", extractSimpleKeywords(topic));
-        draft.put("categoryName", "随笔");
+        draft.put("categoryName", "代码人生");
 
         return draft;
     }
@@ -1030,7 +1030,7 @@ public class CreateArticleWorkflowHandler extends AbstractWorkflowHandler {
         command.setTitle(String.valueOf(draft.getOrDefault("title", "")));
         command.setSummary(String.valueOf(draft.getOrDefault("summary", "")));
         command.setContent(String.valueOf(draft.getOrDefault("content", "")));
-        command.setCategoryName(String.valueOf(draft.getOrDefault("categoryName", "随笔")));
+        command.setCategoryName(String.valueOf(draft.getOrDefault("categoryName", "代码人生")));
 
         return command;
     }

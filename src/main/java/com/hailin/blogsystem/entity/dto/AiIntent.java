@@ -40,7 +40,7 @@ public class AiIntent {
 
     private String topic;  //写作主题
     private String topicEvidence; // 用户原话中连续出现的主题片段
-    private String categoryName;  //文章指定类型，默认为随笔
+    private String categoryName;  //文章指定类型，默认为代码人生
     private String requirements;  //用户补充要求
 
     /**

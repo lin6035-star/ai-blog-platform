@@ -191,7 +191,7 @@ class ArticlesControllerTests {
                 .andExpect(jsonPath("$.data.list", hasSize(3)))
                 .andExpect(jsonPath("$.data.list[0].id").value(4))
                 .andExpect(jsonPath("$.data.list[0].authorName").value("Author Nick"))
-                .andExpect(jsonPath("$.data.list[0].categoryName").value("AI / Agent"));
+                .andExpect(jsonPath("$.data.list[0].categoryName").value("后端"));
         // total / page / pageSize 在游标分页下恒为 null（PageVO 注释：判断还有没有下一页要看 nextCursor），
         // 所以不再断言它们；游标分页本身的行为由 ArticleCursorPaginationTests 覆盖
     }
@@ -284,7 +284,7 @@ class ArticlesControllerTests {
                 .andExpect(jsonPath("$.data.id").value(1))
                 .andExpect(jsonPath("$.data.title").value("Published Article"))
                 .andExpect(jsonPath("$.data.authorName").value("Author Nick"))
-                .andExpect(jsonPath("$.data.categoryName").value("AI / Agent"))
+                .andExpect(jsonPath("$.data.categoryName").value("后端"))
                 .andExpect(jsonPath("$.data.content").value("Published content"));
     }
 
@@ -335,10 +335,12 @@ class ArticlesControllerTests {
         mockMvc.perform(get("/api/categories"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(0))
-                .andExpect(jsonPath("$.data", hasSize(4)))
-                .andExpect(jsonPath("$.data[0].code").value("ai-agent"))
-                .andExpect(jsonPath("$.data[1].code").value("java-backend"))
-                .andExpect(jsonPath("$.data[2].code").value("project-practice"))
-                .andExpect(jsonPath("$.data[3].code").value("notes"));
+                .andExpect(jsonPath("$.data", hasSize(6)))
+                .andExpect(jsonPath("$.data[0].code").value("backend"))
+                .andExpect(jsonPath("$.data[1].code").value("frontend"))
+                .andExpect(jsonPath("$.data[2].code").value("ai-agent"))
+                .andExpect(jsonPath("$.data[3].code").value("dev-tools"))
+                .andExpect(jsonPath("$.data[4].code").value("code-life"))
+                .andExpect(jsonPath("$.data[5].code").value("reading"));
     }
 }

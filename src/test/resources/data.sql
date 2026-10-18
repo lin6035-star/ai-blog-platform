@@ -31,16 +31,22 @@ INSERT IGNORE INTO articles (
 );
 
 INSERT IGNORE INTO categories (id, name, code, description, sort_order, created_at, updated_at)
-VALUES (1, 'AI / Agent', 'ai-agent', 'AI、Agent、coding agent 相关内容', 1, '2026-07-02 09:00:00', '2026-07-02 09:00:00');
+VALUES (1, '后端', 'backend', 'Java、Spring Boot、后端开发相关内容', 10, '2026-07-02 09:00:00', '2026-07-02 09:00:00');
 
 INSERT IGNORE INTO categories (id, name, code, description, sort_order, created_at, updated_at)
-VALUES (2, 'Java 后端', 'java-backend', 'Java、Spring Boot、后端开发相关内容', 2, '2026-07-02 09:00:00', '2026-07-02 09:00:00');
+VALUES (2, '前端', 'frontend', 'Vue、TypeScript、前端工程化相关内容', 20, '2026-07-02 09:00:00', '2026-07-02 09:00:00');
 
 INSERT IGNORE INTO categories (id, name, code, description, sort_order, created_at, updated_at)
-VALUES (3, '项目实战', 'project-practice', '项目开发、部署、踩坑记录', 3, '2026-07-02 09:00:00', '2026-07-02 09:00:00');
+VALUES (3, 'AI / Agent', 'ai-agent', 'AI、Agent、coding agent 相关内容', 30, '2026-07-02 09:00:00', '2026-07-02 09:00:00');
 
 INSERT IGNORE INTO categories (id, name, code, description, sort_order, created_at, updated_at)
-VALUES (4, '随笔', 'notes', '临时想法、学习记录、杂谈', 4, '2026-07-02 09:00:00', '2026-07-02 09:00:00');
+VALUES (4, '开发工具', 'dev-tools', '开发工具、效率工具、部署与运维', 40, '2026-07-02 09:00:00', '2026-07-02 09:00:00');
+
+INSERT IGNORE INTO categories (id, name, code, description, sort_order, created_at, updated_at)
+VALUES (5, '代码人生', 'code-life', '程序员成长、职业感悟、杂谈', 50, '2026-07-02 09:00:00', '2026-07-02 09:00:00');
+
+INSERT IGNORE INTO categories (id, name, code, description, sort_order, created_at, updated_at)
+VALUES (6, '阅读', 'reading', '读书笔记、技术书籍、文章分享', 60, '2026-07-02 09:00:00', '2026-07-02 09:00:00');
 
 INSERT IGNORE INTO users (
     id, username, password_hash, nickname, avatar_url, bio, status, created_at, updated_at, deleted_at

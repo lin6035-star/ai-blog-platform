@@ -401,7 +401,7 @@ final class ClassifierPromptBlocks {
 
     static final String CONFIDENCE_MISC = """
                      对所有意图输出 confidence，范围为 0 到 1，表示本次意图判断置信度。
-                     如果用户指定了分类，填写 categoryName，默认为随笔分类。
+                     如果用户指定了分类，填写 categoryName，默认为代码人生分类。
                      如果用户有额外要求，填写 requirements。
                      不要在意图识别阶段生成完整正文。
     
