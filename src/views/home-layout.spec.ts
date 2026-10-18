@@ -199,7 +199,8 @@ describe('home information-flow layout', () => {
     const mainLayout = readSource('layouts/MainLayout.vue')
 
     expect(app).toContain("import AiAssistant from '@/components/ai/AiAssistant.vue'")
-    expect(app).toContain('<AiAssistant />')
+    // 仍在 App 根挂载，但按路由条件渲染：登录流程那几个页面不显示悬浮球
+    expect(app).toContain('<AiAssistant v-if="showAiAssistant" />')
     expect(mainLayout).not.toContain('AiAssistant')
   })
 

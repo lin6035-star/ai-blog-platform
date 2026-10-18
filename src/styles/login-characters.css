@@ -264,13 +264,15 @@
     padding: 16px;
     gap: 16px;
     font-family: 'Plus Jakarta Sans', 'Segoe UI', 'Microsoft YaHei', sans-serif;
-    background: #fff;
+    /* 整页背景：晨光书桌插画。左右两栏都做成半透，让这张图贯穿整个界面，
+       而不是只贴在左半边（那样像两块拼起来的） */
+    background: #e8f1fa url('../assets/login-desk-bg.webp') center / cover no-repeat fixed;
     overflow: hidden;
 }
 
+/* 左栏只负责放角色：整页已经是那张插画了，这里不再叠第二层背景 */
 .login-left {
     flex: 1.2;
-    background: #F5F3F7;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -278,15 +280,27 @@
     border-radius: 24px;
     padding: 32px;
     overflow: hidden;
+    background: transparent;
 }
 
 .svg-container {
+    /* 400 而不是 500：背景里有完整的书桌 + 显示器构图，角色占满会把它们全挡住。
+       缩到这个尺寸后书架、窗光、杯子都能露出来，角色仍然是视觉主体 */
     width: 100%;
-    max-width: 500px;
+    /* 400 → 330：再小一号，把画面让给插画。四个角色是"点缀"，不是主角 */
+    max-width: 330px;
     height: 100%;
     position: relative;
     z-index: 1;
     background: transparent;
+    /* 落到左侧那摞书上：继续上移 + 大幅左移（用户要求"再往左，差挺多"）。
+       百分比相对元素自身尺寸：-26% × 330px ≈ 左移 86px。
+       偏移按背景图 cover 裁切后的实际位置估的——窗口尺寸变了会有漂移，
+       这里求的是"视觉上落在书上"，不追求像素级贴合 */
+    transform: translateY(6%) translateX(-92%);
+    /* 投影：让它像"站着"，而不是一张贴纸浮在画面上。
+       纯色块直接压在插画上会特别突兀，这一层是必需的 */
+    filter: drop-shadow(0 10px 16px rgba(42, 74, 122, 0.20));
 }
 
 .login-right {
@@ -297,8 +311,13 @@
     justify-content: center;
     padding: 48px;
     border-radius: 24px;
-    background: #fafafa;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+    /* 半透明白 + 毛玻璃：背后的插画能透上来，但表单文字仍然清晰。
+       原来是不透明 #fafafa，会把右半边那张图完全盖死 */
+    background: rgba(255, 255, 255, 0.56);
+    backdrop-filter: blur(20px) saturate(1.25);
+    -webkit-backdrop-filter: blur(20px) saturate(1.25);
+    border: 1px solid rgba(255, 255, 255, 0.7);
+    box-shadow: 0 8px 32px rgba(31, 71, 120, 0.10);
     position: relative;
     overflow: hidden;
 }
@@ -627,6 +646,12 @@
         flex: 0 0 auto;
         height: 180px;
         padding: 16px;
+    }
+    /* 180px 高的横条里，400px 的角色会被裁掉半个身子。
+       缩到 200px 能完整站进去，也仍然是画面主体 */
+    .login-left .svg-container {
+        max-width: 200px;
+        transform: translateY(10%);
     }
     .login-right {
         max-width: none;
