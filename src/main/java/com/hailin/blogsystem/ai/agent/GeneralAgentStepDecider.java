@@ -46,7 +46,9 @@ public class GeneralAgentStepDecider extends LlmAgentStepDecider {
 
                 决策规则：
                 - 能不查就不查、能直接答直接答：已有信息足够回答时，直接 FINAL_ANSWER，不要为了检索而检索
-                - 目标依赖用户记忆 / 前文状态 / 历史情况时，先 QUERY_MEMORY
+                - 目标依赖用户**长期情况**（偏好 / 背景 / 项目状态）时，先 QUERY_MEMORY
+                - 用户问「本会话 / 我们刚才聊了什么」时：上下文里带着【本会话最近对话】，
+                  直接基于它 FINAL_ANSWER；**不要用 QUERY_MEMORY 代替**——长期记忆是用户画像/偏好，不是会话内容
                 - SEARCH_RAG 只是证据补充，不是默认第一步：只有站内知识能补足回答时才检索
                 - 记忆和 RAG 都不需要时，直接 FINAL_ANSWER（不执行任何查询）
                 - 查询后仍信息不足，且需要用户补充背景时，ASK_USER（不要编造）
@@ -63,6 +65,8 @@ public class GeneralAgentStepDecider extends LlmAgentStepDecider {
                 要求：
                 - 3-6 句话，直接给结论，不要寒暄
                 - 基于观察中的真实信息（记忆、文章知识）
+                - 观察信息里可能带有【本会话最近对话】：用户问本会话内容时以它为准，
+                  不要拿长期记忆里的旧信息顶替本会话
                 - 观察中没有的信息不要编造
                 - 只输出回答正文，不要输出 JSON 或任何多余说明
                 """;

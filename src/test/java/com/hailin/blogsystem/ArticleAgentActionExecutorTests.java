@@ -1,5 +1,6 @@
 package com.hailin.blogsystem;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.agent.AgentStepDecision;
 import com.hailin.blogsystem.ai.agent.ArticleAgentActionExecutorImpl;
 import com.hailin.blogsystem.ai.agent.ArticleNotOwnedException;
@@ -43,7 +44,7 @@ class ArticleAgentActionExecutorTests {
     void setUp() {
         articlesService = mock(ArticlesService.class);
         anchorService = new ArticleSessionAnchorService(
-                mock(AiSessionService.class), articlesService);
+                mock(AiSessionService.class), articlesService, new ObjectMapper());
         executor = new ArticleAgentActionExecutorImpl(
                 articlesService,
                 mock(AiMemoryRetrieveService.class),

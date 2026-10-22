@@ -1,15 +1,20 @@
 package com.hailin.blogsystem;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.agent.ArticleSessionAnchorService;
 import com.hailin.blogsystem.constants.BlogConstants;
 import com.hailin.blogsystem.entity.AiSessions;
 import com.hailin.blogsystem.entity.Articles;
+import com.hailin.blogsystem.entity.dto.ArticleRagContext;
 import com.hailin.blogsystem.service.AiSessionService;
 import com.hailin.blogsystem.service.ArticlesService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -60,7 +65,7 @@ class ArticleSessionAnchorServiceTests {
     void setUp() {
         aiSessionService = mock(AiSessionService.class);
         articlesService = mock(ArticlesService.class);
-        service = new ArticleSessionAnchorService(aiSessionService, articlesService);
+        service = new ArticleSessionAnchorService(aiSessionService, articlesService, new ObjectMapper());
         // markConclusion 走 getBaseMapper().update(...)（非 lambda wrapper：mock 环境无 TableInfo 缓存）
         baseMapper = mock(BaseMapper.class);
         when(aiSessionService.getBaseMapper()).thenReturn(baseMapper);
@@ -392,5 +397,83 @@ class ArticleSessionAnchorServiceTests {
         assertThat(service.resolveConclusion(10L, 100L, 12L)).isNull();
         assertThat(service.resolveConclusion(10L, 100L, null)).isNull();
         assertThat(service.resolveConclusion(null, 100L, 12L)).isNull();
+    }
+
+    // ===================== 会话检索候选（2026-10-19，序位指代用） =====================
+
+    private static ArticleRagContext context(Long articleId, String title) {
+        return new ArticleRagContext(articleId, title, 0, "片段正文");
+    }
+
+    @Test
+    void saveRagCandidatesWritesOrderedJsonAndDeduplicates() {
+        when(aiSessionService.getById(10L)).thenReturn(session(10L, null));
+
+        service.saveRagArticleCandidates(10L, List.of(
+                context(21L, "第一篇"),
+                context(22L, "第二篇"),
+                context(21L, "第一篇重复")));
+
+        ArgumentCaptor<AiSessions> captor = ArgumentCaptor.forClass(AiSessions.class);
+        verify(aiSessionService).updateById(captor.capture());
+        String json = captor.getValue().getLastRagArticlesJson();
+        assertThat(json).contains("\"articleId\":21").contains("\"articleId\":22");
+        // 去重保序：同一 articleId 只出现一次（序位指代按下标取，重复会错位）
+        assertThat(json.split("\"articleId\":21", -1).length - 1).isEqualTo(1);
+    }
+
+    @Test
+    void saveRagCandidatesCapsAtFive() {
+        when(aiSessionService.getById(10L)).thenReturn(session(10L, null));
+        List<ArticleRagContext> contexts = new ArrayList<>();
+        for (long id = 1; id <= 8; id++) {
+            contexts.add(context(id, "文章" + id));
+        }
+
+        service.saveRagArticleCandidates(10L, contexts);
+
+        ArgumentCaptor<AiSessions> captor = ArgumentCaptor.forClass(AiSessions.class);
+        verify(aiSessionService).updateById(captor.capture());
+        String json = captor.getValue().getLastRagArticlesJson();
+        assertThat(json).contains("\"articleId\":5").doesNotContain("\"articleId\":6");
+    }
+
+    @Test
+    void saveRagCandidatesSkipsEmptyInput() {
+        service.saveRagArticleCandidates(10L, List.of());
+        verify(aiSessionService, never()).updateById(any());
+    }
+
+    @Test
+    void resolveRagCandidatesReturnsOrderedListForOwner() {
+        AiSessions stored = session(10L, 100L, null);
+        stored.setLastRagArticlesJson(
+                "[{\"articleId\":21,\"title\":\"第一篇\"},{\"articleId\":22,\"title\":\"第二篇\"}]");
+        when(aiSessionService.getById(10L)).thenReturn(stored);
+
+        List<ArticleSessionAnchorService.RagCandidate> candidates =
+                service.resolveRagArticleCandidates(10L, 100L);
+
+        assertThat(candidates)
+                .extracting(ArticleSessionAnchorService.RagCandidate::articleId)
+                .containsExactly(21L, 22L);
+    }
+
+    @Test
+    void resolveRagCandidatesRejectsOtherUsersSession() {
+        AiSessions stored = session(10L, 200L, null);
+        stored.setLastRagArticlesJson("[{\"articleId\":21,\"title\":\"别人的\"}]");
+        when(aiSessionService.getById(10L)).thenReturn(stored);
+
+        assertThat(service.resolveRagArticleCandidates(10L, 100L)).isEmpty();
+    }
+
+    @Test
+    void resolveRagCandidatesReturnsEmptyOnMalformedJson() {
+        AiSessions stored = session(10L, 100L, null);
+        stored.setLastRagArticlesJson("not-json");
+        when(aiSessionService.getById(10L)).thenReturn(stored);
+
+        assertThat(service.resolveRagArticleCandidates(10L, 100L)).isEmpty();
     }
 }

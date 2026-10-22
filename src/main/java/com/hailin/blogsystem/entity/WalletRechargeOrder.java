@@ -34,10 +34,21 @@ public class WalletRechargeOrder {
     /** 到账额度（credit） */
     private Long creditAmount;
 
-    /** PENDING / PAID / CANCELLED */
+    /** PENDING / PAID / CLOSED */
     private String status;
 
     private Integer version;
+
+    /** 支付截止时间；空 = 历史订单不过期 */
+    private LocalDateTime expireAt;
+
     private LocalDateTime paidAt;
+
+    /** 关闭时间 */
+    private LocalDateTime closedAt;
+
+    /** TIMEOUT / USER_CANCELLED */
+    private String closeReason;
+
     private LocalDateTime createdAt;
 }

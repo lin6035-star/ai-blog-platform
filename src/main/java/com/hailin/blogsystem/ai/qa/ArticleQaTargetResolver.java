@@ -7,6 +7,10 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 /**
  * QA 目标决议器（V3.9）：普通 QA 管道没有决策器可输出 anchorMode，指代消解用确定性后端规则。
  *
@@ -79,6 +83,89 @@ public class ArticleQaTargetResolver {
     }
 
     private final ArticleSessionAnchorService anchorService;
+
+    /** 序位词集闭合：第[一二三四五1-5]篇（允许数字与「篇」之间有空格）。 */
+    private static final Pattern POSITIONAL_PATTERN = Pattern.compile("第\\s*([一二三四五1-5])\\s*篇");
+
+    /** 「最后一篇」的哨兵：真实序号在读取候选列表时才确定。 */
+    private static final int POSITION_LAST = -1;
+
+    /**
+     * 序位指代解析（2026-10-19）：把「详细总结第一篇」映射到**本会话最近一次文章检索**的第 N 篇。
+     *
+     * <p><b>它修的 bug</b>：RAG 列表回答之后用户说「第一篇」，分类器只拿到这一句消息、
+     * 看到的是无上下文指代 → 判 GENERAL_CHAT（线上实测 reason："'第一篇文章'指代模糊"），
+     * 于是既不读正文也不回答，用户看到「没反应」。单槽 {@code last_article_id} 只能记一篇，
+     * 序位指代结构性无解；现在检索结果被存成**有序候选**（{@code ai_sessions.last_rag_articles_json}），
+     * 这里按序数取。
+     *
+     * <p><b>触发条件全部满足才返回</b>（宁可不猜）：
+     * <ul>
+     *   <li>会话 + 登录用户（游客没有会话锚）</li>
+     *   <li>页面**没有**文章——详情页的「这篇」语义优先，不抢</li>
+     *   <li>消息是序位指代（第N篇 / 最后一篇）</li>
+     *   <li>候选数量足够（说「第五篇」但只有 3 条 → 不猜）</li>
+     *   <li>目标文章仍可读（已删 / 转私有 → 不猜，走原路由让用户澄清）</li>
+     * </ul>
+     *
+     * @return 命中目标；{@code null} = 不适用，调用方**原样走原路由**，不做任何降级
+     */
+    public QaTarget resolvePositional(String message, PageContextDTO pageContext, Long sessionId, Long userId) {
+        if (sessionId == null || userId == null) {
+            return null;
+        }
+        if (pageContext != null
+                && pageContext.getArticleId() != null
+                && !pageContext.getArticleId().isBlank()) {
+            return null;
+        }
+        Integer position = parsePositionalIndex(message);
+        if (position == null) {
+            return null;
+        }
+        List<ArticleSessionAnchorService.RagCandidate> candidates =
+                anchorService.resolveRagArticleCandidates(sessionId, userId);
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        int index = position == POSITION_LAST ? candidates.size() : position;
+        if (index < 1 || index > candidates.size()) {
+            return null;
+        }
+        Articles article = anchorService.loadReadable(candidates.get(index - 1).articleId(), userId);
+        if (article == null) {
+            return null;
+        }
+        log.info("序位指代命中会话检索候选: sessionId={}, position={}, articleId={}",
+                sessionId, index, article.getId());
+        return QaTarget.target(article);
+    }
+
+    /** @return 1-based 序位；{@link #POSITION_LAST} 表示「最后一篇」；null = 不是序位指代 */
+    static Integer parsePositionalIndex(String message) {
+        if (message == null || message.isBlank()) {
+            return null;
+        }
+        Matcher matcher = POSITIONAL_PATTERN.matcher(message);
+        if (matcher.find()) {
+            return chineseNumberToInt(matcher.group(1));
+        }
+        if (message.contains("最后一篇") || message.contains("最后那篇")) {
+            return POSITION_LAST;
+        }
+        return null;
+    }
+
+    private static int chineseNumberToInt(String value) {
+        return switch (value) {
+            case "一", "1" -> 1;
+            case "二", "2" -> 2;
+            case "三", "3" -> 3;
+            case "四", "4" -> 4;
+            case "五", "5" -> 5;
+            default -> -2;
+        };
+    }
 
     /**
      * 单请求决议入口。页面/会话候选 + 用户措辞 → 目标文章或提示文案。

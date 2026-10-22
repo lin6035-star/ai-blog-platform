@@ -135,4 +135,21 @@ class GeneralAgentStepDeciderTests {
         assertThat(prompt).doesNotContain("QUERY_ARTICLE");
         assertThat(prompt).doesNotContain("QUERY_LEARNING_DASHBOARD");
     }
+
+    /**
+     * 2026-10-19：问「本会话聊了什么」时，模型必须知道上下文里有【本会话最近对话】，
+     * 且不能拿 QUERY_MEMORY（长期记忆）顶替——实测 bug：回答全是几周前的项目状态/偏好。
+     */
+    @Test
+    void promptRoutesSessionQuestionsToInjectedHistory() throws Exception {
+        Method method = GeneralAgentStepDecider.class.getDeclaredMethod("buildSystemPrompt", boolean.class);
+        method.setAccessible(true);
+        String prompt = (String) method.invoke(decider, false);
+
+        assertThat(prompt).contains("【本会话最近对话】");
+        assertThat(prompt).contains("不要用 QUERY_MEMORY 代替");
+        assertThat(prompt).contains("长期记忆是用户画像/偏好，不是会话内容");
+        // 长期记忆的定位改成「长期情况」，避免"历史情况"继续误导到会话历史
+        assertThat(prompt).contains("目标依赖用户**长期情况**");
+    }
 }

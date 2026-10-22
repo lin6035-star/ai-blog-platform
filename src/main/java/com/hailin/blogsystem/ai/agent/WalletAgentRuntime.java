@@ -145,7 +145,9 @@ public class WalletAgentRuntime extends AbstractAgentRuntime implements AgentRun
                 null, null, null, false, null, null, null,
                 payYuan);
 
-        String finalAnswer = "已为你准备好 " + payYuan + " 元的充值方案，确认后就会到账。";
+        // 2026-10-19：确认后只是**创建订单**，付款由用户在支付窗口里完成——
+        // 所以文案不能说「就会到账」（真实支付下确认后也只是跳收银台）
+        String finalAnswer = "已为你准备好 " + payYuan + " 元的充值订单，确认后会在支付窗口中完成支付。";
 
         emitter.emit(run.getUsedSteps() + 1, "SUGGEST_WRITE", "SUCCESS", "已准备充值方案",
                 decision.thoughtSummary());

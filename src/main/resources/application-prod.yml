@@ -102,3 +102,29 @@ aliyun:
     endpoint: https://oss-cn-beijing.aliyuncs.com
     bucketName: blog-system-26
     region: cn-beijing
+
+# ============================================================
+# 生产环境差异（2026-10-18 部署前核对）
+# ============================================================
+
+# 日志：容器内绝对路径（compose 把 ./logs 挂到 /app/logs）。
+# application.yml 里写的是相对路径 logs/blog-system.log —— 容器的工作目录不一定是 /app，
+# 相对路径会落到容器根目录，日志随容器重建而丢失。
+logging:
+  file:
+    name: /app/logs/blog-system.log
+
+blog:
+  ai:
+    # 开发者只读面板：生产关闭。
+    # application.yml 里那份白名单是开发机雪花 ID，线上没有任何意义，也不该暴露该端点。
+    inspection:
+      enabled: false
+      allowed-user-ids: []
+    rag:
+      rebuild:
+        # 不继承开发机白名单。首次初始化 RAG 索引时，用**外部配置**临时开启：
+        #   /opt/blog/backend/config/application.yml
+        #   blog.ai.rag.rebuild.allowed-user-ids: [你的管理员 userId]
+        # 初始化完成（alias 出现）后删掉该文件并重启 backend。
+        allowed-user-ids: []

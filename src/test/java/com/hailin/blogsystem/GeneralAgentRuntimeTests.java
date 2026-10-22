@@ -15,10 +15,12 @@ import com.hailin.blogsystem.ai.agent.AgentActionResult;
 import com.hailin.blogsystem.ai.agent.GeneralAgentStepDecider;
 import com.hailin.blogsystem.entity.AiAgentRun;
 import com.hailin.blogsystem.entity.AiAgentStep;
+import com.hailin.blogsystem.entity.AiMessages;
 import com.hailin.blogsystem.entity.dto.AiAgentRunStatus;
 import com.hailin.blogsystem.entity.dto.AgentStepActionType;
 import com.hailin.blogsystem.mapper.AiAgentRunMapper;
 import com.hailin.blogsystem.mapper.AiAgentStepMapper;
+import com.hailin.blogsystem.service.AiConversationMemoryService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -46,6 +48,7 @@ class GeneralAgentRuntimeTests {
     private GeneralAgentActionExecutor executor;
     private AiAgentRunMapper runMapper;
     private AiAgentStepMapper stepMapper;
+    private AiConversationMemoryService conversationMemoryService;
     private GeneralAgentRuntime runtime;
 
     @BeforeEach
@@ -54,6 +57,7 @@ class GeneralAgentRuntimeTests {
         executor = mock(GeneralAgentActionExecutor.class);
         runMapper = mock(AiAgentRunMapper.class);
         stepMapper = mock(AiAgentStepMapper.class);
+        conversationMemoryService = mock(AiConversationMemoryService.class);
 
         // MyBatis-Plus ASSIGN_ID 在 mock 下不生效，insert 时手动赋 id
         when(runMapper.insert(any(AiAgentRun.class))).thenAnswer(inv -> {
@@ -63,8 +67,83 @@ class GeneralAgentRuntimeTests {
         });
 
         runtime = new GeneralAgentRuntime(
-                decider, executor, runMapper, stepMapper, new ObjectMapper()
+                decider, executor, runMapper, stepMapper, new ObjectMapper(),
+                conversationMemoryService
         );
+    }
+
+    // ===================== 会话历史注入（2026-10-19） =====================
+
+    private static AiMessages message(String role, String content) {
+        AiMessages message = new AiMessages();
+        message.setRole(role);
+        message.setContent(content);
+        return message;
+    }
+
+    /**
+     * 「我们这个会话聊了什么」必须在决策上下文里看到**本会话最近对话**。
+     *
+     * <p>为什么这条要在 Runtime 层锁住：通用 Agent 的只读白名单只有 QUERY_MEMORY / SEARCH_RAG，
+     * 上下文里不注入会话历史时，模型只能查长期记忆 → 实测答的全部是用户画像/偏好，
+     * 跟当前会话无关。执行器/决策器测试都覆盖不到这条注入。
+     */
+    @Test
+    void injectsRecentConversationIntoDecisionContext() {
+        when(conversationMemoryService.getRecentMessagesForUser(200L, 100L, 10))
+                .thenReturn(List.of(
+                        message("user", "有没有关于 Redis 的文章？"),
+                        message("ai", "找到了 3 篇 Redis 相关文章")));
+        java.util.concurrent.atomic.AtomicReference<String> capturedContext =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenAnswer(inv -> {
+                    capturedContext.set(inv.getArgument(1, String.class));
+                    return AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                            .withInput(Map.of("answer", "这个会话里我们查了 Redis 文章"));
+                });
+
+        AgentRunResult result = runtime.run(100L, 200L, "我们这个会话聊了什么",
+                null, AgentStepEmitter.noop());
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(capturedContext.get())
+                .contains("【本会话最近对话】")
+                .contains("有没有关于 Redis 的文章？")
+                .contains("找到了 3 篇 Redis 相关文章");
+    }
+
+    /** fail-open：读会话历史失败不影响本次回答（退化成改前行为） */
+    @Test
+    void historyReadFailureDoesNotBreakRun() {
+        when(conversationMemoryService.getRecentMessagesForUser(any(), any(), anyInt()))
+                .thenThrow(new IllegalStateException("db down"));
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "直接回答")));
+
+        AgentRunResult result = runtime.run(100L, 200L, "随便问问", null, AgentStepEmitter.noop());
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.finalAnswer()).isEqualTo("直接回答");
+    }
+
+    /** 没有会话（游客 / 无 sessionId）不查历史，上下文保持原样 */
+    @Test
+    void noHistoryInjectedWithoutSession() {
+        java.util.concurrent.atomic.AtomicReference<String> capturedContext =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenAnswer(inv -> {
+                    capturedContext.set(inv.getArgument(1, String.class));
+                    return AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                            .withInput(Map.of("answer", "回答"));
+                });
+
+        runtime.run(100L, null, "随便问问", null, AgentStepEmitter.noop());
+
+        assertThat(capturedContext.get()).doesNotContain("【本会话最近对话】");
+        verify(conversationMemoryService, never()).getRecentMessagesForUser(any(), any(), anyInt());
     }
 
     @Test

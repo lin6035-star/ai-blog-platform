@@ -1,5 +1,6 @@
 package com.hailin.blogsystem;
 
+import com.hailin.blogsystem.entity.vo.PaymentInitiateVO;
 import com.hailin.blogsystem.entity.vo.RechargeOrderVO;
 import com.hailin.blogsystem.entity.vo.WalletChangeResult;
 import com.hailin.blogsystem.entity.vo.WalletPackageVO;
@@ -81,16 +82,18 @@ class WalletConcurrencyTests {
     }
 
     /**
-     * 8 个线程同时支付同一张订单 —— 只能加一次钱。
+     * 8 个线程同时确认支付同一张订单 —— 只能加一次钱。
      *
-     * <p>并发的落点有两处：订单状态 CAS 只让一个事务推进状态；
-     * 记账幂等键（RECHARGE:{orderNo}）是最后一层，即使前面漏了也不会双倍加钱。
+     * <p>并发的落点有三处：支付单状态 CAS 只让一个事务推进；
+     * 订单状态 CAS 只让一个事务入账；记账幂等键（RECHARGE:{orderNo}）是最后一层，
+     * 即使前面漏了也不会双倍加钱。
      */
     @Test
     void concurrentPayCreditsOnlyOnce() throws Exception {
         UserContext.set(userId);
         WalletPackageVO pkg = walletRechargeService.listPackages().get(0);
         RechargeOrderVO order = walletRechargeService.createOrder(pkg.getCode());
+        PaymentInitiateVO payment = walletRechargeService.initiatePayment(order.getOrderNo());
         UserContext.clear();
 
         int threads = 8;
@@ -100,9 +103,9 @@ class WalletConcurrencyTests {
             // UserContext 是 ThreadLocal，工作线程里必须各自设置
             UserContext.set(userId);
             try {
-                walletRechargeService.pay(order.getOrderNo());
+                walletRechargeService.mockPay(order.getOrderNo(), payment.getPayToken());
             } catch (Throwable t) {
-                // 并发下 CAS 失败的线程抛 CONFLICT 是预期内的
+                // 并发下：支付单已被另一条回调推进（"支付单已处理"）或状态已变更是预期内的
                 errors.add(t);
             } finally {
                 UserContext.clear();
@@ -111,9 +114,9 @@ class WalletConcurrencyTests {
 
         // 无论多少线程参与，余额只能加一次
         assertThat(walletService.getWallet(userId).getBalance()).isEqualTo(pkg.getCreditAmount());
-        // 失败的那些必须是「订单状态已变更」这类并发冲突，而不是别的错误
+        // 失败的那些必须是幂等/并发冲突，而不是别的错误
         assertThat(errors).allSatisfy(t ->
-                assertThat(t.getMessage()).contains("订单状态已变更"));
+                assertThat(t.getMessage()).containsAnyOf("已处理", "订单状态已变更"));
     }
 
     // ---------- helpers ----------

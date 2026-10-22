@@ -48,9 +48,13 @@ public class AgentWriteActionService {
 
     /**
      * 确认写动作提案：按 actionType 分发到域执行器 → 快照留痕。
+     *
+     * <p>返回值从 {@code String} 扩成 {@link AgentWriteActionConfirmView}：
+     * 钱包域的充值只做到「创建订单 + 发起支付」，前端要靠 {@code result} 里的
+     * {@code orderNo / payToken} 打开支付窗口——只给一句 message 的话流程就断了。
      */
     @Transactional
-    public String confirmWrite(Long agentRunId) {
+    public AgentWriteActionConfirmView confirmWrite(Long agentRunId) {
         Long userId = requireLogin();
         log.info("写动作确认请求进入: agentRunId={}, userId={}", agentRunId, userId);
 
@@ -107,7 +111,7 @@ public class AgentWriteActionService {
         return new AgentWriteActionView(run.getStatus(), parseWriteAction(run.getContextJson()));
     }
 
-    private String confirmWithLock(Long agentRunId, Long userId) {
+    private AgentWriteActionConfirmView confirmWithLock(Long agentRunId, Long userId) {
         AiAgentRun run = getOwnedRun(agentRunId, userId);
         if (!AiAgentRunStatus.WAITING_WRITE_CONFIRM.name().equals(run.getStatus())) {
             throw new BusinessException(
@@ -143,9 +147,11 @@ public class AgentWriteActionService {
                         "提案数据异常，无法执行"));
         AgentWriteActionExecutor.WriteActionResult result = executor.execute(run, proposal, userId);
 
+        // markExecuted 会往 executed 里补 actionType / executedAt——先落痕再构造响应，
+        // 保证返回给前端的 result 与 context_json 里的留痕是同一份
         markExecuted(run, proposal, result.auditPayload());
         log.info("写动作执行完成: runId={}, {}", run.getId(), result.message());
-        return result.message();
+        return new AgentWriteActionConfirmView(result.message(), proposal.actionType(), result.auditPayload());
     }
 
     /**

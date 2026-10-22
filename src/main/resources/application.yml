@@ -246,6 +246,14 @@ management:
         # 为什么现在要暴露它：探活 / 监控 / 容器编排都需要一个「服务还活着吗」的入口，
         # 而它**默认只返回 {"status":"UP"}**，不泄漏数据库地址之类的细节。
         include: health
+  health:
+    # 2026-10-20 压测实测：MailHealthIndicator 默认开启，每次探活都会用 JavaMailSender.testConnection()
+    # 连 SMTP；本地/国内网络下单次要 16~17 秒（connectiontimeout 5s 叠加重试）。health 是同步聚合，
+    # 50 并发探活会把 Tomcat 线程池占满——实测 health 只剩 7.5 rps，同时段的正常请求被拖到 1.1~1.5 秒。
+    # 邮件是辅助功能（忘记密码），不该决定整站健康状态，所以关闭它；SMTP 可用性看发信失败日志，
+    # 发信本身仍受 spring.mail.properties 里 5s 超时保护。
+    mail:
+      enabled: false
   endpoint:
     health:
       # 显式写出来（默认就是 never）：防止将来有人顺手改成 always 把内部组件细节暴露到公网
@@ -422,9 +430,15 @@ blog:
       corpus:
         article-index-name: article_rag_active
         memory-index-name: ${spring.ai.vectorstore.elasticsearch.index-name:spring-ai-document-index}
-        embedding-model: ${spring.ai.embedding.options.model:qwen3.7-text-embedding}
+        embedding-model: ${spring.ai.embedding.options.model:qwen3.7-text-embedding-flash}
         dimensions: ${spring.ai.vectorstore.elasticsearch.dimensions:1024}
         initialize-schema: false
+        # 记忆是**物理索引**、且没有重建流程，必须允许自动建：
+        # 全新 ES（换新服务器 / 数据卷重建）上没有 spring-ai-document-index 时，
+        # 保存记忆会直接抛 "Index not found" → 事务回滚 → 前端「保存记忆失败」。
+        # 2026-10-18 新服务器上线后正是踩了这个：本地/旧服务器有这个索引（早期自动建过），
+        # 新环境没有人建它。测试环境在 application.properties 里显式关掉（不依赖真实 ES）。
+        memory-initialize-schema: true
       # 词法检索。**按「要覆盖几篇文章」配，不是按「要多少片段」配**：
       # chunk 级命中里同一篇文章的多个 chunk 会连续排在前面，取前 N 个片段经常只覆盖一两篇。
       # 实测问"有没有关于 Java 的文章"：ES 里 51 个 chunk / 12 篇命中，而原来硬编码的 size=5
@@ -436,6 +450,12 @@ blog:
         chunks-per-article: 2
       rerank:
         enabled: true
+        # 2026-10-21 全量复测（70 条评测集）：
+        #   qwen3-vl-rerank：硬负例误接收 3/13（0.7585 / 0.7597 / 0.7736 过线），而正例最低分只有 0.7016
+        #     —— 正负分布重叠，0.75 无法同时满足两边；
+        #   qwen3.7-text-rerank：同评测集误接收 0/13（负例最高 0.7202），recall 49/52。
+        # 因此切回 text 模型。阈值 0.75 原本就是按它标定的，无需重标（见下方 gate 段注释）。
+        # 证据：docs/rag-notes/rag-baseline-2026-10-03.md §11。
         model: qwen3.7-text-rerank
         workspace-id: ${ALIYUN_WORKSPACE_ID:}
         # ⚠️ top-n 是 **chunk 级**名额，而下游 parseRanked 会按 articleId 折叠成"篇"——

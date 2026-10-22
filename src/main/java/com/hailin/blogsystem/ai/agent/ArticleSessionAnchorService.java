@@ -1,9 +1,12 @@
 package com.hailin.blogsystem.ai.agent;
 
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.constants.BlogConstants;
 import com.hailin.blogsystem.entity.AiSessions;
 import com.hailin.blogsystem.entity.Articles;
+import com.hailin.blogsystem.entity.dto.ArticleRagContext;
 import com.hailin.blogsystem.service.AiSessionService;
 import com.hailin.blogsystem.service.ArticlesService;
 import lombok.RequiredArgsConstructor;
@@ -11,6 +14,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * 会话文章锚（V3.8）：ai_sessions.last_article_* 单点状态的读写。
@@ -64,8 +71,16 @@ public class ArticleSessionAnchorService {
     public static final String SOURCE_PAGE_QA = "PAGE_QA";
     public static final String SOURCE_PAGE_ACTION = "PAGE_ACTION";
 
+    /** 检索候选存储上限：序位指代只服务「第一~第五篇」，再多用户也不会按序数点。 */
+    private static final int RAG_CANDIDATES_MAX = 5;
+
+    /** 多值锚读取结果：检索时的有序候选（articleId + 标题快照）。 */
+    public record RagCandidate(Long articleId, String title) {
+    }
+
     private final AiSessionService aiSessionService;
     private final ArticlesService articlesService;
+    private final ObjectMapper objectMapper;
 
     /**
      * 写点：覆盖式更新会话文章锚。标题取数据库权威，文章已删时容忍 null（本体 id 仍可定位，resolve 会判失效）。
@@ -88,6 +103,115 @@ public class ArticleSessionAnchorService {
         update.setLastArticleUpdatedAt(LocalDateTime.now());
         aiSessionService.updateById(update);
         log.debug("会话文章锚更新: sessionId={}, articleId={}, source={}", sessionId, articleId, source);
+    }
+
+    /**
+     * 写点：记录本会话最近一次文章检索的**有序候选**（2026-10-19）。
+     *
+     * <p><b>为什么需要它</b>：单槽 {@link #mark} 只能记住一篇，而「总结第一篇 / 第二篇」的
+     * 序位指代要的是**列表顺序**。这个列表就是检索结果本身（与 SSE references 同序）。
+     *
+     * <p>只存 articleId + 标题快照（权威标题读时查库），去重保序、最多 5 条；
+     * 覆盖式更新——序位指代只对「最近这一次列表」有意义。
+     * fail-open：写失败只告警，不影响本次回答。
+     */
+    public void saveRagArticleCandidates(Long sessionId, List<ArticleRagContext> contexts) {
+        if (sessionId == null || contexts == null || contexts.isEmpty()) {
+            return;
+        }
+        LinkedHashMap<Long, String> unique = new LinkedHashMap<>();
+        for (ArticleRagContext context : contexts) {
+            if (context == null || context.articleId() == null) {
+                continue;
+            }
+            unique.putIfAbsent(context.articleId(), context.title());
+            if (unique.size() >= RAG_CANDIDATES_MAX) {
+                break;
+            }
+        }
+        if (unique.isEmpty()) {
+            return;
+        }
+
+        List<Map<String, Object>> payload = new ArrayList<>();
+        unique.forEach((articleId, title) -> {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("articleId", articleId);
+            item.put("title", title);
+            payload.add(item);
+        });
+
+        try {
+            AiSessions update = new AiSessions();
+            update.setId(sessionId);
+            update.setLastRagArticlesJson(objectMapper.writeValueAsString(payload));
+            aiSessionService.updateById(update);
+            log.debug("会话检索候选更新: sessionId={}, count={}", sessionId, payload.size());
+        } catch (Exception e) {
+            log.warn("会话检索候选写入失败（不影响回答）: sessionId={}", sessionId, e);
+        }
+    }
+
+    /**
+     * 读点：最近一次检索的有序候选（校验会话归属；解析失败 / 无候选返回空）。
+     *
+     * <p>返回顺序 = 上一轮回答里 references 的顺序，调用方按 1-based 序号取。
+     * 候选可能已删除 / 变为不可读——本方法只判会话归属，**可读性由调用方用
+     * {@link #loadReadable} 单项校验**（宁可不猜）。
+     */
+    public List<RagCandidate> resolveRagArticleCandidates(Long sessionId, Long userId) {
+        if (sessionId == null || userId == null) {
+            return List.of();
+        }
+        AiSessions session = aiSessionService.getById(sessionId);
+        if (session == null || session.getUserId() == null || !session.getUserId().equals(userId)) {
+            return List.of();
+        }
+        String json = session.getLastRagArticlesJson();
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            List<Map<String, Object>> rows = objectMapper.readValue(json, new TypeReference<>() {
+            });
+            List<RagCandidate> candidates = new ArrayList<>();
+            for (Map<String, Object> row : rows) {
+                Long articleId = toLong(row.get("articleId"));
+                if (articleId != null) {
+                    Object title = row.get("title");
+                    candidates.add(new RagCandidate(articleId, title == null ? null : title.toString()));
+                }
+            }
+            return candidates;
+        } catch (Exception e) {
+            log.warn("会话检索候选解析失败，按无候选处理: sessionId={}", sessionId, e);
+            return List.of();
+        }
+    }
+
+    /** 清点：清空对话时与 V3.8 文章锚一并清（「清空对话 = 上下文归零」）。 */
+    public void clearRagArticleCandidates(Long sessionId) {
+        if (sessionId == null) {
+            return;
+        }
+        aiSessionService.lambdaUpdate()
+                .eq(AiSessions::getId, sessionId)
+                .set(AiSessions::getLastRagArticlesJson, null)
+                .update();
+    }
+
+    private Long toLong(Object value) {
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        if (value instanceof String text && !text.isBlank()) {
+            try {
+                return Long.valueOf(text);
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return null;
     }
 
     /**

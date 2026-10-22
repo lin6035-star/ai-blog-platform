@@ -23,7 +23,11 @@ public class AiConversationMemoryServiceImpl implements AiConversationMemoryServ
 
     @Override
     public List<AiMessages> getRecentMessages(Long sessionId, int maxMessages) {
-        Long userId = UserContext.get();
+        return getRecentMessagesForUser(sessionId, UserContext.get(), maxMessages);
+    }
+
+    @Override
+    public List<AiMessages> getRecentMessagesForUser(Long sessionId, Long userId, int maxMessages) {
         if(userId == null){
             throw new IllegalArgumentException("请先登录");
         }

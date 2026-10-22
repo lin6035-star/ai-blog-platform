@@ -280,7 +280,7 @@ public class ArticleSearchService {
 
             long total = response.hits().total() == null ? ids.size() : response.hits().total().value();
             String nextCursor = buildNextCursor(response, (int) pageSize);
-            log.info("[SEARCH-ES] keyword={} categoryId={} 命中={} total={} 耗时={}ms 有下一页={}",
+            log.debug("[SEARCH-ES] keyword={} categoryId={} 命中={} total={} 耗时={}ms 有下一页={}",
                     keyword, categoryId, ids.size(), total, response.took(), nextCursor != null);
             return new SearchHits(ids, total, highlights, nextCursor);
         } catch (Exception e) {

@@ -135,6 +135,8 @@ CREATE TABLE IF NOT EXISTS ai_sessions (
     last_learning_plan_title VARCHAR(255),
     last_learning_plan_source VARCHAR(32),
     last_learning_plan_updated_at TIMESTAMP,
+    -- 2026-10-19 最近一次文章检索的有序候选（序位指代「第一篇/第二篇」解析用）
+    last_rag_articles_json TEXT,
     created_at TIMESTAMP,
     updated_at TIMESTAMP
 );
@@ -432,12 +434,38 @@ CREATE TABLE IF NOT EXISTS wallet_recharge_order (
     credit_amount BIGINT NOT NULL,
     status VARCHAR(16) NOT NULL,
     version INT NOT NULL DEFAULT 0,
+    expire_at TIMESTAMP,
     paid_at TIMESTAMP,
+    closed_at TIMESTAMP,
+    close_reason VARCHAR(32),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uk_recharge_order_no UNIQUE (order_no)
 );
 
 CREATE INDEX IF NOT EXISTS idx_recharge_user ON wallet_recharge_order (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_recharge_status_expire ON wallet_recharge_order (status, expire_at);
+
+CREATE TABLE IF NOT EXISTS wallet_payment (
+    id BIGINT PRIMARY KEY,
+    payment_no VARCHAR(64) NOT NULL,
+    order_no VARCHAR(64) NOT NULL,
+    user_id BIGINT NOT NULL,
+    channel VARCHAR(32) NOT NULL,
+    channel_trade_no VARCHAR(64),
+    pay_amount BIGINT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    pay_token VARCHAR(128),
+    paid_at TIMESTAMP,
+    fail_reason VARCHAR(255),
+    callback_payload TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_payment_no UNIQUE (payment_no),
+    CONSTRAINT uk_payment_channel_trade_no UNIQUE (channel, channel_trade_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_order_no ON wallet_payment (order_no);
+CREATE INDEX IF NOT EXISTS idx_payment_status_created ON wallet_payment (status, created_at);
 
 CREATE TABLE IF NOT EXISTS ai_billing_order (
     id BIGINT PRIMARY KEY,

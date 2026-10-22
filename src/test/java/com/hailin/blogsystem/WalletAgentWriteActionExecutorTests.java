@@ -3,6 +3,7 @@ package com.hailin.blogsystem;
 import com.hailin.blogsystem.ai.agent.AgentWriteProposal;
 import com.hailin.blogsystem.ai.agent.WalletAgentWriteActionExecutor;
 import com.hailin.blogsystem.entity.AiAgentRun;
+import com.hailin.blogsystem.entity.vo.PaymentInitiateVO;
 import com.hailin.blogsystem.entity.vo.RechargeOrderVO;
 import com.hailin.blogsystem.entity.vo.WalletVO;
 import com.hailin.blogsystem.exception.BusinessException;
@@ -25,9 +26,12 @@ import static org.mockito.Mockito.when;
 /**
  * 钱包域写动作执行器。
  *
- * <p>最要紧的一条断言是 {@code verify(pay)}：{@code createCustomOrder} 只落一张
- * {@code PENDING} 订单、**不加余额**，真正到账靠 {@code pay}。
- * 只做前者的话，用户点了「确认充值」却看到钱没到——这是最容易犯的错。
+ * <p><b>最要紧的断言是「只创建订单 + 发起支付，不代替用户支付」</b>：
+ * {@code createCustomOrder} 落 PENDING 订单、{@code initiatePayment} 返回 payToken，
+ * 支付动作交给前端支付窗口（用户点确认才走渠道回调入账）。
+ *
+ * <p>⚠️ 这里如果调了 {@code mockPay}，就等于 AI 替用户确认付款——接真实渠道后
+ * 根本不存在这种能力，所以用 {@code verify(..., never())} 锁死。
  */
 class WalletAgentWriteActionExecutorTests {
 
@@ -57,7 +61,22 @@ class WalletAgentWriteActionExecutorTests {
         RechargeOrderVO vo = new RechargeOrderVO();
         vo.setOrderNo(orderNo);
         vo.setCreditAmount(creditAmount);
+        vo.setPayAmount(creditAmount / 10);
+        vo.setStatus("PENDING");
         return vo;
+    }
+
+    private static PaymentInitiateVO initiate(String payToken) {
+        PaymentInitiateVO vo = new PaymentInitiateVO();
+        vo.setPaymentNo("P-" + payToken);
+        vo.setPayToken(payToken);
+        vo.setOrderStatus("PENDING");
+        return vo;
+    }
+
+    private void stubCreateAndInitiate(String orderNo, long creditAmount) {
+        when(walletRechargeService.createCustomOrder(any())).thenReturn(order(orderNo, creditAmount));
+        when(walletRechargeService.initiatePayment(orderNo)).thenReturn(initiate("TOKEN-" + orderNo));
     }
 
     private static WalletVO wallet(long balance) {
@@ -73,35 +92,41 @@ class WalletAgentWriteActionExecutorTests {
         assertThat(executor.supports(AgentWriteProposal.TYPE_UPDATE_TASK_DONE)).isFalse();
     }
 
-    /** 下单**和**支付都要做——只下单的话钱不会到账 */
+    /** 只创建订单 + 发起支付，把 payToken 交给前端支付窗口——**不能替用户支付** */
     @Test
-    void createsOrderAndPaysIt() {
+    void createsOrderAndInitiatesPaymentOnly() {
         when(walletRechargeService.createCustomOrder(new BigDecimal("10")))
                 .thenReturn(order("W-TEST-1", 10_000L));
-        when(walletService.getWallet(anyLong())).thenReturn(wallet(0L), wallet(10_000L));
+        when(walletRechargeService.initiatePayment("W-TEST-1")).thenReturn(initiate("TOKEN-W-TEST-1"));
+        when(walletService.getWallet(anyLong())).thenReturn(wallet(0L));
 
         var result = executor.execute(run(), proposal("10"), 100L);
 
         verify(walletRechargeService).createCustomOrder(new BigDecimal("10"));
-        verify(walletRechargeService).pay("W-TEST-1");
-        assertThat(result.message()).contains("10,000");
+        verify(walletRechargeService).initiatePayment("W-TEST-1");
+        // ⚠️ 这一条是核心：AI 不确认付款，钱必须由用户在支付窗口里点确认
+        verify(walletRechargeService, never()).mockPay(any(), any());
+        assertThat(result.message()).contains("已创建充值订单");
         assertThat(result.auditPayload())
                 .containsEntry("orderNo", "W-TEST-1")
+                .containsEntry("paymentNo", "P-TOKEN-W-TEST-1")
+                .containsEntry("payToken", "TOKEN-W-TEST-1")
                 .containsEntry("payYuan", "10")
                 .containsEntry("creditAmount", 10_000L)
-                .containsEntry("beforeBalance", 0L)
-                .containsEntry("afterBalance", 10_000L);
+                .containsEntry("orderStatus", "PENDING")
+                .containsEntry("beforeBalance", 0L);
     }
 
     /** 到账额度用**实际下单结果**，不是提案时刻的估算——兑换比例可能已经被改过 */
     @Test
     void reportsCreditFromActualOrderNotFromEstimate() {
-        when(walletRechargeService.createCustomOrder(any())).thenReturn(order("W-TEST-2", 25_000L));
-        when(walletService.getWallet(anyLong())).thenReturn(wallet(0L), wallet(25_000L));
+        stubCreateAndInitiate("W-TEST-2", 25_000L);
+        when(walletService.getWallet(anyLong())).thenReturn(wallet(0L));
 
         var result = executor.execute(run(), proposal("10"), 100L);
 
-        assertThat(result.message()).contains("25,000");
+        // 额度不再出现在回复文案里（未到账），由支付窗口按订单快照展示
+        assertThat(result.auditPayload()).containsEntry("creditAmount", 25_000L);
     }
 
     @Test

@@ -67,7 +67,10 @@ public class WebMvcConfig implements WebMvcConfigurer {
                                      "/api/ai/chat/stream",
                                      // 活动列表游客可见（抢购本身要登录）。Ant 模式按路径精确匹配，
                                      // 不会连带放行 /activities/{id}/grab 和 /admin/**
-                                     "/api/seckill/activities");
+                                     "/api/seckill/activities",
+                                     // 支付渠道回调：真实渠道不可能带用户 JWT，它靠验签自证。
+                                     // Ant 的 * 只匹配一层，不会连带放行 /recharge/orders/**
+                                     "/api/wallet/recharge/notify/*");
 
         // AI 限流：只拦会消耗 LLM / ES 的请求（chat stream / workflow 创建与推进 / rag search）
         // 必须排在 jwt 拦截器之后，才能拿到 UserContext 的 userId

@@ -338,4 +338,87 @@ class ArticleQaTargetResolverTests {
         assertThat(target.hasArticle()).isFalse();
         assertThat(target.promptNote()).contains("再前面");
     }
+
+    // ===================== 序位指代（2026-10-19：修复「详细总结第一篇」无反应） =====================
+
+    private void stubRagCandidates(ArticleSessionAnchorService.RagCandidate... candidates) {
+        when(anchorService.resolveRagArticleCandidates(10L, 100L))
+                .thenReturn(java.util.List.of(candidates));
+    }
+
+    private static ArticleSessionAnchorService.RagCandidate candidate(Long articleId, String title) {
+        return new ArticleSessionAnchorService.RagCandidate(articleId, title);
+    }
+
+    @Test
+    void positionalReferenceMapsToRagCandidateOrder() {
+        stubRagCandidates(candidate(21L, "第一篇"), candidate(22L, "第二篇"));
+        when(anchorService.loadReadable(22L, 100L)).thenReturn(article(22L, 100L, "第二篇"));
+
+        QaTarget target = resolver.resolvePositional("详细总结第二篇文章", null, 10L, 100L);
+
+        assertThat(target).isNotNull();
+        assertThat(target.hasArticle()).isTrue();
+        assertThat(target.article().getId()).isEqualTo(22L);
+    }
+
+    @Test
+    void positionalReferenceFirstMapsToHead() {
+        stubRagCandidates(candidate(21L, "第一篇"), candidate(22L, "第二篇"));
+        when(anchorService.loadReadable(21L, 100L)).thenReturn(article(21L, 100L, "第一篇"));
+
+        QaTarget target = resolver.resolvePositional("详细总结第一篇", null, 10L, 100L);
+
+        assertThat(target).isNotNull();
+        assertThat(target.article().getId()).isEqualTo(21L);
+    }
+
+    @Test
+    void positionalReferenceDoesNotStealDetailPage() {
+        // 详情页有文章时不抢：「这篇」语义优先（bug 场景是首页/聊天窗）
+        QaTarget target = resolver.resolvePositional("总结第一篇", page("1"), 10L, 100L);
+        assertThat(target).isNull();
+    }
+
+    @Test
+    void positionalReferenceOutOfRangeDoesNotGuess() {
+        stubRagCandidates(candidate(21L, "唯一一篇"));
+        assertThat(resolver.resolvePositional("总结第五篇", null, 10L, 100L)).isNull();
+    }
+
+    @Test
+    void positionalReferenceLastResolvesToTail() {
+        stubRagCandidates(candidate(21L, "a"), candidate(22L, "b"));
+        when(anchorService.loadReadable(22L, 100L)).thenReturn(article(22L, 100L, "b"));
+
+        QaTarget target = resolver.resolvePositional("总结最后一篇", null, 10L, 100L);
+
+        assertThat(target).isNotNull();
+        assertThat(target.article().getId()).isEqualTo(22L);
+    }
+
+    @Test
+    void positionalReferenceIgnoresUnreadableCandidate() {
+        // 候选已删/转私有：loadReadable 返回 null → 不猜（走原路由让用户澄清）
+        stubRagCandidates(candidate(21L, "已删文章"));
+        assertThat(resolver.resolvePositional("总结第一篇", null, 10L, 100L)).isNull();
+    }
+
+    @Test
+    void positionalReferenceRequiresSession() {
+        // 游客没有会话锚
+        assertThat(resolver.resolvePositional("总结第一篇", null, null, 100L)).isNull();
+    }
+
+    @Test
+    void positionalIndexParserCoversChineseAndArabicNumbers() {
+        assertThat(ArticleQaTargetResolver.parsePositionalIndex("详细总结第一篇")).isEqualTo(1);
+        assertThat(ArticleQaTargetResolver.parsePositionalIndex("总结第 2 篇")).isEqualTo(2);
+        assertThat(ArticleQaTargetResolver.parsePositionalIndex("第三篇讲了什么")).isEqualTo(3);
+        assertThat(ArticleQaTargetResolver.parsePositionalIndex("展开最后一篇")).isEqualTo(-1);
+        // 必须带「篇」：「第三条」是对话内容追问，不是文章序位
+        assertThat(ArticleQaTargetResolver.parsePositionalIndex("第三条是什么")).isNull();
+        assertThat(ArticleQaTargetResolver.parsePositionalIndex("总结一下")).isNull();
+        assertThat(ArticleQaTargetResolver.parsePositionalIndex(null)).isNull();
+    }
 }

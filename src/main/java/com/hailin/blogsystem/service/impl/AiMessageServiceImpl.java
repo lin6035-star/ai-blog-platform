@@ -316,6 +316,37 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                 session
         );
 
+        /*
+         * 2026-10-19 序位指代修正（bug：「详细总结第一篇」→ 无反应）。
+         *
+         * 上一轮 RAG 列表以**有序候选**记在会话里（ai_sessions.last_rag_articles_json），
+         * 用户按序数点文章时这里确定性定位，然后复用 QA 既有路径（CURRENT_ARTICLE）读正文回答——
+         * 不新开链路，也**不经过分类器**（分类器只看当前一句，必然判"指代模糊"）。
+         *
+         * 只覆盖 CHAT / CTA 两种裁决：Workflow、写动作批次等一律不抢
+         * （宁可少覆盖一种，也不误伤执行链路）。
+         */
+        PageContextDTO effectivePageContext = pageContext;
+        if ((routeDecision.getAction() == AgentAction.CHAT
+                || routeDecision.getAction() == AgentAction.CTA)
+                && !routeDecision.usesRetrieval("CURRENT_ARTICLE")) {
+            QaTarget positionalTarget = articleQaTargetResolver.resolvePositional(
+                    message, pageContext, sessionId, userId);
+            if (positionalTarget != null && positionalTarget.hasArticle()) {
+                effectivePageContext = copyPageContextWithArticle(
+                        pageContext, positionalTarget.article().getId());
+                routeDecision = AgentDecision.builder()
+                        .action(AgentAction.CHAT)
+                        .intent("ARTICLE_DETAIL_QA")
+                        .retrievalMode("CURRENT_ARTICLE")
+                        .ruleHits(List.of("positional_article_reference"))
+                        .reason("序位指代：按本会话最近一次文章检索结果定位第 N 篇")
+                        .build();
+                log.info("序位指代路由修正: sessionId={}, articleId={}",
+                        sessionId, positionalTarget.article().getId());
+            }
+        }
+
         // 所有非 active Workflow 的决策都记录。
         // active Workflow 在前面已经优先直通，不进入这里。
         recordAgentDecisionTrace(
@@ -536,13 +567,34 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
          * prompt 拼装、站内检索都是同步阻塞，若在其后才发状态，前端收到时早已结束。
          * 用 Flux.defer 让整段慢操作推迟到订阅时执行，状态事件才真正「提前」。
          */
+        final AgentDecision finalDecision = routeDecision;
+        final PageContextDTO finalPageContext = effectivePageContext;
         return Flux.concat(
-                buildChatStatusFlux(routeDecision, intent),
+                buildChatStatusFlux(finalDecision, intent),
                 Flux.defer(() -> streamNormalChatFlow(
-                        message, pageContext, rawPageContextJson, userId,
-                        sessionId, session, routeDecision, intent, requestId, routeUsage
+                        message, finalPageContext, rawPageContextJson, userId,
+                        sessionId, session, finalDecision, intent, requestId, routeUsage
                 ))
         );
+    }
+
+    /**
+     * 复制 pageContext 并注入文章 ID（序位指代修正用）。
+     *
+     * <p><b>必须复制</b>：原对象还要用于决策审计与「前端原始页面上下文」落库——
+     * 改掉会把"用户在首页"篡改成"用户在文章页"，审计失真。
+     */
+    private PageContextDTO copyPageContextWithArticle(PageContextDTO source, Long articleId) {
+        PageContextDTO copy = new PageContextDTO();
+        if (source != null) {
+            copy.setPageType(source.getPageType());
+            copy.setPath(source.getPath());
+            copy.setAuthorId(source.getAuthorId());
+            copy.setArticleTitle(source.getArticleTitle());
+            copy.setUserId(source.getUserId());
+        }
+        copy.setArticleId(String.valueOf(articleId));
+        return copy;
     }
 
     /**
@@ -1093,6 +1145,13 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             ArticleRagSearchResult ragSearchResult = articleRagSearchService.search(message, intent);
             timings[2] = System.currentTimeMillis() - ragStart;
             ragContexts = ragSearchResult.contexts();
+
+            /*
+             * 2026-10-19：把这次检索的**有序候选**记进会话。
+             * 下一轮用户说「详细总结第一篇」时，routeDecision 的序位修正靠它定位——
+             * 不记的话分类器眼里只有一句无上下文的"第一篇"，必然判指代模糊（实测 bug）。
+             */
+            articleSessionAnchorService.saveRagArticleCandidates(sessionId, ragContexts);
 
             appendRagContextToPrompt(prompt, ragContexts);
         } else {
@@ -4573,6 +4632,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                 .set(AiSessions::getLastLearningPlanTitle, null)
                 .set(AiSessions::getLastLearningPlanSource, null)
                 .set(AiSessions::getLastLearningPlanUpdatedAt, null)
+                // 2026-10-19：检索候选一并清——否则清空对话后「总结第一篇」还会捞出旧列表
+                .set(AiSessions::getLastRagArticlesJson, null)
                 .update();
     }
 

@@ -114,6 +114,20 @@ public abstract class AbstractAgentRuntime {
     }
 
     /**
+     * 每步决策的**附加上下文**（默认空）。通用域用它注入「本会话最近对话」（2026-10-19）。
+     *
+     * <p><b>为什么单独一个钩子、不拼进 {@link #effectiveGoal}</b>：
+     * effectiveGoal 会落库（runtime_goal）并作为 QUERY_MEMORY 的检索原话
+     * （见 {@link #prepareStepDecision}）——把整段会话历史塞进去，记忆召回的检索词
+     * 会从"用户原话"变成一大段混杂文本，得不偿失。
+     *
+     * <p>每 run 只调用一次（循环外），失败由实现方自行兜异常。
+     */
+    protected String additionalDecisionContext(String goal, Long userId, Long sessionId) {
+        return "";
+    }
+
+    /**
      * V3.8：每步决策后解析本 run 的定位目标（文章域用；默认不解析）。
      * 决议结果存 run.targetArticleId（瞬态，不落库）。解析失败（目标候选缺失/无效）时置 null，
      * 由动作执行层按缺失目标处理（FAILED step + observation，循环继续 LLM 收尾，不猜）。
@@ -230,6 +244,17 @@ public abstract class AbstractAgentRuntime {
      */
     private String decisionContext(AgentRunState runState, List<String> observations) {
         return runState != null ? runState.decisionContext() : clipContext(observations);
+    }
+
+    /** 把领域附加上下文（如会话历史）拼在观察上下文**前面**；空则原样返回。 */
+    private static String mergeDecisionContext(String extra, String context) {
+        if (extra == null || extra.isBlank()) {
+            return context;
+        }
+        if (context == null || context.isBlank()) {
+            return extra;
+        }
+        return extra + "\n\n" + context;
     }
 
     /**
@@ -465,6 +490,8 @@ public abstract class AbstractAgentRuntime {
         List<String> observations = new ArrayList<>();
         // P2.2：领域结构化状态（per-run）。为 null = 走 observation 重放——学习 / 通用 / 钱包域如此
         AgentRunState runState = newRunState(effectiveGoal, run.getMaxSteps());
+        // 决策附加上下文（per-run 一次；通用域注入「本会话最近对话」）
+        String decisionExtraContext = additionalDecisionContext(effectiveGoal, userId, sessionId);
         List<AgentStepActionType> successfulActions = new ArrayList<>();   // V3.11：结构化事实（只读动作成功列表）
         List<Integer> successfulActionSteps = new ArrayList<>();           // V3.11：成功动作步号（到顶判据用）
         // V3.11：最后一次验证拒绝的步号（run 局部）。到顶保守收尾判据 =
@@ -483,7 +510,8 @@ public abstract class AbstractAgentRuntime {
                 try {
                     decision = policy.decider().decide(
                             effectiveGoal,
-                            decisionContext(runState, observations),
+                            mergeDecisionContext(decisionExtraContext,
+                                    decisionContext(runState, observations)),
                             nextStepNo,
                             run.getMaxSteps(),
                             stepUsage
@@ -726,7 +754,8 @@ public abstract class AbstractAgentRuntime {
                 return completeWithConservativeShutdown(run, observations);
             }
             // maxSteps 到顶：从已有 observations 汇总回答
-            return completeWithSummary(run, effectiveGoal, observations, policy, runState);
+            return completeWithSummary(run, effectiveGoal, observations, policy, runState,
+                    decisionExtraContext);
         } catch (AgentRunTerminalException e) {
             // 终局失败：失败 step 已落库，这里直接收尾（COMPLETED + 友好文案），不再走 LLM
             log.info("Agent Run 终局失败收尾: runId={}, reason={}", run.getId(), e.getMessage());
@@ -1482,11 +1511,15 @@ public abstract class AbstractAgentRuntime {
             String goal,
             List<String> observations,
             AgentRunPolicy policy,
-            AgentRunState runState
+            AgentRunState runState,
+            String additionalContext
     ) {
         // P2.3（§9.3）：到顶总结同样切到结构化证据（槽位预算 ~3200），
         // 不再重放整条 observation 流（6000 上限）
         String clipped = runState != null ? runState.summaryContext() : clipContext(observations);
+        // 到顶汇总也要能看到领域附加上下文（通用域的【本会话最近对话】）：
+        // 否则「问本会话聊了什么」一旦用满步数，收尾时又退回到"只有观察"的老问题
+        clipped = mergeDecisionContext(additionalContext, clipped);
         String summarized = null;
         // 收尾总结的用量也归 run：它不是某一步的成本（到顶后才发生的一次调用）
         TokenUsageAccumulator summaryUsage = new TokenUsageAccumulator();

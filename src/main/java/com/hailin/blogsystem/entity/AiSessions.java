@@ -66,6 +66,16 @@ public class AiSessions {
     private String lastLearningPlanSource;
     private LocalDateTime lastLearningPlanUpdatedAt;
 
+    /**
+     * 会话最近一次文章检索（RAG）的**有序候选**（2026-10-19）。
+     *
+     * <p>JSON 数组：{@code [{"articleId":123,"title":"..."}]}，最多 5 条。
+     * 服务「详细总结第一篇 / 第二篇」这类序位指代——单槽 {@link #lastArticleId} 只能记住一篇，
+     * 序位指代结构性无解（见 {@code ArticleQaTargetResolver#resolvePositional}）。
+     * 清空对话时与文章锚一并清（「清空对话 = 上下文归零」）。
+     */
+    private String lastRagArticlesJson;
+
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

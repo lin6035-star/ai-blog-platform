@@ -16,6 +16,7 @@ import com.hailin.blogsystem.entity.vo.LearningPlansDetailVO;
 import com.hailin.blogsystem.exception.BusinessException;
 import com.hailin.blogsystem.mapper.AiAgentRunMapper;
 import com.hailin.blogsystem.mapper.LearningStageMapper;
+import com.hailin.blogsystem.entity.vo.PaymentInitiateVO;
 import com.hailin.blogsystem.entity.vo.RechargeOrderVO;
 import com.hailin.blogsystem.service.ArticlesService;
 import com.hailin.blogsystem.service.LearningPlansService;
@@ -157,9 +158,9 @@ class AgentWriteActionServiceTests {
         LearningStages afterStage = stageEntity("{\"tasks\":[{\"title\":\"缓存击穿\",\"done\":true}]}");
         when(learningStageMapper.selectById(11L)).thenReturn(beforeStage, afterStage);
 
-        String result = service.confirmWrite(1L);
+        var result = service.confirmWrite(1L);
 
-        assertThat(result).contains("已勾选任务「缓存击穿」为完成");
+        assertThat(result.message()).contains("已勾选任务「缓存击穿」为完成");
         // 执行走现有 updateTaskDone（索引由后端匹配得出）
         verify(learningPlansService).updateTaskDone(eq(1L), eq(11L), eq(0), eq(true), eq(100L));
         // 快照留痕：COMPLETED + context 含 before/after
@@ -189,9 +190,9 @@ class AgentWriteActionServiceTests {
         LearningStages afterStage = stageEntity("{\"tasks\":[{\"title\":\"缓存击穿防护方案\",\"done\":false},{\"title\":\"缓存雪崩防护\",\"done\":false}]}");
         when(learningStageMapper.selectById(11L)).thenReturn(beforeStage, afterStage);
 
-        String result = service.confirmWrite(1L);
+        var result = service.confirmWrite(1L);
 
-        assertThat(result).contains("追加任务「缓存雪崩防护」");
+        assertThat(result.message()).contains("追加任务「缓存雪崩防护」");
         // 走 appendTasks（不是 updateTaskDone）
         verify(learningPlansService).appendTasks(eq(1L), eq(11L), eq(List.of("缓存雪崩防护")), eq(100L));
         verify(learningPlansService, never()).updateTaskDone(any(), any(), anyInt(), anyBoolean(), any());
@@ -365,9 +366,9 @@ class AgentWriteActionServiceTests {
         LearningStages afterStage = stageEntity("{\"tasks\":[{\"title\":\"缓存击穿防护\",\"done\":true},{\"title\":\"缓存雪崩\",\"done\":false}]}");
         when(learningStageMapper.selectById(11L)).thenReturn(beforeStage, afterStage);
 
-        String result = service.confirmWrite(1L);
+        var result = service.confirmWrite(1L);
 
-        assertThat(result).contains("已将任务「缓存击穿」重命名为「缓存击穿防护」");
+        assertThat(result.message()).contains("已将任务「缓存击穿」重命名为「缓存击穿防护」");
         // 走 renameTask（不是 updateTaskDone/appendTasks）
         verify(learningPlansService).renameTask(eq(1L), eq(11L), eq(0), eq("缓存击穿防护"), eq(100L));
         verify(learningPlansService, never()).updateTaskDone(any(), any(), anyInt(), anyBoolean(), any());
@@ -447,9 +448,9 @@ class AgentWriteActionServiceTests {
         when(articlesService.getById(1L))
                 .thenReturn(article(1L, 100L, "Published Article"), article(1L, 100L, "Renamed Title"));
 
-        String result = service.confirmWrite(1L);
+        var result = service.confirmWrite(1L);
 
-        assertThat(result).contains("已将文章《Published Article》的标题改为《Renamed Title》");
+        assertThat(result.message()).contains("已将文章《Published Article》的标题改为《Renamed Title》");
         // expectedOldTitle 必须是提案锚（proposal.articleTitle），不是 confirm 时查的当前标题
         verify(articlesService).updateArticleTitle(eq(1L), eq("Published Article"), eq("Renamed Title"), eq(100L));
         verify(learningPlansService, never()).updateTaskDone(any(), any(), anyInt(), anyBoolean(), any());
@@ -548,9 +549,9 @@ class AgentWriteActionServiceTests {
                 .thenReturn(article(1L, 100L, "Published Article", 1),
                         article(1L, 100L, "Published Article", 2));
 
-        String result = service.confirmWrite(1L);
+        var result = service.confirmWrite(1L);
 
-        assertThat(result).contains("已将文章《Published Article》隐藏");
+        assertThat(result.message()).contains("已将文章《Published Article》隐藏");
         verify(articlesService).updateArticleVisibility(eq(1L), eq(1), eq(2), eq(100L));
         verify(learningPlansService, never()).updateTaskDone(any(), any(), anyInt(), anyBoolean(), any());
         ArgumentCaptor<AiAgentRun> patchCaptor = ArgumentCaptor.forClass(AiAgentRun.class);
@@ -584,9 +585,9 @@ class AgentWriteActionServiceTests {
                 .thenReturn(article(1L, 100L, "Published Article", 2),
                         article(1L, 100L, "Published Article", 1));
 
-        String result = service.confirmWrite(1L);
+        var result = service.confirmWrite(1L);
 
-        assertThat(result).contains("已将文章《Published Article》公开");
+        assertThat(result.message()).contains("已将文章《Published Article》公开");
         verify(articlesService).updateArticleVisibility(eq(1L), eq(2), eq(1), eq(100L));
         verify(articlesService, never()).updateArticleTitle(any(), any(), any(), any());
     }
@@ -659,14 +660,28 @@ class AgentWriteActionServiceTests {
         RechargeOrderVO order = new RechargeOrderVO();
         order.setOrderNo("W-TEST-1");
         order.setCreditAmount(10_000L);
+        order.setStatus("PENDING");
         when(walletRechargeService.createCustomOrder(new BigDecimal("10"))).thenReturn(order);
 
-        String result = service.confirmWrite(1L);
+        PaymentInitiateVO payment = new PaymentInitiateVO();
+        payment.setPaymentNo("P-TOKEN-W-TEST-1");
+        payment.setPayToken("TOKEN-W-TEST-1");
+        payment.setOrderStatus("PENDING");
+        when(walletRechargeService.initiatePayment("W-TEST-1")).thenReturn(payment);
+
+        var result = service.confirmWrite(1L);
 
         // 解析出来的必须是 "10" 而不是 null——那就说明 parseWriteAction 漏写了 payYuan
         verify(walletRechargeService).createCustomOrder(new BigDecimal("10"));
-        verify(walletRechargeService).pay("W-TEST-1");
-        assertThat(result).contains("到账");
+        verify(walletRechargeService).initiatePayment("W-TEST-1");
+        // ⚠️ AI 只创建订单 / 发起支付，不替用户确认付款
+        verify(walletRechargeService, never()).mockPay(any(), any());
+        assertThat(result.message()).contains("已创建充值订单");
+        // 前端要靠 result 里的 payToken 打开支付窗口
+        assertThat(result.actionType()).isEqualTo("RECHARGE_WALLET");
+        assertThat(result.result())
+                .containsEntry("orderNo", "W-TEST-1")
+                .containsEntry("payToken", "TOKEN-W-TEST-1");
     }
 
     /** 提案里没有金额时不执行任何写操作（executor 的必填校验兜住解析漏写的那种情况） */

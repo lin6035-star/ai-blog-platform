@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.entity.WalletTransaction;
 import com.hailin.blogsystem.entity.dto.WalletCustomRechargeDTO;
+import com.hailin.blogsystem.entity.vo.PaymentInitiateVO;
 import com.hailin.blogsystem.entity.vo.RechargeOrderVO;
 import com.hailin.blogsystem.entity.vo.WalletCustomConfigVO;
 import com.hailin.blogsystem.entity.vo.WalletPackageVO;
@@ -72,6 +73,12 @@ class WalletCustomRechargeTests {
         return walletTransactionMapper.selectOne(new LambdaQueryWrapper<WalletTransaction>()
                 .eq(WalletTransaction::getUserId, userId)
                 .eq(WalletTransaction::getBizId, orderNo));
+    }
+
+    /** 改造后入账必须走「发起支付 → 渠道回调」，测试不允许绕过 */
+    private RechargeOrderVO completePayment(String orderNo) {
+        PaymentInitiateVO initiate = walletRechargeService.initiatePayment(orderNo);
+        return walletRechargeService.mockPay(orderNo, initiate.getPayToken());
     }
 
     // ---------- 配置 ----------
@@ -198,20 +205,21 @@ class WalletCustomRechargeTests {
     void payCustomOrderCreditsWallet() {
         RechargeOrderVO order = walletRechargeService.createCustomOrder(new BigDecimal("5"));
 
-        RechargeOrderVO paid = walletRechargeService.pay(order.getOrderNo());
+        RechargeOrderVO paid = completePayment(order.getOrderNo());
 
         assertThat(paid.getStatus()).isEqualTo("PAID");
         assertThat(paid.getPaidAt()).isNotNull();
         assertThat(walletService.getWallet(userId).getBalance()).isEqualTo(5000L);
     }
 
-    /** 幂等：重复支付只加一次钱。和套餐那条同源，出错方向是「用户白拿额度」 */
+    /** 幂等：重复确认支付只加一次钱。和套餐那条同源，出错方向是「用户白拿额度」 */
     @Test
     void payCustomOrderIsIdempotent() {
         RechargeOrderVO order = walletRechargeService.createCustomOrder(new BigDecimal("5"));
+        PaymentInitiateVO initiate = walletRechargeService.initiatePayment(order.getOrderNo());
 
-        walletRechargeService.pay(order.getOrderNo());
-        RechargeOrderVO second = walletRechargeService.pay(order.getOrderNo());
+        walletRechargeService.mockPay(order.getOrderNo(), initiate.getPayToken());
+        RechargeOrderVO second = walletRechargeService.mockPay(order.getOrderNo(), initiate.getPayToken());
 
         assertThat(second.getStatus()).isEqualTo("PAID");
         assertThat(walletService.getWallet(userId).getBalance()).isEqualTo(5000L);
@@ -222,10 +230,11 @@ class WalletCustomRechargeTests {
         RechargeOrderVO order = walletRechargeService.createCustomOrder(new BigDecimal("5"));
 
         UserContext.set(otherUserId);
-        assertThatThrownBy(() -> walletRechargeService.pay(order.getOrderNo()))
+        assertThatThrownBy(() -> walletRechargeService.initiatePayment(order.getOrderNo()))
                 .isInstanceOf(BusinessException.class)
                 .hasMessageContaining("无权");
 
+        UserContext.set(userId);
         assertThat(walletService.getWallet(userId).getBalance()).isZero();
     }
 
@@ -234,9 +243,9 @@ class WalletCustomRechargeTests {
         WalletPackageVO pkg = walletRechargeService.listPackages().get(0);
 
         RechargeOrderVO packageOrder = walletRechargeService.createOrder(pkg.getCode());
-        walletRechargeService.pay(packageOrder.getOrderNo());
+        completePayment(packageOrder.getOrderNo());
         RechargeOrderVO customOrder = walletRechargeService.createCustomOrder(new BigDecimal("5"));
-        walletRechargeService.pay(customOrder.getOrderNo());
+        completePayment(customOrder.getOrderNo());
 
         assertThat(walletService.getWallet(userId).getBalance())
                 .isEqualTo(pkg.getCreditAmount() + 5000L);
@@ -248,7 +257,7 @@ class WalletCustomRechargeTests {
     @Test
     void customOrderRemarkReadsYuanNotPackageCode() {
         RechargeOrderVO order = walletRechargeService.createCustomOrder(new BigDecimal("5"));
-        walletRechargeService.pay(order.getOrderNo());
+        completePayment(order.getOrderNo());
 
         assertThat(loadRechargeTransaction(order.getOrderNo()).getRemark())
                 .isEqualTo("自定义充值 5 元");
@@ -259,7 +268,7 @@ class WalletCustomRechargeTests {
     void packageOrderRemarkStaysUnchanged() {
         WalletPackageVO pkg = walletRechargeService.listPackages().get(0);
         RechargeOrderVO order = walletRechargeService.createOrder(pkg.getCode());
-        walletRechargeService.pay(order.getOrderNo());
+        completePayment(order.getOrderNo());
 
         assertThat(loadRechargeTransaction(order.getOrderNo()).getRemark())
                 .isEqualTo("充值套餐 " + pkg.getCode());

@@ -75,6 +75,47 @@ public class BlogWalletProperties {
     }
 
     /**
+     * 充值订单的支付超时（分钟）。
+     *
+     * <p>超时未支付的订单由 {@code WalletRechargeOrderCloseTask} + 惰性关单双保险关闭，
+     * 关单后的支付回调按「关单后到账」告警处理（不自动入账）——设计稿
+     * {@code docs/redis/充值订单真实化设计.md} §6.4。
+     *
+     * <p>真实支付里这个值要和渠道订单有效期对齐，取比渠道短的窗口更安全
+     * （本地先关、渠道后关，回调回来能被识别为异常而不是被当成正常入账）。
+     */
+    private long orderTimeoutMinutes = 30;
+
+    /**
+     * 支付渠道配置。
+     *
+     * <p>渠道抽象的目的是：接真实微信 / 支付宝时只新增 {@code PaymentChannel} 实现，
+     * 订单状态机、回调内核、对账、关单一行都不用改。
+     */
+    private Payment payment = new Payment();
+
+    @Data
+    public static class Payment {
+        /** 当前启用的渠道：MOCK = 虚拟支付 */
+        private String channel = "MOCK";
+
+        /**
+         * Mock 渠道回调签名密钥（HMAC-SHA256）。
+         *
+         * <p>⚠️ 生产必须覆盖（prod profile 用无默认值的环境变量）：前端的「模拟支付」按钮
+         * 只是让服务端扮演渠道生成签名，密钥本身不会下发到浏览器——但它一旦泄露，
+         * 攻击者可以伪造回调直接给任意支付单入账。
+         */
+        private String mockSecret = "wallet-mock-pay-dev-secret";
+
+        /** 回调时间戳容忍窗口（秒），超出即拒绝——防重放 */
+        private long callbackToleranceSeconds = 300;
+
+        /** 补单扫描：CREATED 支付单超过多少秒后主动向渠道查单 */
+        private long queryPendingAfterSeconds = 120;
+    }
+
+    /**
      * 账单的**展示**保留期（天）：用户只看得到最近这么多天的账单，默认 7 天。
      *
      * <p><b>它只影响"给用户看的账单"，账本一行都不删。</b>

@@ -144,7 +144,27 @@ public class BlogAiProperties {
         private String memoryIndexName = "spring-ai-document-index";
         private String embeddingModel = "qwen3.7-text-embedding";
         private int dimensions = 1024;
+        /**
+         * 文章 corpus 的自动建索引开关。**必须保持 false**：article 侧用的是 alias
+         * {@code article_rag_active}，物理索引由 rebuild 流程建，Spring AI 不支持把 alias
+         * 当作待建物理索引处理。
+         */
         private boolean initializeSchema = true;
+        /**
+         * 记忆 corpus 的自动建索引开关（与文章独立）。
+         *
+         * <p><b>为什么默认 true</b>：记忆写的是**物理索引**（默认
+         * {@code spring-ai-document-index}），但项目里没有任何重建/初始化流程创建它——
+         * 旧环境里它是早期用 initialize-schema=true 自动建过的。换新服务器（ES 数据卷全新）后
+         * 这个索引不存在，而 {@code ElasticsearchVectorStore.doAdd()} 第一步就 indexExists()，
+         * 缺失时直接抛 {@code IllegalArgumentException("Index not found")}；保存记忆是在
+         * {@code @Transactional} 里写 ES 的，异常会让事务回滚 → 前端「保存记忆失败」，
+         * 召回侧则被 fail-open 吞掉（AI 静默读不到记忆）。
+         *
+         * <p><b>测试里必须设 false</b>：{@code src/test/resources/application.properties}
+         * 的约定是「测试不依赖真实 ES」，而开了之后 bean 初始化阶段就会发一次 HEAD 探测。
+         */
+        private boolean memoryInitializeSchema = true;
     }
 
     @Data

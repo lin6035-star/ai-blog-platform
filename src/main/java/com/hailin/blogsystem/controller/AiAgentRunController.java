@@ -3,6 +3,7 @@ package com.hailin.blogsystem.controller;
 import com.hailin.blogsystem.ai.agent.AgentRunInspectionService;
 import com.hailin.blogsystem.ai.agent.AgentRunSuggestionService;
 import com.hailin.blogsystem.ai.agent.AgentRunSuggestionView;
+import com.hailin.blogsystem.ai.agent.AgentWriteActionConfirmView;
 import com.hailin.blogsystem.ai.agent.AgentWriteActionService;
 import com.hailin.blogsystem.ai.agent.AgentWriteActionView;
 import com.hailin.blogsystem.entity.vo.AgentRunDetailVO;
@@ -76,9 +77,12 @@ public class AiAgentRunController {
 
     /**
      * V2.4：确认写动作提案（标题匹配 → 快照 → 执行，只读裁判 + 用户确认后才写）。
+     *
+     * <p>返回结构含 {@code result}（执行器载荷）：钱包域充值只做到「创建订单 + 发起支付」，
+     * 前端靠 {@code result.orderNo / payToken} 打开支付窗口；其他域忽略该字段。
      */
     @PostMapping("/{id}/write-action/confirm")
-    public Result<String> confirmWrite(@PathVariable Long id) {
+    public Result<AgentWriteActionConfirmView> confirmWrite(@PathVariable Long id) {
         return Result.success(agentWriteActionService.confirmWrite(id));
     }
 

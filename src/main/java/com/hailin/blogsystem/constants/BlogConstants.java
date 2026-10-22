@@ -101,6 +101,31 @@ public class BlogConstants {
          */
         public static final String CUSTOM_PACKAGE_CODE = "CUSTOM";
 
+        /* ---------- 充值订单状态（真实支付模型：回调驱动入账） ---------- */
+        /** 待支付 */
+        public static final String ORDER_PENDING = "PENDING";
+        /** 已支付（只能由「支付单 SUCCESS + 金额校验通过」驱动） */
+        public static final String ORDER_PAID = "PAID";
+        /** 已关闭（超时 / 用户取消） */
+        public static final String ORDER_CLOSED = "CLOSED";
+
+        /* 订单关闭原因 */
+        public static final String CLOSE_TIMEOUT = "TIMEOUT";
+        public static final String CLOSE_USER_CANCELLED = "USER_CANCELLED";
+
+        /* ---------- 支付单状态（渠道凭证） ---------- */
+        public static final String PAYMENT_CREATED = "CREATED";
+        public static final String PAYMENT_SUCCESS = "SUCCESS";
+        public static final String PAYMENT_FAILED = "FAILED";
+        public static final String PAYMENT_CLOSED = "CLOSED";
+
+        /** 支付渠道：虚拟支付（真实接入时新增 WECHAT / ALIPAY） */
+        public static final String CHANNEL_MOCK = "MOCK";
+
+        /** 充值入账的流水类型 / 业务类型（与 wallet_transaction 的列取值一致） */
+        public static final String TX_RECHARGE = "RECHARGE";
+        public static final String BIZ_RECHARGE_ORDER = "RECHARGE_ORDER";
+
         private Wallet() {
         }
     }

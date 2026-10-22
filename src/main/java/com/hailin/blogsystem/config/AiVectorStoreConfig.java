@@ -26,7 +26,8 @@ public class AiVectorStoreConfig {
                 restClient,
                 embeddingModel,
                 corpus.getArticleIndexName(),
-                corpus
+                corpus,
+                corpus.isInitializeSchema()
         );
     }
 
@@ -41,7 +42,15 @@ public class AiVectorStoreConfig {
                 restClient,
                 embeddingModel,
                 corpus.getMemoryIndexName(),
-                corpus
+                corpus,
+                // 记忆索引是**物理索引**，但项目里没有它的重建/初始化流程：
+                // 新环境（如 2026-10-18 换的服务器，ES 数据卷全新）里索引不存在时，
+                // ElasticsearchVectorStore.doAdd() 第一步 indexExists() 就抛
+                // IllegalArgumentException("Index not found")，而保存记忆是在 @Transactional
+                // 里写 ES 的 → 事务回滚 → 前端「保存记忆失败」；召回失败则被 fail-open 吞掉，
+                // 表现为 AI 静默读不到记忆。所以记忆侧默认开启自动建索引，
+                // 文章侧不能开（article_rag_active 是 alias，见 initializeSchema 注释）。
+                corpus.isMemoryInitializeSchema()
         );
     }
 
@@ -49,7 +58,8 @@ public class AiVectorStoreConfig {
             RestClient restClient,
             EmbeddingModel embeddingModel,
             String indexName,
-            BlogAiProperties.Corpus corpus
+            BlogAiProperties.Corpus corpus,
+            boolean initializeSchema
     ) {
         ElasticsearchVectorStoreOptions options = new ElasticsearchVectorStoreOptions();
         options.setIndexName(indexName);
@@ -57,7 +67,7 @@ public class AiVectorStoreConfig {
 
         return ElasticsearchVectorStore.builder(restClient, embeddingModel)
                 .options(options)
-                .initializeSchema(corpus.isInitializeSchema())
+                .initializeSchema(initializeSchema)
                 .build();
     }
 }
