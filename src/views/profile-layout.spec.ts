@@ -106,6 +106,16 @@ describe('profile article tabs layout', () => {
     expect(profileView).toContain('{{ joinedAtText }}')
   })
 
+  it('reserves the wallet slot while the balance request is pending', () => {
+    const walletCard = readFileSync(resolve(__dirname, '../components/common/WalletBalanceCard.vue'), 'utf8')
+    expect(walletCard).toContain('const walletLoading = ref(true)')
+    expect(walletCard).toContain('class="wallet-card wallet-card-placeholder"')
+    expect(walletCard).toContain('v-else-if="walletLoading"')
+    expect(walletCard).toContain('额度暂不可用')
+    expect(walletCard).toContain('.wallet-card-placeholder')
+    expect(walletCard).toContain('min-height: 102px')
+  })
+
   it('uses a history back button instead of refreshing home', () => {
     expect(profileView).toContain('function goBack()')
     expect(profileView).toContain('router.back()')

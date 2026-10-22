@@ -53,8 +53,9 @@ import { completeLiveProcessSteps, finalizeFailedStreamMessage } from './streamM
 
 import { useAuthStore } from '@/stores/auth'
 import { walletApi } from '@/api/wallet'
-import type { WalletInfo } from '@/types/wallet'
+import type { RechargeOrder, WalletInfo } from '@/types/wallet'
 import { displayCredit, formatCredit } from '@/utils/format'
+import MockPayDialog from '@/components/wallet/MockPayDialog.vue'
 
 // ============================================================
 // Auth & guest
@@ -1966,7 +1967,9 @@ function writeActionTypeLabel(w: AgentWriteProposal): string {
  */
 function writeActionConfirmText(w: AgentWriteProposal): string {
   if (w.actionType === 'RECHARGE_WALLET') {
-    return w.payYuan ? `确认充值 ¥${w.payYuan}` : '确认充值'
+    // 2026-10-19：点下去只是「创建订单」，付款要在支付窗口里再确认一次——
+    // 文案必须说清楚，否则用户会以为点完就到账了
+    return w.payYuan ? `创建订单 ¥${w.payYuan}` : '创建订单'
   }
   return '继续'
 }
@@ -1995,9 +1998,9 @@ function writeActionReason(w: AgentWriteProposal): string {
   }
   if (w.actionType === 'RECHARGE_WALLET') {
     // 2026-09-21 钱包域：显式念出金额。
-    // 到账额度**不在这里算**——它是兑换比例派生的，权威数字由后端在执行结果里给（前端会 toast）。
-    // 卡片上写死一个数，而配置改过的话就变成了谎话
-    return `给钱包充值 ${w.payYuan ?? '—'} 元，确认后立即到账`
+    // 到账额度**不在这里算**——它是兑换比例派生的，权威数字由后端执行时给。
+    // 2026-10-19：AI 只创建订单，付款由用户在支付窗口确认（不再说「立即到账」）
+    return `给钱包充值 ${w.payYuan ?? '—'} 元，确认后创建订单并在支付窗口中完成支付`
   }
   return `任务「${w.taskTitle}」` + (w.stageTitle ? `（阶段：${w.stageTitle}）` : '')
 }
@@ -2007,7 +2010,13 @@ async function confirmWriteAction(msg: AiMessage) {
   setWriteActionState(msg, 'processing')
   try {
     const res = await aiApi.confirmWriteAction(msg.agentRunId)
-    message.success(res.data ?? '已执行')
+    const view = res.data
+    message.success(view?.message ?? '已执行')
+    // 钱包域：AI 只负责创建订单 + 发起支付，付款必须由用户在支付窗口里确认
+    // （真实支付下这里会打开渠道收银台；虚拟支付用同构的模拟支付窗口）
+    if (view?.actionType === 'RECHARGE_WALLET' && view.result?.payToken) {
+      openPayDialog(view.result)
+    }
     const idx = messages.value.findIndex((m) => m.id === msg.id)
     if (idx >= 0) {
       messages.value[idx] = {
@@ -2284,7 +2293,6 @@ async function applyWorkflowSnapshotById(workflowId?: string | number | null) {
  * 用户刚发出一条消息就看到负余额，会以为已经欠款，而实际上结算后会退回来。
  */
 const wallet = ref<WalletInfo | null>(null)
-
 const walletTone = computed(() => {
   const info = wallet.value
   if (!info || info.balance > 0) {
@@ -2319,6 +2327,46 @@ async function loadWallet() {
     // 余额是锦上添花：拿不到就不显示，不影响聊天
     wallet.value = null
   }
+}
+
+// ============================================================
+// AI 发起充值 → 支付窗口（AI 只创建订单，付款必须由用户确认）
+// ============================================================
+
+const payDialogVisible = ref(false)
+const payOrder = ref<RechargeOrder | null>(null)
+const payToken = ref('')
+/** 自定义订单的「元」值（展示用；不能走 formatPayAmount，它吃分） */
+const payCustomYuan = ref<number | null>(null)
+
+/**
+ * 用确认接口返回的执行器载荷打开支付窗口。
+ *
+ * 后端只保证「订单已创建 + 支付单已发起」，所以这里的 status 固定 PENDING；
+ * 真正的到账由用户在窗口里确认 → 渠道回调 → 前端轮询订单终态。
+ */
+function openPayDialog(result: Record<string, unknown>) {
+  const orderNo = result.orderNo ? String(result.orderNo) : ''
+  if (!orderNo) {
+    return
+  }
+  payOrder.value = {
+    orderNo,
+    packageCode: 'CUSTOM',
+    payAmount: Number(result.payAmount ?? 0),
+    creditAmount: Number(result.creditAmount ?? 0),
+    status: 'PENDING',
+    expireAt: result.expireAt ? String(result.expireAt) : null,
+  }
+  payToken.value = String(result.payToken ?? '')
+  payCustomYuan.value =
+    result.payYuan !== undefined && result.payYuan !== null ? Number(result.payYuan) : null
+  payDialogVisible.value = true
+}
+
+/** 支付成功：刷新侧边余额卡（订单详情在钱包页可查） */
+async function onPayPaid() {
+  await loadWallet()
 }
 
 function goWallet() {
@@ -4391,6 +4439,15 @@ watch(
         </div>
       </div>
     </n-modal>
+
+    <!-- AI 发起充值后：弹出支付窗口，由用户确认付款（与钱包页同一组件） -->
+    <MockPayDialog
+      v-model:show="payDialogVisible"
+      :order="payOrder"
+      :pay-token="payToken"
+      :custom-yuan="payCustomYuan"
+      @paid="onPayPaid"
+    />
   </div>
 </template>
 

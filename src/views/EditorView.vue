@@ -43,6 +43,7 @@ const initialTitle = ref('')
 const initialCoverUrl = ref('')
 const initialCategoryId = ref<string | null>(null)
 const saving = ref(false)
+const editorLoading = ref(Boolean(editId.value))
 
 /* ---- AI 填充竞态保护：编辑模式下原文未加载完时暂存，防止优化内容被原文覆盖 ---- */
 const articleLoaded = ref(false)
@@ -126,6 +127,11 @@ async function saveArticle(
   successText: string,
   options: { navigateBack?: boolean; failureText?: string } = {},
 ) {
+  // 2026-10-18 上线手测修复：防连点/并发重复提交。
+  // 此前发布成功但导航被打断时页面仍停留在新建模式，用户可以再点发布 → 每点一次多建一篇文章。
+  if (saving.value) {
+    return false
+  }
   if (!form.title.trim()) {
     message.warning('请输入文章标题')
     return false
@@ -145,7 +151,14 @@ async function saveArticle(
     } else {
       const res = await myArticleApi.create(submitForm)
       const id = res.data
-      if (id) {
+      /*
+       * 2026-10-18 上线手测修复：新建文章**只能走一次导航**。
+       * 原实现无条件 `router.replace(editor-edit)`，随后 handlePublish 的 navigateBack 又 `router.back()`：
+       * 两个导航互相取消，守卫里的 skipGuard 被前一个消费掉，结果是
+       * 「提示发布成功 → 又弹出未保存确认 → 页面停在新建模式 → 可以重复发布（每点一次建一篇）」。
+       * 发布（navigateBack=true）直接 back 回列表；保存草稿才切到编辑模式继续编辑。
+       */
+      if (id && !options.navigateBack) {
         skipGuard.value = true
         router.replace({ name: 'editor-edit', params: { id } })
       }
@@ -279,9 +292,12 @@ onMounted(async () => {
     } catch {
       message.error('文章加载失败')
       router.back()
+    } finally {
+      editorLoading.value = false
     }
   } else {
     articleLoaded.value = true
+    editorLoading.value = false
   }
 })
 
@@ -328,7 +344,7 @@ onBeforeRouteLeave((_to, _from, next) => {
 
 <template>
   <MainLayout>
-    <div class="editor-page">
+    <div class="editor-page" :class="{ 'is-loading': editorLoading }" :aria-busy="editorLoading">
     <!-- 顶部工具栏 -->
     <header class="editor-toolbar">
       <button class="editor-back" type="button" @click="handleBack">
@@ -339,71 +355,84 @@ onBeforeRouteLeave((_to, _from, next) => {
         class="editor-title-input"
         v-model="form.title"
         type="text"
-        placeholder="输入文章标题…"
+        :placeholder="editorLoading ? '' : '输入文章标题…'"
         maxlength="120"
+        :disabled="editorLoading"
       />
 
       <div class="editor-actions">
-        <button
-          v-if="!isEditingPublished"
-          class="editor-btn editor-btn-draft"
-          type="button"
-          :disabled="saving"
-          @click="handleSaveDraft"
-        >
-          {{ saving ? '…' : '保存草稿' }}
-        </button>
-        <button
-          class="editor-btn editor-btn-publish"
-          type="button"
-          :disabled="saving"
-          @click="handlePublish"
-        >
-          {{ saving ? '…' : isEditingPublished ? '更新文章' : '发布' }}
-        </button>
+        <span v-if="editorLoading" class="editor-actions-placeholder" aria-hidden="true" />
+        <template v-else>
+          <button
+            v-if="!isEditingPublished"
+            class="editor-btn editor-btn-draft"
+            type="button"
+            :disabled="editorLoading || saving"
+            @click="handleSaveDraft"
+          >
+            {{ saving ? '…' : '保存草稿' }}
+          </button>
+          <button
+            class="editor-btn editor-btn-publish"
+            type="button"
+            :disabled="editorLoading || saving"
+            @click="handlePublish"
+          >
+            {{ saving ? '…' : isEditingPublished ? '更新文章' : '发布' }}
+          </button>
+        </template>
       </div>
     </header>
 
     <!-- 配置栏 -->
     <div class="editor-config">
-      <div class="config-field">
-        <label>分类</label>
-        <n-select
-          v-model:value="form.categoryId"
-          :options="categories.map(c => ({ label: c.name, value: c.id }))"
-          placeholder="选择分类"
-          clearable
-          style="width: 160px"
-        />
-      </div>
+      <span v-if="editorLoading" class="editor-config-placeholder" aria-hidden="true" />
+      <template v-else>
+        <div class="config-field">
+          <label>分类</label>
+          <n-select
+            v-model:value="form.categoryId"
+            :options="categories.map(c => ({ label: c.name, value: c.id }))"
+            placeholder="选择分类"
+            clearable
+            style="width: 160px"
+          />
+        </div>
 
-      <div class="config-field">
-        <label>封面图</label>
-        <input
-          ref="coverInput"
-          type="file"
-          accept="image/*"
-          style="display: none"
-          @change="handleCoverUpload"
-        />
-        <button
-          class="cover-upload-btn"
-          type="button"
-          :disabled="coverUploading"
-          @click="coverInput?.click()"
-        >
-          {{ coverUploading ? '上传中…' : form.coverUrl ? '更换封面' : '上传封面' }}
-        </button>
-        <span v-if="form.coverUrl" class="cover-thumb-wrap">
-          <img :src="form.coverUrl" class="cover-thumb" alt="封面预览" />
-          <button class="cover-remove" type="button" @click="form.coverUrl = ''">×</button>
-        </span>
-      </div>
+        <div class="config-field">
+          <label>封面图</label>
+          <input
+            ref="coverInput"
+            type="file"
+            accept="image/*"
+            style="display: none"
+            @change="handleCoverUpload"
+          />
+          <button
+            class="cover-upload-btn"
+            type="button"
+            :disabled="coverUploading"
+            @click="coverInput?.click()"
+          >
+            {{ coverUploading ? '上传中…' : form.coverUrl ? '更换封面' : '上传封面' }}
+          </button>
+          <span v-if="form.coverUrl" class="cover-thumb-wrap">
+            <img :src="form.coverUrl" class="cover-thumb" alt="封面预览" />
+            <button class="cover-remove" type="button" @click="form.coverUrl = ''">×</button>
+          </span>
+        </div>
+      </template>
     </div>
 
     <!-- 编辑区 -->
     <div class="editor-main">
+      <div v-if="editorLoading" class="editor-main-placeholder" aria-hidden="true">
+        <span class="editor-main-placeholder-line is-short" />
+        <span class="editor-main-placeholder-line" />
+        <span class="editor-main-placeholder-line" />
+      </div>
       <MdEditor
+        v-else
         v-model="form.content"
         :on-upload-img="handleUploadImg"
         :sanitize="sanitizeHtml"
@@ -471,6 +500,16 @@ onBeforeRouteLeave((_to, _from, next) => {
   display: flex;
   gap: 10px;
   flex-shrink: 0;
+  justify-content: flex-end;
+  min-width: 182px;
+}
+
+.editor-actions-placeholder {
+  display: block;
+  width: 182px;
+  height: 36px;
+  border-radius: 8px;
+  background: #edf1f1;
 }
 
 .editor-btn {
@@ -510,9 +549,19 @@ onBeforeRouteLeave((_to, _from, next) => {
   display: flex;
   align-items: center;
   gap: 20px;
+  min-height: 61px;
+  box-sizing: border-box;
   padding: 10px 20px;
   border-bottom: 1px solid #f0f0f0;
   background: #fafafa;
+}
+
+.editor-config-placeholder {
+  display: block;
+  width: 286px;
+  height: 32px;
+  border-radius: 6px;
+  background: #edf1f1;
 }
 
 .config-field {
@@ -586,5 +635,28 @@ onBeforeRouteLeave((_to, _from, next) => {
 .editor-main {
   flex: 1;
   min-height: 0;
+}
+
+.editor-main-placeholder {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 64px 48px;
+  background: #fff;
+}
+
+.editor-main-placeholder-line {
+  display: block;
+  width: min(720px, 72%);
+  height: 16px;
+  border-radius: 4px;
+  background: #edf1f1;
+}
+
+.editor-main-placeholder-line.is-short {
+  width: min(420px, 44%);
+  height: 22px;
 }
 </style>

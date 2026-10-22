@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { useDialog, useMessage } from 'naive-ui'
+import { useMessage } from 'naive-ui'
 import { ArrowBack } from '@vicons/ionicons5'
 import MainLayout from '@/layouts/MainLayout.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
+import MockPayDialog from '@/components/wallet/MockPayDialog.vue'
 import { walletApi } from '@/api/wallet'
 import type { Result } from '@/types/result'
 import type {
+  PaymentInitiate,
   RechargeOrder,
   WalletBillEntry,
   WalletCustomConfig,
@@ -18,7 +20,6 @@ import { formatArticleDateTime, formatCredit, displayCredit, formatPayAmount } f
 
 const router = useRouter()
 const message = useMessage()
-const dialog = useDialog()
 
 const wallet = ref<WalletInfo | null>(null)
 
@@ -32,6 +33,26 @@ const packages = ref<WalletPackage[]>([])
 const billEntries = ref<WalletBillEntry[]>([])
 const loading = ref(false)
 const paying = ref(false)
+
+/** 我的充值订单（待支付 / 已支付 / 已关闭） */
+const orders = ref<RechargeOrder[]>([])
+const orderLoading = ref(false)
+
+/**
+ * 模拟支付页的状态。
+ *
+ * 真实支付里点「确认支付」会跳去渠道页面；这里用同构的对话框代替，
+ * 但流程一点没省：下单 → 发起支付拿凭证 → 显示倒计时 → 确认后走渠道回调 → 轮询订单状态。
+ */
+const pendingOrder = ref<RechargeOrder | null>(null)
+const pendingPayToken = ref('')
+/**
+ * 自定义金额订单的「元」值（仅展示用）。
+ *
+ * ⚠️ 绝不能走 formatPayAmount——那个函数吃「分」，5 元会显示成 ¥0.05。
+ */
+const pendingCustomYuan = ref<number | null>(null)
+const payDialogVisible = ref(false)
 
 /** 配置接口没回来时的占位值——真正的边界在后端，这里只负责输入框不至于空着 */
 const DEFAULT_CUSTOM_CONFIG: WalletCustomConfig = { minYuan: 1, maxYuan: 1000, creditPerYuan: 1000 }
@@ -112,56 +133,85 @@ async function loadAll() {
   } catch {
     customEnabled.value = false
   }
+
+  await loadOrders()
 }
 
 /**
- * 下单 + 支付：套餐与自定义金额共用。
+ * 订单列表：**单独 catch**，理由同自定义配置——
+ * 订单接口挂了不该让整个钱包页打不开（余额和充值才是主路径）。
+ */
+async function loadOrders() {
+  orderLoading.value = true
+  try {
+    const res = await walletApi.listRechargeOrders(1, 10)
+    orders.value = res.data?.list ?? []
+  } catch {
+    // 附加区块，失败静默
+  } finally {
+    orderLoading.value = false
+  }
+}
+
+/**
+ * 下单 + 发起支付：套餐与自定义金额共用。
  *
- * 下单和支付分两步（对应后端两个接口），是为了和将来接真实支付时的流程一致：
- * 那时「下单」和「支付回调」之间会隔着一次真实的第三方支付。
+ * 改造后是**两段式**：createOrder 只落 PENDING 订单；initiatePayment 创建支付单、返回凭证。
+ * 真正入账要等「模拟支付页确认 → 渠道回调」，所以这里拿到的是待支付订单，不是余额。
  *
  * 两条路的后半段完全一样，分开写早晚会在「忘了 loadAll」「忘了复位 paying」这类地方漂移。
  */
-async function runRecharge(
+async function startRecharge(
   createOrder: () => Promise<Result<RechargeOrder>>,
-  successText: string,
+  customYuan?: number,
 ) {
+  if (paying.value) {
+    return
+  }
   paying.value = true
   try {
-    const order = await createOrder()
-    await walletApi.payRechargeOrder(order.data.orderNo)
-    message.success(successText)
-    await loadAll()
+    const orderRes = await createOrder()
+    const order = orderRes.data
+    const payRes = await walletApi.initiatePayment(order.orderNo)
+    openMockPayPage(order, payRes.data, customYuan ?? null)
   } catch (e) {
-    message.error(e instanceof Error ? e.message : '充值失败')
+    message.error(e instanceof Error ? e.message : '下单失败')
+    await loadOrders()
   } finally {
     paying.value = false
   }
 }
 
-/** 选套餐 → 模拟支付 */
+function openMockPayPage(
+  order: RechargeOrder,
+  payment: PaymentInitiate,
+  customYuan: number | null,
+) {
+  pendingOrder.value = order
+  pendingPayToken.value = payment.payToken ?? ''
+  pendingCustomYuan.value = customYuan
+  payDialogVisible.value = true
+}
+
+/** 支付成功：余额和订单列表都要刷新（成功提示由弹窗组件负责） */
+async function onPayPaid() {
+  await loadAll()
+}
+
+/** 弹窗关闭（取消 / 超时 / 支付失败）：只需刷新订单列表 */
+async function onPayClosed() {
+  await loadOrders()
+}
+
+/** 选套餐 → 下单并打开模拟支付页 */
 function choosePackage(pkg: WalletPackage) {
-  // ⚠️ 在开对话框**之前**拦：paying 只在 onPositiveClick 里置位，
-  // 第一个确认框还没点确认时再点一次，会叠开第二个对话框、最终生成两张订单、两次到账。
-  // 订单状态 CAS 防不了这个——它只能防「同一张订单付两次」
   if (paying.value) {
     return
   }
-  dialog.warning({
-    title: '模拟支付',
-    content: `确认支付 ${formatPayAmount(pkg.payAmount)} 购买 ${formatCredit(pkg.creditAmount)} 额度吗？`
-      + '这是虚拟支付，不会真的扣款。',
-    positiveText: '确认支付',
-    negativeText: '取消',
-    onPositiveClick: () =>
-      runRecharge(
-        () => walletApi.createRechargeOrder(pkg.code),
-        `充值成功，到账 ${formatCredit(pkg.creditAmount)} 额度`,
-      ),
-  })
+  void startRecharge(() => walletApi.createRechargeOrder(pkg.code))
 }
 
-/** 自定义金额 → 模拟支付 */
+/** 自定义金额 → 下单并打开模拟支付页 */
 function chooseCustomAmount() {
   if (paying.value) {
     return
@@ -179,21 +229,52 @@ function chooseCustomAmount() {
     return
   }
 
-  // ⚠️ 显示的是**元**，所以绝不能走 formatPayAmount——那个函数吃「分」，
-  // formatPayAmount(5) 会显示成 ¥0.05，而 5 元和 5 分看起来都"对"，
-  // 要等付完钱才会发现。整数元直接用原值，不做任何换算
-  const credit = yuan * customConfig.value.creditPerYuan
-  dialog.warning({
-    title: '模拟支付',
-    content: `确认支付 ¥${yuan} 购买 ${formatCredit(credit)} 额度吗？这是虚拟支付，不会真的扣款。`,
-    positiveText: '确认支付',
-    negativeText: '取消',
-    onPositiveClick: () =>
-      runRecharge(
-        () => walletApi.createCustomRechargeOrder(yuan),
-        `充值成功，到账 ${formatCredit(credit)} 额度`,
-      ),
-  })
+  void startRecharge(() => walletApi.createCustomRechargeOrder(yuan), yuan)
+}
+
+// ---------- 订单列表操作 ----------
+
+async function continueOrderItem(order: RechargeOrder) {
+  if (paying.value) {
+    return
+  }
+  paying.value = true
+  try {
+    const payRes = await walletApi.initiatePayment(order.orderNo)
+    // 从列表继续支付时只知道「分」，展示统一走 formatPayAmount
+    openMockPayPage(order, payRes.data, null)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '发起支付失败')
+    await loadOrders()
+  } finally {
+    paying.value = false
+  }
+}
+
+async function cancelOrderItem(order: RechargeOrder) {
+  if (paying.value) {
+    return
+  }
+  paying.value = true
+  try {
+    await walletApi.cancelRechargeOrder(order.orderNo)
+    message.success('订单已取消')
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '取消失败')
+  } finally {
+    paying.value = false
+    await loadOrders()
+  }
+}
+
+function orderStatusLabel(order: RechargeOrder): string {
+  if (order.status === 'PAID') {
+    return '已支付'
+  }
+  if (order.status === 'CLOSED') {
+    return order.closeReason === 'TIMEOUT' ? '已超时关闭' : '已取消'
+  }
+  return '待支付'
 }
 
 // 返回个人中心：优先走浏览器历史（back 不新增记录），直接 URL 进入时兜底跳转
@@ -285,6 +366,62 @@ onMounted(loadAll)
 
       <section class="wallet-section">
         <h2 class="wallet-section-title">
+          最近订单
+          <span class="wallet-section-note">未支付订单会保留到超时，可继续支付或取消</span>
+        </h2>
+
+        <div v-if="orderLoading" class="wallet-loading">
+          <n-skeleton text :repeat="2" />
+        </div>
+
+        <EmptyState
+          v-else-if="orders.length === 0"
+          title="还没有充值订单"
+          description="下单后未支付的订单会在这里保留，超时自动关闭"
+        />
+
+        <ul v-else class="wallet-orders">
+          <li v-for="order in orders" :key="order.orderNo" class="wallet-order">
+            <div class="wallet-order-main">
+              <span class="wallet-order-title">
+                {{ order.packageCode === 'CUSTOM' ? '自定义充值' : `套餐 ${order.packageCode}` }}
+              </span>
+              <span class="wallet-order-meta">
+                {{ formatPayAmount(order.payAmount) }} · 到账 {{ formatCredit(order.creditAmount) }} 额度
+              </span>
+              <span class="wallet-order-time">
+                {{ formatArticleDateTime(order.createdAt ?? '') }}
+              </span>
+            </div>
+            <div class="wallet-order-side">
+              <span class="wallet-order-status" :class="`is-${order.status.toLowerCase()}`">
+                {{ orderStatusLabel(order) }}
+              </span>
+              <template v-if="order.status === 'PENDING'">
+                <button
+                  type="button"
+                  class="wallet-order-action"
+                  :disabled="paying"
+                  @click="continueOrderItem(order)"
+                >
+                  继续支付
+                </button>
+                <button
+                  type="button"
+                  class="wallet-order-action is-muted"
+                  :disabled="paying"
+                  @click="cancelOrderItem(order)"
+                >
+                  取消
+                </button>
+              </template>
+            </div>
+          </li>
+        </ul>
+      </section>
+
+      <section class="wallet-section">
+        <h2 class="wallet-section-title">
           账单
           <span v-if="billRetentionDays" class="wallet-section-note">
             仅显示最近 {{ billRetentionDays }} 天
@@ -319,6 +456,19 @@ onMounted(loadAll)
         </ul>
       </section>
     </div>
+
+    <!--
+      模拟支付页（与 AI 助手共用组件）：金额 + 倒计时 + 确认/取消。
+      确认后走渠道回调，前端只以「轮询订单终态」为准。
+    -->
+    <MockPayDialog
+      v-model:show="payDialogVisible"
+      :order="pendingOrder"
+      :pay-token="pendingPayToken"
+      :custom-yuan="pendingCustomYuan"
+      @paid="onPayPaid"
+      @closed="onPayClosed"
+    />
   </MainLayout>
 </template>
 
@@ -603,5 +753,101 @@ onMounted(loadAll)
 .wallet-transaction-amount small {
   color: #94a3b8;
   font-size: 12px;
+}
+
+/* ---------- 订单列表 ---------- */
+.wallet-orders {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wallet-order {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 1px solid #eef0f2;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.wallet-order-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.wallet-order-title {
+  color: #1f2937;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.wallet-order-meta {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.wallet-order-time {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.wallet-order-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.wallet-order-status {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.wallet-order-status.is-pending {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.wallet-order-status.is-paid {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.wallet-order-status.is-closed {
+  background: #f1f5f9;
+  color: #94a3b8;
+}
+
+.wallet-order-action {
+  padding: 4px 10px;
+  border: 1px solid #6366f1;
+  border-radius: 8px;
+  background: #fff;
+  color: #4f46e5;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.wallet-order-action:hover {
+  background: #eef2ff;
+}
+
+.wallet-order-action.is-muted {
+  border-color: #e5e7eb;
+  color: #64748b;
+}
+
+.wallet-order-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>

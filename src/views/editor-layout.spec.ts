@@ -15,6 +15,18 @@ describe('editor publish state actions', () => {
     expect(editorView).toContain("isEditingPublished ? '更新文章' : '发布'")
   })
 
+  it('keeps edit controls stable while the article is loading', () => {
+    expect(editorView).toContain('const editorLoading = ref(Boolean(editId.value))')
+    expect(editorView).toContain('v-if="editorLoading"')
+    expect(editorView).toContain('class="editor-actions-placeholder"')
+    expect(editorView).toContain(':disabled="editorLoading || saving"')
+    expect(editorView).toContain('editorLoading.value = false')
+    expect(editorView).toContain('min-width: 182px')
+    expect(editorView).toContain('class="editor-config-placeholder"')
+    expect(editorView).toContain('class="editor-main-placeholder"')
+    expect(editorView).toContain('<MdEditor\n        v-else')
+  })
+
   it('keeps published edits published when saving from shortcuts or leave guard', () => {
     expect(editorView).toContain('async function handleSavePublishedChange()')
     expect(editorView).toContain('saveArticle(ARTICLE_STATUS.PUBLISHED,')

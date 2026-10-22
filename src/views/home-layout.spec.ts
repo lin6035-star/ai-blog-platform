@@ -296,7 +296,6 @@ describe('home information-flow layout', () => {
     expect(detail).toContain('内容纲要')
     expect(detail).toContain('@click="scrollToOutlineItem(item.id)"')
     expect(detail).toContain('关注')
-    expect(detail).toContain('私信')
 
     expect(css).toContain('grid-template-columns: 56px minmax(0, 1fr) 260px')
     expect(css).toContain('.detail-right-rail')

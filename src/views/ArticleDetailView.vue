@@ -45,6 +45,7 @@ const shareCount = ref(0)
 const liking = ref(false)
 const favoriting = ref(false)
 const authorProfile = ref<PublicUserInfo | null>(null)
+const authorProfileLoading = ref(false)
 const followBusy = ref(false)
 const detailBackBarRef = ref<HTMLElement | null>(null)
 const isDetailBackBarStuck = ref(false)
@@ -81,16 +82,26 @@ const authorInitial = computed(() => authorDisplayName.value.slice(0, 1).toUpper
 
 async function loadAuthorProfile() {
   if (!article.value?.authorId) return
+  const authorId = article.value.authorId
+  authorProfileLoading.value = true
+  authorProfile.value = null
   try {
-    const result = await publicUserApi.getInfo(article.value.authorId)
+    const result = await publicUserApi.getInfo(authorId)
+    if (article.value?.authorId !== authorId) return
     authorProfile.value = result.data
   } catch {
     // 作者信息加载失败不阻塞页面
+  } finally {
+    if (article.value?.authorId === authorId) {
+      authorProfileLoading.value = false
+    }
   }
 }
 
 async function loadArticle() {
   loading.value = true
+  authorProfile.value = null
+  authorProfileLoading.value = false
 
   try {
     const result = await articleApi.getDetail(String(route.params.id))
@@ -143,10 +154,6 @@ function toggleImmersiveReading() {
   const next = !isImmersiveReading.value
   leftCollapsed.value = next
   rightCollapsed.value = next
-}
-
-function showComingSoon(feature: string) {
-  message.info(`${feature}功能后面接入，先占个位置`)
 }
 
 function goToAuthorProfile(tab?: string) {
@@ -488,10 +495,11 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="detail-author-actions">
-            <button v-if="!authorProfile?.self" type="button" :disabled="followBusy || !authorProfile" @click="handleAuthorFollow">
-              {{ followBusy ? '…' : authorProfile?.followed ? '已关注' : '关注' }}
+            <span v-if="authorProfileLoading" class="detail-author-actions-placeholder" aria-hidden="true" />
+            <button v-else-if="authorProfile && !authorProfile.self" type="button" :disabled="followBusy" @click="handleAuthorFollow">
+              {{ followBusy ? '…' : authorProfile.followed ? '已关注' : '关注' }}
             </button>
-            <button type="button" @click="showComingSoon('私信')">私信</button>
+            <span v-else-if="authorProfile?.self" class="detail-author-self">作者本人</span>
           </div>
         </section>
 

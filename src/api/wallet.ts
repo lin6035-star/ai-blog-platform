@@ -1,6 +1,7 @@
 import request from '@/utils/request'
 import type { PageData } from '@/types/result'
 import type {
+  PaymentInitiate,
   RechargeOrder,
   WalletBillEntry,
   WalletCustomConfig,
@@ -58,12 +59,44 @@ export const walletApi = {
   },
 
   /**
-   * 支付（虚拟支付）。
+   * 发起支付（预支付）：创建/复用一条支付单，返回支付凭证。
    *
-   * 服务端幂等由「订单号 + 状态 CAS」保证，重复调用只会加一次额度——
-   * 所以这里不需要 Idempotency-Key，也不需要前端做去重。
+   * ⚠️ 调用后订单**仍是 PENDING**：真实支付里「发起支付」和「入账」之间隔着
+   * 用户操作与渠道回调。入账只能等回调，前端不能把这里当成支付成功。
    */
-  payRechargeOrder(orderNo: string) {
-    return request.post<RechargeOrder>(`/wallet/recharge/orders/${orderNo}/pay`)
+  initiatePayment(orderNo: string) {
+    return request.post<PaymentInitiate>(`/wallet/recharge/orders/${orderNo}/pay`)
+  },
+
+  /**
+   * 模拟支付页确认付款（仅虚拟渠道）。
+   *
+   * 服务端会以渠道身份构造签名回调、走真实的回调链路（验签 / 幂等 / 金额校验），
+   * 所以这个接口返回成功也不代表一定入账——以订单详情查询为准。
+   */
+  mockPay(orderNo: string, payToken: string) {
+    return request.post<RechargeOrder>(`/wallet/recharge/orders/${orderNo}/mock-pay`, { payToken })
+  },
+
+  /** 订单详情（会触发惰性关单：已过期的订单直接返回 CLOSED） */
+  getRechargeOrder(orderNo: string) {
+    return request.get<RechargeOrder>(`/wallet/recharge/orders/${orderNo}`)
+  },
+
+  /** 我的充值订单（分页，按创建时间倒序） */
+  listRechargeOrders(page = 1, pageSize = 10) {
+    return request.get<PageData<RechargeOrder>>('/wallet/recharge/orders', {
+      params: { page, pageSize },
+    })
+  },
+
+  /** 用户取消待支付订单 */
+  cancelRechargeOrder(orderNo: string) {
+    return request.post<RechargeOrder>(`/wallet/recharge/orders/${orderNo}/cancel`)
+  },
+
+  /** 主动查单：回调丢失时手动补单（定时任务也会跑） */
+  syncRechargeOrder(orderNo: string) {
+    return request.post<boolean>(`/wallet/recharge/orders/${orderNo}/sync`)
   },
 }

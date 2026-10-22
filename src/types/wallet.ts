@@ -58,7 +58,16 @@ export interface WalletCustomConfig {
   creditPerYuan: number
 }
 
-export type RechargeOrderStatus = 'PENDING' | 'PAID' | 'CANCELLED'
+/**
+ * 充值订单状态。
+ *
+ * PENDING = 待支付；PAID = 已支付（回调入账成功）；CLOSED = 已关闭（超时 / 用户取消）。
+ * 真实支付里「前端点了支付」不等于 PAID——只有渠道回调落库后才会变成 PAID。
+ */
+export type RechargeOrderStatus = 'PENDING' | 'PAID' | 'CLOSED'
+
+/** 订单关闭原因 */
+export type RechargeCloseReason = 'TIMEOUT' | 'USER_CANCELLED'
 
 export interface RechargeOrder {
   orderNo: string
@@ -66,8 +75,29 @@ export interface RechargeOrder {
   payAmount: number
   creditAmount: number
   status: RechargeOrderStatus
+  /** 支付截止时间（ISO 字符串）；前端用它做倒计时 */
+  expireAt?: string | null
   paidAt?: string | null
+  closedAt?: string | null
+  closeReason?: RechargeCloseReason | string | null
   createdAt?: string | null
+}
+
+/**
+ * 发起支付返回的预支付凭证。
+ *
+ * 真实支付里这里会有渠道给的 prepay_id / paySign；虚拟支付只有 `payToken`，
+ * 前端拿它打开「模拟支付页」。
+ */
+export interface PaymentInitiate {
+  orderNo: string
+  paymentNo?: string | null
+  channel?: string | null
+  payToken?: string | null
+  payAmount: number
+  creditAmount: number
+  orderStatus: RechargeOrderStatus
+  expireAt?: string | null
 }
 
 /**

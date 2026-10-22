@@ -13,6 +13,7 @@ import { formatCredit, displayCredit } from '@/utils/format'
  * 整卡是一个 router-link ——卡片本身就是进入钱包页的入口，不再另加一条导航链接。
  */
 const wallet = ref<WalletInfo | null>(null)
+const walletLoading = ref(true)
 
 /**
  * 负余额的三态（设计稿 §3）。
@@ -43,7 +44,9 @@ onMounted(async () => {
     const res = await walletApi.getWallet()
     wallet.value = res.data
   } catch {
-    // 余额是锦上添花：拿不到就整块不渲染，不影响个人中心其余内容
+    // 余额是锦上添花：拿不到时保留固定占位，不影响个人中心其余内容的布局
+  } finally {
+    walletLoading.value = false
   }
 })
 </script>
@@ -56,12 +59,23 @@ onMounted(async () => {
     </div>
     <div class="wallet-card-hint" :class="`is-${tone}`">{{ hint }}</div>
   </router-link>
+  <div v-else-if="walletLoading" class="wallet-card wallet-card-placeholder" aria-hidden="true">
+    <span class="wallet-card-skeleton wallet-card-skeleton-title" />
+    <span class="wallet-card-skeleton wallet-card-skeleton-value" />
+    <span class="wallet-card-skeleton wallet-card-skeleton-hint" />
+  </div>
+  <div v-else class="wallet-card wallet-card-unavailable">
+    <div class="wallet-card-title">我的额度</div>
+    <div class="wallet-card-hint">额度暂不可用</div>
+  </div>
 </template>
 
 <style scoped>
 .wallet-card {
   display: grid;
   gap: 4px;
+  min-height: 102px;
+  box-sizing: border-box;
   padding: 14px 20px;
   border-top: 1px solid #eef0f2;
   text-decoration: none;
@@ -70,6 +84,35 @@ onMounted(async () => {
 
 .wallet-card:hover {
   background-color: #f8fafc;
+}
+
+.wallet-card-placeholder {
+  align-content: start;
+}
+
+.wallet-card-unavailable {
+  align-content: center;
+}
+
+.wallet-card-skeleton {
+  display: block;
+  border-radius: 4px;
+  background: #edf1f1;
+}
+
+.wallet-card-skeleton-title {
+  width: 54px;
+  height: 12px;
+}
+
+.wallet-card-skeleton-value {
+  width: 86px;
+  height: 26px;
+}
+
+.wallet-card-skeleton-hint {
+  width: 116px;
+  height: 12px;
 }
 
 .wallet-card-title {

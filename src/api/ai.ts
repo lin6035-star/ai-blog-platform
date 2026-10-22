@@ -140,8 +140,21 @@ export interface AgentWriteProposal {
   payYuan?: string
 }
 
-/** Agent 思考步骤（V2.3 / V3.10）：status = RUNNING / SUCCESS / FAILED / SKIPPED */
-export interface AgentStepView {
+/**
+ * 写动作确认结果（2026-10-19）。
+ *
+ * 钱包域充值只做到「创建订单 + 发起支付」——AI 不替用户确认付款，
+ * 前端必须靠 `result.orderNo / payToken` 打开支付窗口，由用户点确认。
+ * 其他域的写动作没有前端后续动作，忽略 `result` 即可。
+ */
+export interface AgentWriteActionConfirmView {
+  message: string
+  actionType: AgentWriteProposal['actionType']
+  /** 执行器载荷：钱包域含 orderNo / paymentNo / payToken / payAmount / creditAmount / expireAt / orderStatus */
+  result?: Record<string, unknown> | null
+}
+
+/** Agent 思考步骤（V2.3 / V3.10）：status = RUNNING / SUCCESS / FAILED / SKIPPED */export interface AgentStepView {
   stepNo: number
   actionType: string
   status: 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SKIPPED'
@@ -1109,9 +1122,9 @@ export const aiApi = {
     return request.post<string>(`/ai/agent-runs/${agentRunId}/workflow-suggestion/cancel`)
   },
 
-  /** V2.4：确认写动作提案（标题匹配 → 执行），返回执行结果文案 */
+  /** V2.4：确认写动作提案（标题匹配 → 执行）；2026-10-19 起返回结构含执行器载荷（钱包域拿支付凭证开支付窗口） */
   confirmWriteAction(agentRunId: string) {
-    return request.post<string>(`/ai/agent-runs/${agentRunId}/write-action/confirm`)
+    return request.post<AgentWriteActionConfirmView>(`/ai/agent-runs/${agentRunId}/write-action/confirm`)
   },
 
   /** V2.4：取消写动作提案（不执行任何修改） */
