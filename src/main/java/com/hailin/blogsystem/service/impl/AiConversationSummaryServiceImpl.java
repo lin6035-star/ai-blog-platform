@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.mq.MemoryExtractionEvent;
 import com.hailin.blogsystem.entity.AiConversationSummaries;
 import com.hailin.blogsystem.entity.AiMessages;
 import com.hailin.blogsystem.entity.AiSessions;
@@ -53,6 +54,20 @@ public class AiConversationSummaryServiceImpl extends ServiceImpl<AiConversation
         } catch (Exception e) {
             log.warn("Conversation Summary 压缩失败，userId={}, sessionId={}", userId, sessionId, e);
         }
+    }
+
+    /**
+     * RocketMQ 消费端入口：同步执行，异常向上抛给 RocketMQ 重试。
+     *
+     * <p>并发互斥仍由 {@code doCompress} 里的 compressing 行锁承担——
+     * MQ 重复投递最多是"多做一次无效检查"，不会重复压缩同一段消息。</p>
+     */
+    @Override
+    public void processEvent(MemoryExtractionEvent event) {
+        if (event == null || event.eventType() != MemoryExtractionEvent.EventType.SESSION_SUMMARY) {
+            throw new IllegalArgumentException("Unsupported conversation summary event");
+        }
+        doCompress(event.userId(), event.sessionId());
     }
 
 

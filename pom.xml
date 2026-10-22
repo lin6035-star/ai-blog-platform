@@ -184,6 +184,13 @@
             <version>8.15.5</version>
         </dependency>
 
+        <!-- RocketMQ：第一阶段用于可靠投递 AI 记忆提取事件。 -->
+        <dependency>
+            <groupId>org.apache.rocketmq</groupId>
+            <artifactId>rocketmq-spring-boot-starter</artifactId>
+            <version>2.3.2</version>
+        </dependency>
+
         <!-- 可观测性：traceId 贯穿（V4⑥ 落地动作）。actuator 只作为 tracing 自动配置的依赖，
              web 端点零暴露；版本由 Spring Boot BOM 管理，不自行 pin。 -->
         <dependency>

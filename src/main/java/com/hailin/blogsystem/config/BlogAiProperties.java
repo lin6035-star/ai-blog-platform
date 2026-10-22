@@ -95,6 +95,8 @@ public class BlogAiProperties {
 
     @Data
     public static class Extraction {
+        /** 显式开启后才使用 RocketMQ；默认保留原有 @Async 链路。 */
+        private boolean useMq = false;
         private int coreSize = 1;
         private int maxSize = 2;
         private int queueCapacity = 30;

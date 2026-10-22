@@ -15,6 +15,12 @@ server:
   servlet:
     context-path: /
 
+# RocketMQ：第一阶段只承载 AI 记忆提取事件，秒杀仍使用 Redis Stream。
+rocketmq:
+  name-server: ${ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+  producer:
+    group: ${ROCKETMQ_PRODUCER_GROUP:blog-memory-producer}
+
 # 连接池
 spring:
   application:
@@ -419,7 +425,9 @@ blog:
     memory:
       enabled: true
       max-messages: 40
+      memory-extraction-topic: ${AI_MEMORY_EXTRACTION_TOPIC:ai-memory-extraction}
       extraction:
+        use-mq: ${AI_MEMORY_EXTRACTION_USE_MQ:false}
         core-size: 1
         max-size: 2
         queue-capacity: 30

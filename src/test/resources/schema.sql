@@ -225,6 +225,14 @@ CREATE INDEX IF NOT EXISTS idx_memory_candidate_user_type_key ON ai_user_memory_
 CREATE INDEX IF NOT EXISTS idx_memory_candidate_target_memory_id ON ai_user_memory_candidates (target_memory_id);
 CREATE INDEX IF NOT EXISTS idx_memory_candidate_status_created_at ON ai_user_memory_candidates (status, created_at);
 
+CREATE TABLE IF NOT EXISTS ai_memory_extraction_events (
+    event_id VARCHAR(128) NOT NULL PRIMARY KEY,
+    event_type VARCHAR(32) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
 
 CREATE TABLE IF NOT EXISTS ai_workflow_step_logs (
                                                      id BIGINT NOT NULL PRIMARY KEY COMMENT '主键，使用 MyBatis-Plus ASSIGN_ID',

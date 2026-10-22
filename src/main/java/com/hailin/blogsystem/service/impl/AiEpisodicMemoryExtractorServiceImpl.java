@@ -3,6 +3,7 @@ package com.hailin.blogsystem.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.mq.MemoryExtractionEvent;
 import com.hailin.blogsystem.entity.AiMessages;
 import com.hailin.blogsystem.entity.dto.EpisodicMemoryExtractResult;
 import com.hailin.blogsystem.mapper.AiMessageMapper;
@@ -52,6 +53,28 @@ public class AiEpisodicMemoryExtractorServiceImpl implements
             String userMessage,
             String assistantReply
     ){
+        try {
+            doExtract(userId, sessionId, userMessage, assistantReply);
+        } catch (Exception e) {
+            log.warn("Episodic Memory 提取失败，userId={}, sessionId={}", userId, sessionId, e);
+        }
+    }
+
+    /**
+     * RocketMQ 消费端入口：同步执行，异常向上抛给 RocketMQ 重试。
+     *
+     * <p>触发判断（关键词 / 消息数取模）留在这里而不是生产端：
+     * "会话消息数"在消费时才是权威值，生产端预筛会算错窗口。</p>
+     */
+    @Override
+    public void processEvent(MemoryExtractionEvent event) {
+        if (event == null || event.eventType() != MemoryExtractionEvent.EventType.EPISODIC) {
+            throw new IllegalArgumentException("Unsupported episodic memory event");
+        }
+        doExtract(event.userId(), event.sessionId(), event.userMessage(), event.assistantReply());
+    }
+
+    private void doExtract(Long userId, Long sessionId, String userMessage, String assistantReply) {
         if (userId == null || sessionId == null) {
             return;
         }
@@ -66,25 +89,20 @@ public class AiEpisodicMemoryExtractorServiceImpl implements
             return;
         }
 
-        try {
-            List<AiMessages> windowMessages = listRecentWindowMessages(sessionId);
-            List<EpisodicMemoryExtractResult> results = extractByLlm(windowMessages);
+        List<AiMessages> windowMessages = listRecentWindowMessages(sessionId);
+        List<EpisodicMemoryExtractResult> results = extractByLlm(windowMessages);
 
-            if (results.isEmpty()) {
-                log.info("Episodic Memory 提取结果为空，userId={}, sessionId={}", userId, sessionId);
-                return;
-            }
-
-            for (EpisodicMemoryExtractResult result : results) {
-                aiEpisodicMemoryService.saveExtractedMemory(userId, sessionId, result);
-            }
-
-            log.info("Episodic Memory 提取完成，userId={}, sessionId={}, count={}",
-                    userId, sessionId, results.size());
-        } catch (Exception e) {
-            log.warn("Episodic Memory 提取失败，userId={}, sessionId={}", userId, sessionId, e);
+        if (results.isEmpty()) {
+            log.info("Episodic Memory 提取结果为空，userId={}, sessionId={}", userId, sessionId);
+            return;
         }
 
+        for (EpisodicMemoryExtractResult result : results) {
+            aiEpisodicMemoryService.saveExtractedMemory(userId, sessionId, result);
+        }
+
+        log.info("Episodic Memory 提取完成，userId={}, sessionId={}, count={}",
+                userId, sessionId, results.size());
     }
 
     private long countSessionMessages(Long sessionId) {

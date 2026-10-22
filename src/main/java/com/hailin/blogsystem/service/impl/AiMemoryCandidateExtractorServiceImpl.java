@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hailin.blogsystem.ai.memory.AiMemoryRetrieveService;
+import com.hailin.blogsystem.ai.mq.MemoryExtractionEvent;
 import com.hailin.blogsystem.entity.AiUserMemoryCandidate;
 import com.hailin.blogsystem.entity.dto.AiMemoryCandidateExtractResult;
 import com.hailin.blogsystem.entity.dto.AiMemoryDecisionResult;
@@ -51,30 +52,45 @@ public class AiMemoryCandidateExtractorServiceImpl implements AiMemoryCandidateE
     @Async("memoryCandidateTaskExecutor")
     public void extractAfterChat(Long userId, Long sessionId, Long messageId,
                                   String userMessage, String assistantReply) {
-        if (userId == null) {
+        if (!shouldExtractCandidate(userMessage)) {
             return;
         }
-        if (!shouldExtract(userMessage)) {
-            return;
-        }
-
-        try{
-            List<AiMemoryCandidateExtractResult> results = extractCandidatesByLlm(userMessage,assistantReply);
-            if(results == null || results.isEmpty()){
-                log.info("候选记忆提取结果为空，userId={}, sessionId={}", userId, sessionId);
-                return;
-            }
-
-            for(AiMemoryCandidateExtractResult result : results){
-                saveExtractedCandidate(userId,sessionId,messageId,result);
-            }
-
-            log.info("候选记忆提取完成，userId={}, sessionId={}, count={}", userId, sessionId, results.size());
+        try {
+            processCandidate(userId, sessionId, messageId, userMessage, assistantReply);
         } catch (Exception e) {
             log.warn("候选记忆提取失败，userId={}, sessionId={}", userId, sessionId, e);
         }
+    }
 
+    /** RocketMQ 消费端调用：异常必须向上抛出，交给 RocketMQ 重试。 */
+    public void processEvent(MemoryExtractionEvent event) {
+        if (event == null || event.eventType() != MemoryExtractionEvent.EventType.CANDIDATE) {
+            throw new IllegalArgumentException("Unsupported memory extraction event");
+        }
+        if (!shouldExtractCandidate(event.userMessage())) {
+            return;
+        }
+        processCandidate(event.userId(), event.sessionId(), event.userMessageId(),
+                event.userMessage(), event.assistantReply());
+    }
 
+    private void processCandidate(Long userId, Long sessionId, Long messageId,
+                                  String userMessage, String assistantReply) {
+        if (userId == null) {
+            return;
+        }
+
+        List<AiMemoryCandidateExtractResult> results = extractCandidatesByLlm(userMessage,assistantReply);
+        if(results == null || results.isEmpty()){
+            log.info("候选记忆提取结果为空，userId={}, sessionId={}", userId, sessionId);
+            return;
+        }
+
+        for(AiMemoryCandidateExtractResult result : results){
+            saveExtractedCandidate(userId,sessionId,messageId,result);
+        }
+
+        log.info("候选记忆提取完成，userId={}, sessionId={}, count={}", userId, sessionId, results.size());
     }
 
     // ================================================================
@@ -91,7 +107,8 @@ public class AiMemoryCandidateExtractorServiceImpl implements AiMemoryCandidateE
      * ② 第一人称 + 动词的陈述句（用户画像 / 偏好 / 项目状态的典型载体）；
      * ③ 回答风格类祈使句（不含第一人称，但同样是稳定偏好，如"回答直接一点"）。
      */
-    private boolean shouldExtract(String userMessage) {
+    @Override
+    public boolean shouldExtractCandidate(String userMessage) {
         if (userMessage == null || userMessage.isBlank()) {
             return false;
         }
@@ -136,6 +153,11 @@ public class AiMemoryCandidateExtractorServiceImpl implements AiMemoryCandidateE
                 "不要那么",
                 "别那么"
         );
+    }
+
+    /** 保留旧测试和内部语义名称，实际规则统一由公开 seam 承担。 */
+    private boolean shouldExtract(String userMessage) {
+        return shouldExtractCandidate(userMessage);
     }
 
     private boolean containsAny(String text, String... keywords) {

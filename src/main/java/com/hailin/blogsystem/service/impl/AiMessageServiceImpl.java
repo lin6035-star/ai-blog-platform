@@ -45,6 +45,7 @@ import com.hailin.blogsystem.ai.workflow.WorkflowRunManager;
 import com.hailin.blogsystem.entity.dto.AiWorkflowLearningPlanDTO;
 import com.hailin.blogsystem.ai.rag.ArticleRagPromptBuilder;
 import com.hailin.blogsystem.ai.rag.ArticleRagSearchService;
+import com.hailin.blogsystem.ai.mq.MemoryExtractionDispatcher;
 import com.hailin.blogsystem.ai.tool.AiToolActionRegistry;
 import com.hailin.blogsystem.ai.tool.AiUserProfileTools;
 import com.hailin.blogsystem.ai.workflow.AiWorkflowStepEmitter;
@@ -95,15 +96,13 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
     private final ArticlesService articlesService;
     private final ArticleRagPromptBuilder articleRagPromptBuilder;
     private final ArticleRagSearchService articleRagSearchService;
-    private final AiMemoryCandidateExtractorService aiMemoryCandidateExtractorService;
+    private final MemoryExtractionDispatcher memoryExtractionDispatcher;
     private final AiWorkflowRunService aiWorkflowRunService;
     private final AiWorkflowRunMapper aiWorkflowRunMapper;
     private final AiWorkflowStepLogMapper aiWorkflowStepLogMapper;
     private final CreateArticleWorkflowHandler createArticleWorkflowHandler;
     private final WorkflowContextSupport workflowContextSupport;
     private final WorkflowHandlerRegistry workflowHandlerRegistry;
-    private final AiEpisodicMemoryExtractorService aiEpisodicMemoryExtractorService;
-    private final AiConversationSummaryService aiConversationSummaryService;
     private final AiSessionService aiSessionService;
     private final ObjectMapper objectMapper;
     private final LearningPlansService learningPlansService;
@@ -1241,7 +1240,7 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             aiBillingService.bindResource(billingHandle, String.valueOf(assistantMessage.getId()));
 
             // 异步提取候选记忆（规则预筛命中才写入，不会阻塞 SSE）
-            aiMemoryCandidateExtractorService.extractAfterChat(
+            memoryExtractionDispatcher.dispatchCandidate(
                     userId,
                     sessionId,
                     userMessage.getId(),
@@ -1250,7 +1249,7 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             );
 
             // 异步提取情景记忆：记录重要事件、决策、里程碑和计划，不阻塞 SSE
-            aiEpisodicMemoryExtractorService.extractAfterChat(
+            memoryExtractionDispatcher.dispatchEpisodic(
                     userId,
                     sessionId,
                     userMessage.getId(),
@@ -1260,7 +1259,8 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
             );
 
             //会话压缩
-            aiConversationSummaryService.compressAfterChat(userId, sessionId);
+            memoryExtractionDispatcher.dispatchSessionSummary(
+                    userId, sessionId, assistantMessage.getId());
 
             AiSessions updatedSession = getOwnedSession(sessionId, userId);
 
@@ -1603,14 +1603,15 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                     billingSupport.bindResource(billingHandle, String.valueOf(result.agentRunId()));
                     billed.set(true);
 
-                    aiMemoryCandidateExtractorService.extractAfterChat(
+                    memoryExtractionDispatcher.dispatchCandidate(
                             userId,
                             sessionId,
                             userMessage.getId(),
                             message,
                             reply
                     );
-                    aiEpisodicMemoryExtractorService.extractAfterChat(
+                    // 情景记忆：MQ 开启时投递事件，否则回退原 @Async（语义与迁移前一致）
+                    memoryExtractionDispatcher.dispatchEpisodic(
                             userId,
                             sessionId,
                             userMessage.getId(),
@@ -1618,7 +1619,9 @@ public class AiMessageServiceImpl extends ServiceImpl<AiMessageMapper, AiMessage
                             message,
                             reply
                     );
-                    aiConversationSummaryService.compressAfterChat(userId, sessionId);
+                    // 会话摘要：每轮结束触发，是否真的压缩由实现内部的批次阈值/行锁决定
+                    memoryExtractionDispatcher.dispatchSessionSummary(
+                            userId, sessionId, assistantMessage.getId());
 
                     AiSessions updatedSession = getOwnedSession(sessionId, userId);
 
