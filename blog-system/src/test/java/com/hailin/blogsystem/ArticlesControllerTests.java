@@ -1,0 +1,346 @@
+package com.hailin.blogsystem;
+
+import com.hailin.blogsystem.ai.rag.ArticleRagIndexService;
+import com.hailin.blogsystem.ai.rag.ArticleRagSyncService;
+import com.hailin.blogsystem.entity.Articles;
+import com.hailin.blogsystem.constants.BlogConstants;
+import com.hailin.blogsystem.constants.RedisConstants;
+import com.hailin.blogsystem.service.ArticlesService;
+import com.hailin.blogsystem.utils.JwtUtil;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+
+import java.util.List;
+import java.util.Set;
+
+import static org.hamcrest.Matchers.hasSize;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+@SpringBootTest
+@AutoConfigureMockMvc
+class ArticlesControllerTests {
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @Autowired
+    private ArticlesService articlesService;
+
+    @Autowired
+    private JwtUtil jwtUtil;
+
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
+
+    @MockBean
+    private ArticleRagSyncService articleRagSyncService;
+
+    @BeforeEach
+    void resetArticleState() {
+        Articles article1 = articlesService.getById(1L);
+        article1.setViewCount(12);
+
+        Articles article3 = articlesService.getById(3L);
+        article3.setViewCount(100);
+
+        Articles article4 = articlesService.getById(4L);
+        article4.setViewCount(1);
+
+        articlesService.updateBatchById(List.of(article1, article3, article4));
+        cleanRedisKeys();
+    }
+
+    private void cleanRedisKeys() {
+        try {
+            deleteByPattern(RedisConstants.ARTICLE_LIST_KEY_PREFIX + "*");
+            deleteByPattern(RedisConstants.ARTICLE_DETAIL_KEY_PREFIX + "*");
+            deleteByPattern(RedisConstants.ARTICLE_VIEW_KEY_PREFIX + "*");
+            stringRedisTemplate.delete(RedisConstants.ARTICLE_HOT_KEY);
+            stringRedisTemplate.delete(RedisConstants.CATEGORY_LIST_KEY);
+        } catch (Exception ignored) {
+            // Redis 不可用时，业务会走 DB 兜底；测试清理也不阻断。
+        }
+    }
+
+    private void deleteByPattern(String pattern) {
+        Set<String> keys = stringRedisTemplate.keys(pattern);
+        if (keys != null && !keys.isEmpty()) {
+            stringRedisTemplate.delete(keys);
+        }
+    }
+
+    @Test
+    void hiddenArticleDetailVisibleToOwner() throws Exception {
+        // V3.7 修复：隐藏文章作者本人可见（阅读页预览入口），游客/他人仍不可见
+        setHidden(1L);
+        try {
+            String authorToken = jwtUtil.generateToken(100L, 0);
+            mockMvc.perform(get("/api/articles/1")
+                            .header("Authorization", "Bearer " + authorToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value(0))
+                    .andExpect(jsonPath("$.data.id").value(1));
+        } finally {
+            restorePublished(1L);
+        }
+    }
+
+    @Test
+    void hiddenArticleDetailInvisibleToGuest() throws Exception {
+        setHidden(1L);
+        try {
+            mockMvc.perform(get("/api/articles/1"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value(40400));
+        } finally {
+            restorePublished(1L);
+        }
+    }
+
+    @Test
+    void hiddenArticleDetailInvisibleToOtherLoggedInUser() throws Exception {
+        setHidden(1L);
+        try {
+            String readerToken = jwtUtil.generateToken(101L, 0);
+            mockMvc.perform(get("/api/articles/1")
+                            .header("Authorization", "Bearer " + readerToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value(40400));
+        } finally {
+            restorePublished(1L);
+        }
+    }
+
+    @Test
+    void hiddenArticleNullCacheDoesNotBlockOwnerPreview() throws Exception {
+        setHidden(1L);
+        try {
+            mockMvc.perform(get("/api/articles/1"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value(40400));
+
+            String authorToken = jwtUtil.generateToken(100L, 0);
+            mockMvc.perform(get("/api/articles/1")
+                            .header("Authorization", "Bearer " + authorToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value(0))
+                    .andExpect(jsonPath("$.data.id").value(1));
+        } finally {
+            restorePublished(1L);
+        }
+    }
+
+    @Test
+    void visibilityNullCacheIsStableForOtherLoggedInUser() throws Exception {
+        setHidden(1L);
+        try {
+            stringRedisTemplate.opsForValue().set(
+                    RedisConstants.ARTICLE_DETAIL_KEY_PREFIX + 1,
+                    RedisConstants.CACHE_NULL_VALUE + ":invisible:100:2"
+            );
+
+            String readerToken = jwtUtil.generateToken(101L, 0);
+            mockMvc.perform(get("/api/articles/1")
+                            .header("Authorization", "Bearer " + readerToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value(40400));
+
+            org.assertj.core.api.Assertions.assertThat(
+                            stringRedisTemplate.opsForValue().get(RedisConstants.ARTICLE_DETAIL_KEY_PREFIX + 1))
+                    .isEqualTo(RedisConstants.CACHE_NULL_VALUE + ":invisible:100:2");
+        } finally {
+            restorePublished(1L);
+        }
+    }
+
+    /** 隐藏文章并清详情缓存（模拟 hideArticle 副作用，避免命中旧 PUBLISHED 缓存） */
+    private void setHidden(Long id) {
+        Articles article = articlesService.getById(id);
+        article.setStatus(BlogConstants.ArticlesStatus.HIDDEN);
+        articlesService.updateById(article);
+        try {
+            stringRedisTemplate.delete(RedisConstants.ARTICLE_DETAIL_KEY_PREFIX + id);
+        } catch (Exception ignored) {
+            // Redis 不可用则跳过（缓存命中场景在该环境下不存在）
+        }
+    }
+
+    private void restorePublished(Long id) {
+        Articles article = articlesService.getById(id);
+        article.setStatus(BlogConstants.ArticlesStatus.PUBLISHED);
+        articlesService.updateById(article);
+    }
+
+    @Test
+    void getsPublishedArticlesPage() throws Exception {
+        mockMvc.perform(get("/api/articles")
+                        .param("page", "1")
+                        .param("pageSize", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.list", hasSize(3)))
+                .andExpect(jsonPath("$.data.list[0].id").value(4))
+                .andExpect(jsonPath("$.data.list[0].authorName").value("Author Nick"))
+                .andExpect(jsonPath("$.data.list[0].categoryName").value("后端"));
+        // total / page / pageSize 在游标分页下恒为 null（PageVO 注释：判断还有没有下一页要看 nextCursor），
+        // 所以不再断言它们；游标分页本身的行为由 ArticleCursorPaginationTests 覆盖
+    }
+
+    @Test
+    void createsPublishedArticleWithPublishedAt() throws Exception {
+        String authorToken = jwtUtil.generateToken(100L, 0);
+
+        try {
+            mockMvc.perform(post("/api/users/me/articles")
+                            .header("Authorization", "Bearer " + authorToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("""
+                                    {
+                                      "categoryId": 1,
+                                      "title": "New Published Article",
+                                      "summary": "New summary",
+                                      "content": "New content",
+                                      "coverUrl": "",
+                                      "status": 1
+                                    }
+                                    """))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value(0))
+                    .andExpect(jsonPath("$.data").isNumber());
+
+            Articles article = articlesService.lambdaQuery()
+                    .eq(Articles::getTitle, "New Published Article")
+                    .one();
+
+            org.assertj.core.api.Assertions.assertThat(article.getStatus()).isEqualTo(1);
+            org.assertj.core.api.Assertions.assertThat(article.getPublishedAt()).isNotNull();
+        } finally {
+            articlesService.lambdaUpdate()
+                    .eq(Articles::getTitle, "New Published Article")
+                    .remove();
+        }
+    }
+
+    @Test
+    void filtersPublishedArticlesByCategoryId() throws Exception {
+        mockMvc.perform(get("/api/articles")
+                        .param("page", "1")
+                        .param("pageSize", "10")
+                        .param("categoryId", "1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.list", hasSize(3)));
+        // total 恒为 null（游标分页），理由同上
+
+        mockMvc.perform(get("/api/articles")
+                        .param("page", "1")
+                        .param("pageSize", "10")
+                        .param("categoryId", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.list", hasSize(0)))
+                .andExpect(jsonPath("$.data.list", hasSize(0)));
+        // total 恒为 null（游标分页）；「查不到数据」用 list 为空来表达
+    }
+
+    @Test
+    void sortsPublishedArticlesWithinCategory() throws Exception {
+        mockMvc.perform(get("/api/articles")
+                        .param("page", "1")
+                        .param("pageSize", "10")
+                        .param("categoryId", "1")
+                        .param("sort", "recommend"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.list[0].id").value(3))
+                .andExpect(jsonPath("$.data.list[0].viewCount").value(100));
+
+        mockMvc.perform(get("/api/articles")
+                        .param("page", "1")
+                        .param("pageSize", "10")
+                        .param("categoryId", "1")
+                        .param("sort", "latest"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.list[0].id").value(4))
+                .andExpect(jsonPath("$.data.list[0].publishedAt").value("2026-07-03T10:00:00"));
+    }
+
+    @Test
+    void getsPublishedArticleDetail() throws Exception {
+        mockMvc.perform(get("/api/articles/1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.id").value(1))
+                .andExpect(jsonPath("$.data.title").value("Published Article"))
+                .andExpect(jsonPath("$.data.authorName").value("Author Nick"))
+                .andExpect(jsonPath("$.data.categoryName").value("后端"))
+                .andExpect(jsonPath("$.data.content").value("Published content"));
+    }
+
+    @Test
+    void doesNotIncreaseViewCountForAnonymousVisitor() throws Exception {
+        mockMvc.perform(get("/api/articles/1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0));
+
+        Articles article = articlesService.getById(1L);
+        org.assertj.core.api.Assertions.assertThat(article.getViewCount()).isEqualTo(12);
+    }
+
+    @Test
+    void doesNotIncreaseViewCountForAuthor() throws Exception {
+        String authorToken = jwtUtil.generateToken(100L, 0);
+
+        mockMvc.perform(get("/api/articles/1")
+                        .header("Authorization", "Bearer " + authorToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0));
+
+        Articles article = articlesService.getById(1L);
+        org.assertj.core.api.Assertions.assertThat(article.getViewCount()).isEqualTo(12);
+    }
+
+    @Test
+    void increasesViewCountForLoggedInNonAuthor() throws Exception {
+        String readerToken = jwtUtil.generateToken(101L, 0);
+
+        mockMvc.perform(get("/api/articles/1")
+                        .header("Authorization", "Bearer " + readerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.viewCount").value(13));
+    }
+
+    @Test
+    void rejectsDraftArticleDetail() throws Exception {
+        mockMvc.perform(get("/api/articles/2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(40400))
+                .andExpect(jsonPath("$.message").value("article not found"));
+    }
+
+    @Test
+    void getsCategoriesInSortOrder() throws Exception {
+        mockMvc.perform(get("/api/categories"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data", hasSize(6)))
+                .andExpect(jsonPath("$.data[0].code").value("backend"))
+                .andExpect(jsonPath("$.data[1].code").value("frontend"))
+                .andExpect(jsonPath("$.data[2].code").value("ai-agent"))
+                .andExpect(jsonPath("$.data[3].code").value("dev-tools"))
+                .andExpect(jsonPath("$.data[4].code").value("code-life"))
+                .andExpect(jsonPath("$.data[5].code").value("reading"));
+    }
+}

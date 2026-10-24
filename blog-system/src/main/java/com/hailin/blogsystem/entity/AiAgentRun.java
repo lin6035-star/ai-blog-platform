@@ -1,0 +1,140 @@
+package com.hailin.blogsystem.entity;
+
+import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableName;
+import lombok.Data;
+
+import java.time.LocalDateTime;
+
+/**
+ * Agent Runtime 运行实例。
+ *
+ * 一条记录代表一次 Learning Agent 只读 Loop 执行：
+ * 用户发起“今天继续学什么 / 帮我安排今天学习”后，
+ * Agent 在 maxSteps 边界内逐步决策、执行只读动作、最终给出学习建议。
+ *
+ * 与 ai_workflow_runs 的区别：
+ * - WorkflowRun = 固定流程 + 确认门（高影响业务流）
+ * - AgentRun = 有边界的动态决策循环（只读，V1 同步执行）
+ */
+@Data
+@TableName("ai_agent_runs")
+public class AiAgentRun {
+
+    @TableId(type = IdType.ASSIGN_ID)
+    private Long id;
+
+    private Long userId;
+
+    /**
+     * 关联的 AI 会话 ID。用于把 Agent Run 与聊天上下文关联。
+     */
+    private Long sessionId;
+
+    /**
+     * 用户原始请求（目标）。
+     */
+    private String goal;
+
+    /**
+     * 当前进程内使用的完整目标，不落库。
+     *
+     * <p>{@code goal} 列只有 500 字符，适合审计摘要；Task 的搜索后分析会在本轮携带
+     * 有界 RAG 正文，不能让 Generator 再从已截断的持久化字段取上下文。
+     */
+    @TableField(exist = false)
+    private String runtimeGoal;
+
+    /**
+     * 运行状态：RUNNING / COMPLETED / FAILED / CANCELLED / WAITING_USER。
+     */
+    private String status;
+
+    /**
+     * 当前执行到的步号。
+     */
+    private Integer currentStep;
+
+    /**
+     * 最大步数边界。
+     */
+    private Integer maxSteps;
+
+    /**
+     * 已使用步数。
+     */
+    private Integer usedSteps;
+
+    /**
+     * Agent Loop 上下文 JSON：目标、已裁剪的 observation 列表、flag 等。
+     * 不存完整 prompt，不存密钥。
+     */
+    private String contextJson;
+
+    /**
+     * V3.13 Plan Preview 计划（JSON 数组，仅文章域产生，可空）。
+     *
+     * run 级数据（计划是「这次 run 的计划」，不是某一步的）。
+     * 写入走单列更新（`UPDATE ai_agent_runs SET plan_json=? WHERE id=?`），
+     * **不复用 updateById**——否则计划写失败会与 run 状态写失败混成同一个故障，
+     * fail-open 形同虚设。
+     */
+    private String planJson;
+
+    /**
+     * **外层 TaskPlan 的可恢复快照**（5b，2026-10-01）。
+     *
+     * <p>与 {@link #planJson} 不是一回事，别混：{@code plan_json} 是 V3.13 Plan Preview 的
+     * {@code List<String>} 展示计划（内层 Agent 写）；这一列是**外层编排的正式执行快照**
+     * （带 {@code schemaVersion} 的 envelope：计划步骤 + 可信页面锚点），
+     * 跨请求恢复时靠它重建 {@code TaskPlan}——锚点只存后端校验过的 {@code PageContext}。
+     */
+    private String taskPlanJson;
+
+    /**
+     * 最终回答文本（COMPLETED 时落库）。
+     */
+    private String finalAnswer;
+
+    /**
+     * V3.8 运行态（瞬态，不落库）：本 run 已决议的定位目标文章 ID。
+     * 决议发生在 resolveStepTarget（决策后），SUGGEST_WRITE 提案端与动作预处理消费。
+     */
+    @TableField(exist = false)
+    private Long targetArticleId;
+
+    /**
+     * token 用量（本次 run 累计）：决策链（decide / repair）+ 证据收敛门（verify）的实际消耗。
+     *
+     * **不含意图分类器**——分类器属于「这条消息」的成本，计入 ai_messages.token_count。
+     * 三个口径语义不同、不重复计数（见 CLAUDE.md token 统计一节）。
+     * 流式路径的重复累计问题由 TokenUsageAccumulator.trackPeak 在计数侧处理。
+     */
+    private Integer inputTokens;
+
+    private Integer outputTokens;
+
+    private Integer totalTokens;
+
+    /**
+     * 失败原因（FAILED 时记录，供排查与前端友好文案）。
+     */
+    private String errorMessage;
+
+    private LocalDateTime createdAt;
+
+    private LocalDateTime updatedAt;
+
+    /**
+     * 父 run ID（第四步，2026-09-30）——**非 null 表示这是一次外层任务内部的子 run**。
+     *
+     * <p>用途：Token 子树按它查询聚合（父 run 不复制子 run 的 token）；用户侧 / 开发者侧列表按它过滤，
+     * 只列根 run；启动恢复与确认接口据此识别「这不是用户可操作的普通 run」。
+     *
+     * <p>NULL = 根 run——用户发起的那次任务，也是 {@code AiMessages.agentRunId} 绑定的那一个。
+     * 子 run 只由任务编排层在 `ARTICLE_ANALYSIS` 步骤内部创建，不经过用户入口。
+     */
+    private Long parentRunId;
+}

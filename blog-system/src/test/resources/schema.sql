@@ -1,0 +1,571 @@
+-- 多测试类共享 H2 内存库（DB_CLOSE_DELAY=-1），每个 Spring 上下文启动都会执行本文件。
+-- 因此所有语句必须幂等：不 DROP（会删掉其他上下文的表），CREATE 用 IF NOT EXISTS。
+CREATE TABLE IF NOT EXISTS articles (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    category_id BIGINT,
+    author_id BIGINT,
+    title VARCHAR(255),
+    summary VARCHAR(500),
+    content CLOB,
+    cover_url VARCHAR(500),
+    status INT,
+    view_count INT,
+    comment_count INT DEFAULT 0,
+    like_count INT DEFAULT 0,
+    favorite_count INT DEFAULT 0,
+    published_at TIMESTAMP,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    deleted_at TIMESTAMP,
+    share_count INT DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS tags (
+    id BIGINT PRIMARY KEY,
+    name VARCHAR(100),
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS article_tags (
+    article_id BIGINT NOT NULL,
+    tag_id BIGINT NOT NULL,
+    PRIMARY KEY (article_id, tag_id)
+);
+
+CREATE TABLE IF NOT EXISTS categories (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100),
+    code VARCHAR(100),
+    description VARCHAR(500),
+    sort_order INT,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(100),
+    password_hash VARCHAR(255),
+    nickname VARCHAR(100),
+    avatar_url VARCHAR(500),
+    bio VARCHAR(500),
+    login_type VARCHAR(20) DEFAULT 'password',
+    github_id BIGINT NULL,
+    status INT,
+    followers_count INT DEFAULT 0,
+    following_count INT DEFAULT 0,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    deleted_at TIMESTAMP,
+    token_version INT NOT NULL DEFAULT 0,
+    email VARCHAR(255) NULL,
+    CONSTRAINT uk_users_email UNIQUE (email)
+);
+
+CREATE TABLE IF NOT EXISTS user_follows (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    follower_id BIGINT NOT NULL,
+    following_id BIGINT NOT NULL,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    deleted_at TIMESTAMP,
+    CONSTRAINT uk_follow UNIQUE (follower_id, following_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_follower ON user_follows (follower_id, deleted_at);
+CREATE INDEX IF NOT EXISTS idx_following ON user_follows (following_id, deleted_at);
+
+CREATE TABLE IF NOT EXISTS article_comments (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    article_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    content VARCHAR(2000) NOT NULL,
+    root_id BIGINT,
+    parent_id BIGINT,
+    ip VARCHAR(45),
+    ip_location VARCHAR(100),
+    like_count BIGINT,
+    created_at TIMESTAMP,
+    deleted_at TIMESTAMP,
+    deleted_by BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS comment_likes (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    comment_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    created_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS article_likes (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    article_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    create_time TIMESTAMP,
+    CONSTRAINT uk_article_like_user UNIQUE (article_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS article_favorites (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    article_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    create_time TIMESTAMP,
+    CONSTRAINT uk_article_favorite_user UNIQUE (article_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS ai_sessions (
+    id BIGINT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    title VARCHAR(100) NOT NULL DEFAULT '新对话',
+    active_workflow_run_id BIGINT,
+    -- V3.8 会话文章锚（2026-09-10 补齐：此表此前漂移，缺这四列导致锚相关 H2 测试不反映真实结构）
+    last_article_id BIGINT,
+    last_article_title VARCHAR(255),
+    last_article_source VARCHAR(32),
+    last_article_updated_at TIMESTAMP,
+    -- V3.12 会话结论锚
+    last_conclusion_article_id BIGINT,
+    last_conclusion_text VARCHAR(2000),
+    last_conclusion_source_run_id BIGINT,
+    last_conclusion_source_type VARCHAR(32),
+    last_conclusion_updated_at TIMESTAMP,
+    -- V4.x 会话学习计划锚（最近一次"真实定位到"的计划；纯查询不写）
+    last_learning_plan_id BIGINT,
+    last_learning_plan_title VARCHAR(255),
+    last_learning_plan_source VARCHAR(32),
+    last_learning_plan_updated_at TIMESTAMP,
+    -- 2026-10-19 最近一次文章检索的有序候选（序位指代「第一篇/第二篇」解析用）
+    last_rag_articles_json TEXT,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS ai_messages (
+    id BIGINT PRIMARY KEY,
+    session_id BIGINT NOT NULL,
+    workflow_run_id BIGINT,
+    agent_run_id BIGINT,
+    role VARCHAR(20) NOT NULL,
+    content CLOB NOT NULL,
+    page_context CLOB,
+    token_count BIGINT,
+    created_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_messages_agent_run_id
+    ON ai_messages (agent_run_id);
+
+CREATE TABLE IF NOT EXISTS ai_workflow_runs (
+    id BIGINT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    conversation_id BIGINT,
+    workflow_type VARCHAR(64) NOT NULL,
+    workflow_version VARCHAR(32) NOT NULL DEFAULT '1.0',
+    status VARCHAR(64) NOT NULL,
+    current_step VARCHAR(64),
+    context_json CLOB NOT NULL,
+    retry_count INT NOT NULL DEFAULT 0,
+    version INT NOT NULL DEFAULT 0,
+    input_tokens INT NOT NULL DEFAULT 0,
+    output_tokens INT NOT NULL DEFAULT 0,
+    total_tokens INT NOT NULL DEFAULT 0,
+    pause_reason VARCHAR(255),
+    error_message VARCHAR(1000),
+    task_run_id BIGINT,
+    task_step_id VARCHAR(64),
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_workflow_task_step UNIQUE (task_run_id, task_step_id)
+);
+
+CREATE TABLE IF NOT EXISTS ai_user_memories (
+                                  id BIGINT PRIMARY KEY,
+                                  user_id BIGINT NOT NULL,
+                                  memory_type VARCHAR(32) NOT NULL,
+                                  memory_key VARCHAR(64) NOT NULL,
+                                  content CLOB NOT NULL,
+                                  source VARCHAR(32) NOT NULL,
+                                  confidence DECIMAL(3,2) DEFAULT 1.00,
+                                  importance INT DEFAULT 5,
+                                  enabled INT DEFAULT 1,
+                                  created_at TIMESTAMP,
+                                  updated_at TIMESTAMP,
+                                  CONSTRAINT uk_user_type_key UNIQUE (user_id, memory_type, memory_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_enabled ON ai_user_memories (user_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_user_type_enabled ON ai_user_memories (user_id, memory_type, enabled);
+CREATE INDEX IF NOT EXISTS idx_user_importance ON ai_user_memories (user_id, enabled, importance);
+
+CREATE TABLE IF NOT EXISTS ai_user_memory_candidates (
+    id BIGINT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    session_id BIGINT,
+    message_id BIGINT,
+    memory_type VARCHAR(32) NOT NULL,
+    memory_key VARCHAR(64) NOT NULL,
+    content CLOB NOT NULL,
+    candidate_action VARCHAR(32) NOT NULL,
+    reason VARCHAR(500),
+    decision_reason VARCHAR(500),
+    merged_content CLOB,
+    source VARCHAR(32) DEFAULT 'AI_EXTRACTED',
+    confidence DECIMAL(3,2) DEFAULT 0.80,
+    importance INT DEFAULT 5,
+    status VARCHAR(32) DEFAULT 'PENDING',
+    target_memory_id BIGINT,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    decided_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_candidate_user_status ON ai_user_memory_candidates (user_id, status);
+CREATE INDEX IF NOT EXISTS idx_memory_candidate_user_type_key ON ai_user_memory_candidates (user_id, memory_type, memory_key);
+CREATE INDEX IF NOT EXISTS idx_memory_candidate_target_memory_id ON ai_user_memory_candidates (target_memory_id);
+CREATE INDEX IF NOT EXISTS idx_memory_candidate_status_created_at ON ai_user_memory_candidates (status, created_at);
+
+CREATE TABLE IF NOT EXISTS ai_memory_extraction_events (
+    event_id VARCHAR(128) NOT NULL PRIMARY KEY,
+    event_type VARCHAR(32) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+
+CREATE TABLE IF NOT EXISTS ai_workflow_step_logs (
+                                                     id BIGINT NOT NULL PRIMARY KEY COMMENT '主键，使用 MyBatis-Plus ASSIGN_ID',
+
+                                                     workflow_run_id BIGINT NOT NULL COMMENT '对应 ai_workflow_runs.id',
+
+                                                     log_type VARCHAR(20) NOT NULL DEFAULT 'OPERATION' COMMENT '日志类型：OPERATION=操作级 / STEP=步骤级',
+
+                                                     step_order INT NOT NULL COMMENT '步骤顺序',
+
+                                                     step VARCHAR(64) NOT NULL COMMENT '步骤名称，例如 REQUIREMENT_ANALYZE/RAG_SEARCH/GENERATE_DRAFT',
+
+    status VARCHAR(32) NOT NULL COMMENT 'RUNNING/SUCCESS/FAILED/SKIPPED',
+
+    retry_count INT NOT NULL DEFAULT 0 COMMENT '当前步骤重试次数，首次执行为0',
+
+    input_summary TEXT COMMENT '输入摘要',
+
+    output_summary TEXT COMMENT '输出摘要',
+
+    error_message VARCHAR(1000) COMMENT '错误信息',
+
+    metadata_json JSON COMMENT '扩展信息，例如模型、参数、工具信息',
+
+    started_at DATETIME NOT NULL COMMENT '开始时间',
+
+    ended_at DATETIME COMMENT '结束时间',
+
+    duration_ms BIGINT COMMENT '耗时毫秒',
+
+    input_tokens INT NOT NULL DEFAULT 0 COMMENT '输入token',
+
+    output_tokens INT NOT NULL DEFAULT 0 COMMENT '输出token',
+
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    KEY idx_workflow_timeline(workflow_run_id, step_order, id),
+
+    KEY idx_workflow_step_retry(workflow_run_id, step, retry_count),
+
+    KEY idx_workflow_status(status)
+    )
+    COMMENT='AI Workflow步骤执行日志';
+
+-- 学习计划（LEARNING_PLAN Workflow 业务对象，H2 测试库）
+CREATE TABLE IF NOT EXISTS learning_plans (
+    id BIGINT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    goal VARCHAR(500),
+    status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+    source_workflow_run_id BIGINT,
+    version INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_learning_plans_run_id ON learning_plans(source_workflow_run_id);
+
+CREATE TABLE IF NOT EXISTS learning_stages (
+    id BIGINT PRIMARY KEY,
+    plan_id BIGINT NOT NULL,
+    order_num INT NOT NULL DEFAULT 0,
+    title VARCHAR(200) NOT NULL,
+    tasks CLOB,
+    version INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_learning_stages_plan ON learning_stages(plan_id, order_num);
+
+CREATE TABLE IF NOT EXISTS ai_episodic_memories (
+                                                    id BIGINT PRIMARY KEY,
+                                                    user_id BIGINT NOT NULL,
+                                                    session_id BIGINT,
+                                                    project_key VARCHAR(64) NOT NULL DEFAULT '01myBlog',
+    memory_type VARCHAR(32) NOT NULL,
+    title VARCHAR(120) NOT NULL,
+    content CLOB NOT NULL,
+    importance INT NOT NULL DEFAULT 6,
+    confidence DECIMAL(3,2) NOT NULL DEFAULT 0.80,
+    source_message_ids CLOB,
+    content_hash VARCHAR(64) NOT NULL,
+    occurred_at TIMESTAMP NOT NULL,
+    last_retrieved_at TIMESTAMP,
+    retrieval_count INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    CONSTRAINT uk_episodic_user_project_hash UNIQUE (user_id, project_key, content_hash)
+    );
+
+CREATE INDEX IF NOT EXISTS idx_episodic_user_project_time
+    ON ai_episodic_memories (user_id, project_key, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_episodic_user_type
+    ON ai_episodic_memories (user_id, memory_type);
+CREATE INDEX IF NOT EXISTS idx_episodic_importance
+    ON ai_episodic_memories (user_id, project_key, importance);
+
+
+CREATE TABLE IF NOT EXISTS ai_agent_runs (
+    id BIGINT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    session_id BIGINT,
+    goal VARCHAR(500) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    current_step INT NOT NULL DEFAULT 0,
+    max_steps INT NOT NULL DEFAULT 5,
+    used_steps INT NOT NULL DEFAULT 0,
+    context_json CLOB,
+    plan_json CLOB,
+    final_answer CLOB,
+    input_tokens INT NOT NULL DEFAULT 0,
+    output_tokens INT NOT NULL DEFAULT 0,
+    total_tokens INT NOT NULL DEFAULT 0,
+    error_message VARCHAR(1000),
+    parent_run_id BIGINT,
+    task_plan_json CLOB,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_run_user ON ai_agent_runs (user_id);
+CREATE INDEX IF NOT EXISTS idx_agent_run_session ON ai_agent_runs (session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_run_parent ON ai_agent_runs (parent_run_id);
+
+CREATE TABLE IF NOT EXISTS ai_agent_steps (
+    id BIGINT PRIMARY KEY,
+    agent_run_id BIGINT NOT NULL,
+    step_no INT NOT NULL,
+    action_type VARCHAR(64) NOT NULL,
+    thought_summary VARCHAR(500),
+    input_json CLOB,
+    output_json CLOB,
+    status VARCHAR(32) NOT NULL,
+    duration_ms BIGINT,
+    input_tokens INT NOT NULL DEFAULT 0,
+    output_tokens INT NOT NULL DEFAULT 0,
+    error_message VARCHAR(1000),
+    created_at TIMESTAMP NOT NULL,
+    task_step_id VARCHAR(64),
+    CONSTRAINT uk_agent_task_step UNIQUE (agent_run_id, task_step_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_step_run ON ai_agent_steps (agent_run_id);
+
+CREATE TABLE IF NOT EXISTS ai_conversation_summaries (
+                                                         id BIGINT PRIMARY KEY,
+                                                         user_id BIGINT NOT NULL,
+                                                         session_id BIGINT NOT NULL,
+                                                         summary CLOB NOT NULL,
+                                                         summary_json CLOB,
+                                                         covered_until_message_id BIGINT,
+                                                         covered_message_count INT NOT NULL DEFAULT 0,
+                                                         version INT NOT NULL DEFAULT 1,
+                                                         last_compressed_at TIMESTAMP,
+                                                         compressing BOOLEAN NOT NULL DEFAULT FALSE,
+                                                         created_at TIMESTAMP NOT NULL,
+                                                         updated_at TIMESTAMP NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_ai_conversation_summary_session
+    ON ai_conversation_summaries (session_id);
+
+CREATE INDEX IF NOT EXISTS idx_ai_conversation_summary_user_session
+    ON ai_conversation_summaries (user_id, session_id);
+
+
+-- ============================================
+-- 钱包与秒杀（设计稿：docs/redis/钱包与秒杀计划.md）
+-- 与 db/init.sql 第 21-26 节保持一致；这里是 H2 语法（无 COMMENT/ENGINE，DATETIME→TIMESTAMP）
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS user_wallet (
+    id BIGINT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    balance BIGINT NOT NULL DEFAULT 0,
+    balance_seq BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_wallet_user_id UNIQUE (user_id),
+    CONSTRAINT chk_wallet_balance_floor CHECK (balance >= -1000000)
+);
+
+CREATE TABLE IF NOT EXISTS wallet_transaction (
+    id BIGINT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    amount BIGINT NOT NULL,
+    balance_after BIGINT NOT NULL,
+    balance_seq BIGINT NOT NULL,
+    type VARCHAR(32) NOT NULL,
+    biz_type VARCHAR(32) NOT NULL,
+    biz_id VARCHAR(128) NOT NULL,
+    idempotency_key VARCHAR(128) NOT NULL,
+    remark VARCHAR(255),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_wallet_tx_user_idem UNIQUE (user_id, idempotency_key),
+    CONSTRAINT uk_wallet_tx_user_seq UNIQUE (user_id, balance_seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_tx_user ON wallet_transaction (user_id, id);
+
+CREATE TABLE IF NOT EXISTS wallet_recharge_order (
+    id BIGINT PRIMARY KEY,
+    order_no VARCHAR(64) NOT NULL,
+    user_id BIGINT NOT NULL,
+    package_code VARCHAR(32) NOT NULL,
+    pay_amount BIGINT NOT NULL,
+    credit_amount BIGINT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    version INT NOT NULL DEFAULT 0,
+    expire_at TIMESTAMP,
+    paid_at TIMESTAMP,
+    closed_at TIMESTAMP,
+    close_reason VARCHAR(32),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_recharge_order_no UNIQUE (order_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recharge_user ON wallet_recharge_order (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_recharge_status_expire ON wallet_recharge_order (status, expire_at);
+
+CREATE TABLE IF NOT EXISTS wallet_payment (
+    id BIGINT PRIMARY KEY,
+    payment_no VARCHAR(64) NOT NULL,
+    order_no VARCHAR(64) NOT NULL,
+    user_id BIGINT NOT NULL,
+    channel VARCHAR(32) NOT NULL,
+    channel_trade_no VARCHAR(64),
+    pay_amount BIGINT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    pay_token VARCHAR(128),
+    paid_at TIMESTAMP,
+    fail_reason VARCHAR(255),
+    callback_payload TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_payment_no UNIQUE (payment_no),
+    CONSTRAINT uk_payment_channel_trade_no UNIQUE (channel, channel_trade_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_order_no ON wallet_payment (order_no);
+CREATE INDEX IF NOT EXISTS idx_payment_status_created ON wallet_payment (status, created_at);
+
+CREATE TABLE IF NOT EXISTS ai_billing_order (
+    id BIGINT PRIMARY KEY,
+    order_no VARCHAR(64) NOT NULL,
+    user_id BIGINT NOT NULL,
+    biz_type VARCHAR(32) NOT NULL,
+    biz_id VARCHAR(128) NOT NULL,
+    resource_id VARCHAR(128),
+    status VARCHAR(16) NOT NULL,
+    reserved_credit BIGINT NOT NULL,
+    actual_credit BIGINT,
+    prompt_tokens INT,
+    completion_tokens INT,
+    total_tokens INT,
+    version INT NOT NULL DEFAULT 0,
+    expire_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    settled_at TIMESTAMP,
+    CONSTRAINT uk_billing_biz UNIQUE (biz_type, biz_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_status_expire ON ai_billing_order (status, expire_at);
+CREATE INDEX IF NOT EXISTS idx_billing_user_status ON ai_billing_order (user_id, status);
+
+CREATE TABLE IF NOT EXISTS seckill_activity (
+    id BIGINT PRIMARY KEY,
+    name VARCHAR(64) NOT NULL,
+    total_stock INT NOT NULL,
+    sold_count INT NOT NULL DEFAULT 0,
+    credit_amount BIGINT NOT NULL,
+    start_at TIMESTAMP NOT NULL,
+    end_at TIMESTAMP NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    status_changed_at TIMESTAMP NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_seckill_activity_status ON seckill_activity (status, start_at, end_at);
+
+CREATE TABLE IF NOT EXISTS seckill_order (
+    id BIGINT PRIMARY KEY,
+    activity_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    credit_amount BIGINT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_seckill_user_activity UNIQUE (user_id, activity_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seckill_order_activity ON seckill_order (activity_id, status);
+
+-- ============================================
+-- 站内通知（设计稿：docs/notification/通知中心设计.md）
+-- 与 db/init.sql 第 29 节保持一致；这里是 H2 语法（无 COMMENT/ENGINE/UNSIGNED，DATETIME→TIMESTAMP）
+-- ============================================
+CREATE TABLE IF NOT EXISTS notifications (
+    id BIGINT PRIMARY KEY,
+    receiver_id BIGINT NOT NULL,
+    actor_id BIGINT NOT NULL,
+    type VARCHAR(32) NOT NULL,
+    target_id BIGINT NOT NULL,
+    article_id BIGINT NULL,
+    is_read TINYINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- 幂等键：四列全部 NOT NULL（MySQL 唯一索引不约束 NULL，可空列会让幂等静默失效）。
+    -- 与 db/init.sql 第 29 节一致；id 由应用生成（实体需显式 @TableId(ASSIGN_ID)），故无自增
+    CONSTRAINT uk_notification UNIQUE (receiver_id, type, actor_id, target_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_receiver_created ON notifications (receiver_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_receiver_read_created ON notifications (receiver_id, is_read, created_at);
+-- 保留期清理用（不带 receiver_id，上面两条覆盖不到）
+CREATE INDEX IF NOT EXISTS idx_created_at ON notifications (created_at);
+
+-- ============================================
+-- 文章索引同步 outbox（设计稿：docs/mq/文章索引同步MQ迁移设计.md）
+-- 与 db/init.sql 第 30 节保持一致；这里是 H2 语法（无 COMMENT/ENGINE，DATETIME→TIMESTAMP）
+-- 注意：这块在 S1 只是建表，业务写入要等 S2 的 ArticleIndexMutationPublisher 接入后才会发生
+-- ============================================
+CREATE TABLE IF NOT EXISTS article_index_outbox (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    article_id BIGINT NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+    attempts INT NOT NULL DEFAULT 0,
+    next_retry_at TIMESTAMP NOT NULL,
+    locked_until TIMESTAMP NULL,
+    sent_at TIMESTAMP NULL,
+    trace_id VARCHAR(64) NULL,
+    last_error VARCHAR(500) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbox_due ON article_index_outbox (status, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_outbox_article ON article_index_outbox (article_id, id);

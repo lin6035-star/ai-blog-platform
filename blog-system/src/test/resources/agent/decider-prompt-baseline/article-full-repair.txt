@@ -1,0 +1,6 @@
+你刚才的输出不是合法的 JSON 或包含了非法动作。请重新输出。
+只能输出一个 JSON 对象：{"actionType":"...","input":{...}}，以及可选的顶层 "plan"（字符串数组）。
+如仍是首次决策且用户请求包含多个子目标，保留合法的 "plan"（2-4 条用户可读的目标描述）；否则省略该字段。
+actionType 只能是：QUERY_ARTICLE / QUERY_MEMORY / SEARCH_RAG / ASK_USER / FINAL_ANSWER / SUGGEST_WORKFLOW / SUGGEST_WRITE。
+如需定位文章可带顶层 "anchorMode"："CURRENT_PAGE"（当前页这篇，缺省值）或 "SESSION_LAST"（本会话最近聊过的那篇）。
+禁止输出 markdown、代码块或任何解释文字。

@@ -1,0 +1,599 @@
+[
+  {
+    "name": "点名计划阶段求拆解进入 LEARNING_ASSIST",
+    "category": "baseline",
+    "message": "我感觉微服务计划中的阶段二挺难的，帮我拆成几个更小的任务",
+    "expectedIntent": "LEARNING_ASSIST",
+    "expectedPlanRefContains": "微服务",
+    "expectedStageRefContains": "阶段二",
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "状态依赖句 GENERAL_CHAT 需思考",
+    "category": "thinking",
+    "message": "结合我最近的情况，给个建议",
+    "expectedIntent": "GENERAL_CHAT",
+    "expectedNeedsThinking": true,
+    "expectedNeedsThinkingReasonNonBlank": true
+  },
+  {
+    "name": "纯概念问答不思考",
+    "category": "thinking",
+    "message": "什么是缓存穿透",
+    "expectedIntent": "GENERAL_CHAT",
+    "expectedNeedsThinking": false
+  },
+  {
+    "name": "分界：点名任务名走 LEARNING_AGENT 而非拆解 Workflow",
+    "category": "boundary",
+    "message": "给 Redis 计划第二阶段加一个缓存雪崩防护任务",
+    "expectedIntent": "LEARNING_AGENT"
+  },
+  {
+    "name": "回归：点名计划压缩保留 planRef 摘录",
+    "category": "regression",
+    "message": "把 C++ 计划的第二阶段压缩一下",
+    "expectedIntent": "LEARNING_PROGRESS",
+    "expectedPlanRefNonBlank": true
+  },
+  {
+    "name": "回归：点名计划拆解保留 planRef 摘录",
+    "category": "regression",
+    "message": "C++ 计划的第三阶段太难了，你能帮我拆解一下吗",
+    "expectedIntent": "LEARNING_ASSIST",
+    "expectedPlanRefNonBlank": true
+  },
+  {
+    "name": "分界：点名计划阶段任务名走受控写",
+    "category": "boundary",
+    "message": "C++ 计划的阶段1，帮我加一下这个小任务：练习引用与指针在函数传参中的区别",
+    "expectedIntent": "LEARNING_AGENT",
+    "expectedSuggestedAction": "AGENT"
+  },
+  {
+    "name": "回归：多行消息加任务不降级普通聊天",
+    "category": "regression",
+    "message": "C++计划的阶段1,帮我加一下这个小任务\n练习引用与指针在函数传参中的区别",
+    "expectedIntent": "LEARNING_AGENT",
+    "expectedSuggestedAction": "AGENT"
+  },
+  {
+    "name": "分界：点名任务改名走 LEARNING_AGENT 受控写",
+    "category": "boundary",
+    "message": "把 Redis 计划的缓存击穿任务改名为缓存击穿防护",
+    "expectedIntent": "LEARNING_AGENT",
+    "expectedSuggestedAction": "AGENT"
+  },
+  {
+    "name": "回归：整体调整诉求不漂移到受控写",
+    "category": "regression",
+    "message": "帮我调整第二阶段",
+    "expectedIntent": "LEARNING_PROGRESS",
+    "expectedSuggestedAction": "WORKFLOW"
+  },
+  {
+    "name": "分界：详情页点名完整新标题走 ARTICLE_AGENT 受控写",
+    "category": "boundary",
+    "message": "把标题改成 Redis 缓存实战",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "ARTICLE_AGENT",
+    "expectedSuggestedAction": "AGENT"
+  },
+  {
+    "name": "回归：文章页泛泛改标题诉求不漂移到受控写",
+    "category": "regression",
+    "message": "帮我把标题改短一些",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "OPTIMIZE_ARTICLE_WORKFLOW",
+    "expectedSuggestedAction": "WORKFLOW"
+  },
+  {
+    "name": "分界：详情页隐藏当前文章走 ARTICLE_AGENT 受控写",
+    "category": "boundary",
+    "message": "把这篇隐藏了，不想让其他人看到",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "ARTICLE_AGENT",
+    "expectedSuggestedAction": "AGENT"
+  },
+  {
+    "name": "回归：文章页内容修改指令不漂移到受控写",
+    "category": "regression",
+    "message": "把第二段删掉，再润色一下开头",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "OPTIMIZE_ARTICLE_WORKFLOW",
+    "expectedSuggestedAction": "WORKFLOW"
+  },
+  {
+    "name": "V3.8 分界：首页近指隐藏走 ARTICLE_AGENT 会话锚兜底",
+    "category": "boundary",
+    "message": "帮我把刚刚那篇文章隐藏了，不想让它公开",
+    "expectedIntent": "ARTICLE_AGENT",
+    "expectedSuggestedAction": "AGENT"
+  },
+  {
+    "name": "V3.8 分界：标题指代受控操作走 ARTICLE_AGENT（定位不到澄清）",
+    "category": "boundary",
+    "message": "把我 Redis 那篇隐藏了",
+    "expectedIntent": "ARTICLE_AGENT",
+    "expectedSuggestedAction": "AGENT"
+  },
+  {
+    "name": "V3.9 首页近指文章内容问走 ARTICLE_DETAIL_QA",
+    "category": "boundary",
+    "message": "你刚才介绍的那篇文章，缓存击穿那段再讲讲",
+    "expectedIntent": "ARTICLE_DETAIL_QA",
+    "expectedSuggestedAction": "CHAT"
+  },
+  {
+    "name": "V3.9 首页近指总结走 ARTICLE_DETAIL_QA",
+    "category": "boundary",
+    "message": "刚才那篇讲了什么",
+    "expectedIntent": "ARTICLE_DETAIL_QA",
+    "expectedSuggestedAction": "CHAT"
+  },
+  {
+    "name": "V3.9 回归：首页纯概念问不升级 ARTICLE_DETAIL_QA",
+    "category": "regression",
+    "message": "Redis 缓存是什么",
+    "expectedIntent": "GENERAL_CHAT"
+  },
+  {
+    "name": "V3.9 分界：标题指代内容问走 ARTICLE_DETAIL_QA（定位不到澄清）",
+    "category": "boundary",
+    "message": "Redis 缓存那篇讲了什么",
+    "expectedIntent": "ARTICLE_DETAIL_QA",
+    "expectedSuggestedAction": "CHAT"
+  },
+  {
+    "name": "V3.9 分界：找站内文章走 ARTICLE_SEARCH 不漂移到 QA",
+    "category": "boundary",
+    "message": "有没有 Redis 缓存相关的文章",
+    "expectedIntent": "ARTICLE_SEARCH",
+    "expectedSuggestedAction": "CHAT"
+  },
+  {
+    "name": "V3.9 详情页近指文章内容问走 ARTICLE_DETAIL_QA",
+    "category": "boundary",
+    "message": "总结一下刚刚那篇",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "ARTICLE_DETAIL_QA",
+    "expectedSuggestedAction": "CHAT"
+  },
+  {
+    "name": "V4 第一刀：单节内容评价走 ARTICLE_DETAIL_QA",
+    "category": "boundary",
+    "message": "这篇文章的缓存击穿那一节写得怎么样",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "ARTICLE_DETAIL_QA",
+    "expectedSuggestedAction": "CHAT"
+  },
+  {
+    "name": "V4 第一刀：多子目标读文走 ARTICLE_AGENT",
+    "category": "boundary",
+    "message": "先看整体结构，再看看缓存击穿那一节",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "ARTICLE_AGENT",
+    "expectedSuggestedAction": "AGENT"
+  },
+  {
+    "name": "V4 第一刀：多子目标检查章节走 ARTICLE_AGENT",
+    "category": "boundary",
+    "message": "先看整体结构，再检查分布式锁那一节",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "ARTICLE_AGENT",
+    "expectedSuggestedAction": "AGENT"
+  },
+  {
+    "name": "V4 第一刀：结合写作偏好走 ARTICLE_AGENT",
+    "category": "boundary",
+    "message": "对比一下缓存击穿和缓存穿透这两节的写法，说说哪节写得更好，再结合我的写作偏好给建议",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "ARTICLE_AGENT",
+    "expectedSuggestedAction": "AGENT"
+  },
+  {
+    "name": "V4 第一刀：单目标开头评价走 ARTICLE_DETAIL_QA",
+    "category": "boundary",
+    "message": "这篇文章的开头写得怎么样",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "ARTICLE_DETAIL_QA",
+    "expectedSuggestedAction": "CHAT"
+  },
+  {
+    "name": "分界：分析计划内容走 LEARNING_AGENT 而非 PLAN_QUERY",
+    "category": "boundary",
+    "message": "帮我分析我的Agent学习计划，看看有没有问题",
+    "expectedIntent": "LEARNING_AGENT",
+    "expectedPlanRefContains": "Agent",
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "分界：评价计划安排合理性走 LEARNING_AGENT",
+    "category": "boundary",
+    "message": "我的C++学习计划安排得合理吗",
+    "expectedIntent": "LEARNING_AGENT",
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "分界：计划求改进建议走 LEARNING_AGENT",
+    "category": "boundary",
+    "message": "帮我看看我的Redis学习计划写得怎么样，有什么可以改进的",
+    "expectedIntent": "LEARNING_AGENT",
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "分界：非计划页分析计划仍走 LEARNING_AGENT（防页面依赖）",
+    "category": "boundary",
+    "message": "帮我分析我的Agent学习计划，看看有没有问题",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "LEARNING_AGENT",
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "分界：计划详情页分析计划走 LEARNING_AGENT",
+    "category": "boundary",
+    "message": "帮我分析我的Agent学习计划，看看有没有问题",
+    "pageType": "learning-plan-detail",
+    "expectedIntent": "LEARNING_AGENT",
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "回归：问计划进度仍走 LEARNING_PLAN_QUERY",
+    "category": "regression",
+    "message": "我的MySQL学习计划学到哪了",
+    "expectedIntent": "LEARNING_PLAN_QUERY",
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "回归：问有哪些计划仍走 LEARNING_PLAN_QUERY",
+    "category": "regression",
+    "message": "我有几个学习规划",
+    "expectedIntent": "LEARNING_PLAN_QUERY",
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "回归：列计划清单仍走 LEARNING_PLAN_QUERY",
+    "category": "regression",
+    "message": "我的学习计划都有哪些",
+    "expectedIntent": "LEARNING_PLAN_QUERY",
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "回归：讲讲已有计划内容走 LEARNING_PLAN_QUERY，不是制定新计划（2026-10-18 事故句）",
+    "category": "regression",
+    "message": "讲讲我的Redis学习计划",
+    "expectedIntent": "LEARNING_PLAN_QUERY",
+    "expectedSuggestedAction": "TOOL",
+    "expectedRequestKind": "CHAT",
+    "expectedTaskGoalsBlank": true,
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "回归：看看已有计划走 LEARNING_PLAN_QUERY，且不得产出文章检索任务（2026-10-18 事故句）",
+    "category": "regression",
+    "message": "帮我看看我的Redis学习计划",
+    "expectedIntent": "LEARNING_PLAN_QUERY",
+    "expectedSuggestedAction": "TOOL",
+    "expectedRequestKind": "CHAT",
+    "expectedTaskGoalsBlank": true,
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "回归：看看XX的学习计划不得漂成 ARTICLE_SEARCH（2026-10-18 事故句）",
+    "category": "regression",
+    "message": "看看Redis的学习计划",
+    "expectedIntent": "LEARNING_PLAN_QUERY",
+    "expectedRequestKind": "CHAT",
+    "expectedTaskGoalsBlank": true,
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "充值进入 WALLET_AGENT（2026-09-21）",
+    "category": "boundary",
+    "message": "帮我充10块钱",
+    "expectedIntent": "WALLET_AGENT",
+    "expectedSuggestedAction": "AGENT",
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "中文数字充值也进 WALLET_AGENT",
+    "category": "boundary",
+    "message": "给我充五十块",
+    "expectedIntent": "WALLET_AGENT",
+    "expectedSuggestedAction": "AGENT",
+    "expectedConfidenceMin": 0.55
+  },
+  {
+    "name": "反例：问余额带数字，不能漂成充值",
+    "category": "regression",
+    "message": "我余额够1000吗",
+    "expectedIntent": "GENERAL_CHAT"
+  },
+  {
+    "name": "反例：问充值比例不等于要充值",
+    "category": "regression",
+    "message": "充值比例是多少",
+    "expectedIntent": "GENERAL_CHAT"
+  },
+  {
+    "name": "复合目标：动作在前 + 分析在后（核心支持句；第四步起两项都要进 taskGoals）",
+    "category": "boundary",
+    "message": "点赞这篇文章，再分析一下它写得怎么样",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "ARTICLE_ACTION",
+    "expectedRequestedActionsContains": ["likeArticle"],
+    "expectedAnalysisGoalEvidenceContains": "分析",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 2,
+    "expectedTaskGoalTypesContains": ["ARTICLE_WRITE", "ARTICLE_ANALYSIS"]
+  },
+  {
+    "name": "第三刀：写动作 + 客户端导航（第一刀验收句 1；intent 两轮实测稳定但非本样例关注点，故不写死）",
+    "category": "boundary",
+    "message": "点赞这篇文章，再跳转到该作者的个人主页",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 2,
+    "expectedTaskGoalTypesContains": ["ARTICLE_WRITE", "NAVIGATE"]
+  },
+  {
+    "name": "第三刀：写动作 + 站内检索（第一刀验收句 2；实测 intent 在 ACTION/AGENT 间漂移，故不写死）",
+    "category": "boundary",
+    "message": "点赞这篇文章，再帮我找找还有没有关于Redis的文章",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 2,
+    "expectedTaskGoalTypesContains": ["ARTICLE_WRITE", "ARTICLE_SEARCH"]
+  },
+  {
+    "name": "复合目标：扩展表达（顺便）",
+    "category": "boundary",
+    "message": "收藏一下这篇，顺便评价一下写得如何",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "ARTICLE_ACTION",
+    "expectedRequestedActionsContains": ["favoriteArticle"],
+    "expectedAnalysisGoalEvidenceContains": "评价"
+  },
+  {
+    "name": "反例：讨论点赞机制不得误判为复合目标",
+    "category": "regression",
+    "message": "分析这篇文章里的点赞机制",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedAnalysisGoalEvidenceBlank": true
+  },
+  {
+    "name": "反例：单动作不得带分析证据",
+    "category": "regression",
+    "message": "点赞这篇文章",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "ARTICLE_ACTION",
+    "expectedRequestedActionsContains": ["likeArticle"],
+    "expectedAnalysisGoalEvidenceBlank": true,
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalTypesContains": ["ARTICLE_WRITE"]
+  },
+  {
+    "name": "反例：纯分析请求不得判成文章动作",
+    "category": "regression",
+    "message": "帮我分析一下这篇文章的结构",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedAnalysisGoalEvidenceBlank": true
+  },
+
+  {
+    "name": "5a：优化文章——新协议 WORKFLOW_HANDOFF + 旧字段双写",
+    "category": "5a-workflow-handoff",
+    "message": "帮我优化这篇文章",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedIntent": "OPTIMIZE_ARTICLE_WORKFLOW",
+    "expectedSuggestedAction": "WORKFLOW",
+    "expectedSuggestedWorkflowType": "OPTIMIZE_ARTICLE",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalTypesContains": ["WORKFLOW_HANDOFF"],
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE"],
+    "expectedTaskGoalCountAtLeast": 1
+  },
+  {
+    "name": "5a：写新文章——CREATE_ARTICLE",
+    "category": "5a-workflow-handoff",
+    "message": "帮我写一篇 Redis 缓存设计的文章",
+    "expectedIntent": "CREATE_ARTICLE_WORKFLOW",
+    "expectedSuggestedAction": "WORKFLOW",
+    "expectedSuggestedWorkflowType": "CREATE_ARTICLE",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalTypesContains": ["WORKFLOW_HANDOFF"],
+    "expectedTaskGoalWorkflowTypesContains": ["CREATE_ARTICLE"]
+  },
+  {
+    "name": "5a：制定学习计划——LEARNING_PLAN",
+    "category": "5a-workflow-handoff",
+    "message": "帮我制定一个 Redis 学习计划",
+    "expectedSuggestedAction": "WORKFLOW",
+    "expectedSuggestedWorkflowType": "LEARNING_PLAN",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalTypesContains": ["WORKFLOW_HANDOFF"],
+    "expectedTaskGoalWorkflowTypesContains": ["LEARNING_PLAN"]
+  },
+  {
+    "name": "5a：调整计划阶段——LEARNING_PROGRESS",
+    "category": "5a-workflow-handoff",
+    "message": "帮我把 Redis 计划的第二阶段调整一下",
+    "expectedSuggestedAction": "WORKFLOW",
+    "expectedSuggestedWorkflowType": "LEARNING_PROGRESS",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalTypesContains": ["WORKFLOW_HANDOFF"],
+    "expectedTaskGoalWorkflowTypesContains": ["LEARNING_PROGRESS"]
+  },
+  {
+    "name": "5a：攻坚难点——LEARNING_ASSIST",
+    "category": "5a-workflow-handoff",
+    "message": "Redis 缓存击穿我不懂，帮我拆几个练习",
+    "expectedSuggestedAction": "WORKFLOW",
+    "expectedSuggestedWorkflowType": "LEARNING_ASSIST",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalTypesContains": ["WORKFLOW_HANDOFF"],
+    "expectedTaskGoalWorkflowTypesContains": ["LEARNING_ASSIST"]
+  },
+  {
+    "name": "5a：口语变体「优化下」也要认成优化文章的 Workflow",
+    "category": "5a-workflow-handoff",
+    "message": "这篇帮我优化下",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedSuggestedWorkflowType": "OPTIMIZE_ARTICLE",
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE"]
+  },
+  {
+    "name": "5a：边界——「调整计划」不能漂成攻坚难点",
+    "category": "5a-workflow-handoff",
+    "message": "帮我把 C++ 计划第二阶段的顺序调整一下",
+    "expectedSuggestedWorkflowType": "LEARNING_PROGRESS",
+    "expectedTaskGoalWorkflowTypesContains": ["LEARNING_PROGRESS"]
+  },
+  {
+    "name": "5a：复合目标——点赞 + 优化文章，两个目标都要拆出来",
+    "category": "5a-workflow-handoff",
+    "message": "点赞这篇文章，再帮我优化一下",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 2,
+    "expectedTaskGoalTypesContains": ["ARTICLE_WRITE", "WORKFLOW_HANDOFF"],
+    "expectedSuggestedWorkflowType": "OPTIMIZE_ARTICLE",
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE"]
+  },
+  {
+    "name": "5a：复合目标——优化 + 搜索",
+    "category": "5a-workflow-handoff",
+    "message": "搜索一下 Redis 相关文章，再优化当前这篇",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 2,
+    "expectedTaskGoalTypesContains": ["ARTICLE_SEARCH", "WORKFLOW_HANDOFF"],
+    "expectedSuggestedWorkflowType": "OPTIMIZE_ARTICLE",
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE"]
+  },
+  {
+    "name": "5b：复合目标——搜索比较后再优化，五个目标不能丢",
+    "category": "5b-search-compare-handoff",
+    "message": "点赞并收藏这篇文章，再搜一下 Redis 相关文章，并比较各篇文章，最后再帮我优化一下该文章",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 5,
+    "expectedTaskGoalTypesContains": ["ARTICLE_WRITE", "ARTICLE_SEARCH", "ARTICLE_ANALYSIS", "WORKFLOW_HANDOFF"],
+    "expectedSuggestedWorkflowType": "OPTIMIZE_ARTICLE",
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE"]
+  },
+  {
+    "name": "5b：复合目标——优化后搜索比较，尾部比较不能丢",
+    "category": "5b-search-compare-handoff",
+    "message": "点赞并收藏这篇文章，再帮我优化一下，再搜一下 Redis 相关文章，并比较各篇文章",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 5,
+    "expectedTaskGoalTypesContains": ["ARTICLE_WRITE", "ARTICLE_SEARCH", "ARTICLE_ANALYSIS", "WORKFLOW_HANDOFF"],
+    "expectedSuggestedWorkflowType": "OPTIMIZE_ARTICLE",
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE"]
+  },
+  {
+    "name": "5a：复合目标——优化 + 导航",
+    "category": "5a-workflow-handoff",
+    "message": "优化这篇文章，然后跳转到作者主页",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 2,
+    "expectedTaskGoalTypesContains": ["NAVIGATE", "WORKFLOW_HANDOFF"],
+    "expectedSuggestedWorkflowType": "OPTIMIZE_ARTICLE",
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE"]
+  },
+  {
+    "name": "5a：两个 Workflow 目标（优化 + 写新文章）",
+    "category": "5a-workflow-handoff",
+    "message": "先优化当前这篇，再帮我写一篇 Redis 新文章",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestKind": "TASK",
+    "expectedTaskGoalCountAtLeast": 2,
+    "expectedTaskGoalTypesContains": ["WORKFLOW_HANDOFF"],
+    "expectedTaskGoalWorkflowTypesContains": ["OPTIMIZE_ARTICLE", "CREATE_ARTICLE"],
+    "expectedSuggestedWorkflowTypeBlank": true
+  },
+  {
+    "name": "5a 反例：文章分析不是 Workflow",
+    "category": "5a-workflow-handoff",
+    "message": "分析一下这篇文章写得怎么样",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedTaskGoalTypesNotContains": ["WORKFLOW_HANDOFF"]
+  },
+  {
+    "name": "5a 反例：讨论 Workflow 概念不能被拆成任务目标",
+    "category": "5a-workflow-handoff",
+    "message": "讨论一下 Workflow 到底是什么，和 Agent 有什么区别",
+    "expectedSuggestedAction": "CHAT",
+    "expectedTaskGoalTypesNotContains": ["WORKFLOW_HANDOFF"]
+  },
+  {
+    "name": "5a 反例：页面缺文章上下文时不许硬编 articleId",
+    "category": "5a-workflow-handoff",
+    "message": "帮我优化这篇文章",
+    "expectedArticleIdBlank": true
+  },
+  {
+    "name": "5a：多个学习计划但没有点名——不能瞎猜 planRef",
+    "category": "5a-workflow-handoff",
+    "message": "帮我调整一下我的学习计划",
+    "expectedSuggestedAction": "WORKFLOW",
+    "expectedSuggestedWorkflowType": "LEARNING_PROGRESS"
+  },
+
+  {
+    "name": "编辑器：编辑器页保存草稿",
+    "category": "editor",
+    "message": "保存草稿",
+    "pageType": "editor-new",
+    "expectedIntent": "EDITOR_ACTION"
+  },
+  {
+    "name": "编辑器：编辑器页发布文章",
+    "category": "editor",
+    "message": "发布这篇",
+    "pageType": "editor-edit",
+    "expectedIntent": "EDITOR_ACTION"
+  },
+  {
+    "name": "编辑器：非编辑器页说保存草稿仍判 EDITOR_ACTION",
+    "category": "editor",
+    "message": "保存草稿",
+    "expectedIntent": "EDITOR_ACTION"
+  },
+  {
+    "name": "编辑器：非编辑器页说发布仍判 EDITOR_ACTION",
+    "category": "editor",
+    "message": "发布这篇",
+    "expectedIntent": "EDITOR_ACTION"
+  }
+]

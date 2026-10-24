@@ -1,0 +1,724 @@
+package com.hailin.blogsystem;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.TokenUsageAccumulator;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
+import com.hailin.blogsystem.ai.agent.AgentStepDecision;
+import com.hailin.blogsystem.ai.agent.AgentStepDecider;
+import com.hailin.blogsystem.ai.agent.AgentRunResult;
+import com.hailin.blogsystem.ai.agent.LearningAgentActionExecutor;
+import com.hailin.blogsystem.ai.agent.LearningAgentRuntime;
+import com.hailin.blogsystem.ai.agent.LearningPlanAnchorService;
+import com.hailin.blogsystem.entity.AiAgentRun;
+import com.hailin.blogsystem.entity.AiAgentStep;
+import com.hailin.blogsystem.entity.LearningPlans;
+import com.hailin.blogsystem.entity.dto.AiAgentRunStatus;
+import com.hailin.blogsystem.entity.dto.AgentStepActionType;
+import com.hailin.blogsystem.entity.vo.LearningPlansDetailVO;
+import com.hailin.blogsystem.mapper.AiAgentRunMapper;
+import com.hailin.blogsystem.mapper.AiAgentStepMapper;
+import com.hailin.blogsystem.service.LearningPlansService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.ai.chat.metadata.Usage;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+/**
+ * Learning Agent 核心循环测试。
+ * 决策器和执行器全部 mock，只验证循环编排 + 白名单校验 + 终态语义 + 落库。
+ */
+class LearningAgentRuntimeTests {
+
+    private AgentStepDecider decider;
+    private LearningAgentActionExecutor executor;
+    private AiAgentRunMapper runMapper;
+    private AiAgentStepMapper stepMapper;
+    private LearningPlansService learningPlansService;
+    private LearningPlanAnchorService learningPlanAnchorService;
+    private LearningAgentRuntime runtime;
+
+    @BeforeEach
+    void setUp() {
+        decider = mock(AgentStepDecider.class);
+        executor = mock(LearningAgentActionExecutor.class);
+        runMapper = mock(AiAgentRunMapper.class);
+        stepMapper = mock(AiAgentStepMapper.class);
+        learningPlansService = mock(LearningPlansService.class);
+        learningPlanAnchorService = mock(LearningPlanAnchorService.class);
+
+        // MyBatis-Plus ASSIGN_ID 在 mock 下不生效，insert 时手动赋 id
+        when(runMapper.insert(any(AiAgentRun.class))).thenAnswer(inv -> {
+            AiAgentRun run = inv.getArgument(0);
+            run.setId(1L);
+            return 1;
+        });
+
+        runtime = new LearningAgentRuntime(
+                decider, executor, runMapper, stepMapper, new ObjectMapper(),
+                learningPlansService, learningPlanAnchorService
+        );
+    }
+
+    @Test
+    void finalAnswerCompletesRun() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any())).thenReturn(
+                AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "今天建议学 Redis 持久化"))
+        );
+
+        AgentRunResult result = runtime.run(100L, 200L, "今天继续学 Redis");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.finalAnswer()).isEqualTo("今天建议学 Redis 持久化");
+        // 终态 FINAL_ANSWER 也计入一步，与 step 表数量一致
+        assertThat(result.usedSteps()).isEqualTo(1);
+
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getStatus()).isEqualTo("COMPLETED");
+        assertThat(saved.getFinalAnswer()).isEqualTo("今天建议学 Redis 持久化");
+
+        // 终态动作也落 step
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps).hasSize(1);
+        assertThat(steps.get(0).getActionType()).isEqualTo("FINAL_ANSWER");
+    }
+
+    @Test
+    void askUserMarksWaitingUser() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any())).thenReturn(
+                AgentStepDecision.of(AgentStepActionType.ASK_USER)
+                        .withInput(Map.of("question", "你有多个 Redis 相关计划，想学哪个？"))
+        );
+
+        AgentRunResult result = runtime.run(100L, 200L, "我今天继续学 Redis");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.WAITING_USER);
+        assertThat(result.finalAnswer()).isEqualTo("你有多个 Redis 相关计划，想学哪个？");
+
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getStatus()).isEqualTo("WAITING_USER");
+    }
+
+    @Test
+    void queryDashboardThenFinalAnswer() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
+                .thenReturn(
+                        AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                                .withInput(Map.of("answer", "建议继续学 Redis 缓存击穿"))
+                );
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("找到 1 个活跃计划：Redis 学习计划（进度 40%）"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "帮我安排今天学什么");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.finalAnswer()).isEqualTo("建议继续学 Redis 缓存击穿");
+        // 查询 1 步 + 终态 1 步
+        assertThat(result.usedSteps()).isEqualTo(2);
+        verify(executor, times(1)).execute(any(), any(), any());
+
+        // 2 条 step：查询 + 终态回答
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps).hasSize(2);
+        assertThat(steps.get(0).getActionType()).isEqualTo("QUERY_LEARNING_DASHBOARD");
+        assertThat(steps.get(0).getStatus()).isEqualTo("SUCCESS");
+
+        // observation 进上下文
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getContextJson()).contains("Redis 学习计划");
+    }
+
+    @Test
+    void secondDecisionUsesStructuredLearningStateInsteadOfFullObservation() {
+        List<String> contexts = new ArrayList<>();
+        String longObservation = "完整计划展示文本，不应进入下一轮决策上下文。".repeat(120);
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenAnswer(invocation -> {
+                    contexts.add(invocation.getArgument(1));
+                    return contexts.size() == 1
+                            ? AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD)
+                            : AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                            .withInput(Map.of("answer", "根据计划继续学习"));
+                });
+        when(executor.execute(any(), any(), any())).thenReturn(
+                AgentActionResult.of(longObservation)
+                        .with("status", "SUCCESS")
+                        .with("planRef", "Redis")
+                        .with("planCount", 2)
+                        .with("activePlanCount", 1)
+                        .with("matchedCount", 1)
+                        .with("selectedPlanId", 11L));
+
+        AgentRunResult result = runtime.run(100L, 200L, "帮我安排今天学什么");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(contexts).hasSize(2);
+        assertThat(contexts.get(0)).isEmpty();
+        assertThat(contexts.get(1))
+                .contains("【学习计划】")
+                .contains("selectedPlanId=11")
+                .doesNotContain("完整计划展示文本")
+                .hasSizeLessThan(longObservation.length());
+    }
+
+    @Test
+    void nullDecisionFailsRun() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any())).thenReturn(null);
+
+        AgentRunResult result = runtime.run(100L, 200L, "今天学什么");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getErrorMessage()).contains("空决策");
+    }
+
+    @Test
+    void deciderExceptionFailsRun() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenThrow(new RuntimeException("LLM 调用失败"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "今天学什么");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
+        assertThat(result.finalAnswer()).isNull();
+    }
+
+    @Test
+    void maxStepsReachedProducesSummary() {
+        // 永远不终态，只查询，跑满 maxSteps(5)
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD));
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("第 X 条观察数据"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "帮我安排今天学什么");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.usedSteps()).isEqualTo(5);
+        assertThat(result.finalAnswer()).contains("整理如下");
+        assertThat(result.finalAnswer()).contains("第 X 条观察数据");
+    }
+
+    @Test
+    void zeroObservationSuggestionRejectedThenContinues() {
+        // V2.1 裁判：首轮零观察 SUGGEST_WORKFLOW 被拒（没查就拍脑袋），
+        // 落 FAILED step + 拒绝提示进上下文，循环继续
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WORKFLOW)
+                        .withInput(Map.of("workflowType", "LEARNING_PROGRESS", "reason", "学乱了")))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "先了解一下你的学习进度，我再帮你安排")));
+
+        AgentRunResult result = runtime.run(100L, 200L, "我最近学 Redis 有点乱");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.usedSteps()).isEqualTo(2);
+        // 被拒的建议落 FAILED step
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps.get(0).getActionType()).isEqualTo("SUGGEST_WORKFLOW");
+        assertThat(steps.get(0).getStatus()).isEqualTo("FAILED");
+        assertThat(steps.get(0).getErrorMessage()).contains("零观察");
+        // 拒绝提示进上下文，下一轮 LLM 可感知
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getContextJson()).contains("后端已拒绝");
+    }
+
+    @Test
+    void suggestionWithObservationMarksWaitingWorkflowConfirm() {
+        // V2.1：先查询（有观察）再建议 → WAITING_WORKFLOW_CONFIRM + suggestion 透出 + context 落库
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WORKFLOW)
+                        .withInput(Map.of(
+                                "workflowType", "LEARNING_PROGRESS",
+                                "reason", "当前计划阶段与学习反馈不匹配",
+                                "initialMessage", "我最近学 Redis 有点乱")));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划，1 个进行中。\n目标计划《Redis 学习计划》"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "我最近学 Redis 有点乱");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.WAITING_WORKFLOW_CONFIRM);
+        assertThat(result.pendingWorkflowSuggestion()).isNotNull();
+        assertThat(result.pendingWorkflowSuggestion().workflowType()).isEqualTo("LEARNING_PROGRESS");
+        assertThat(result.pendingWorkflowSuggestion().initialMessage()).isEqualTo("我最近学 Redis 有点乱");
+        // 正文直接用 reason（不带"建议启动「X」："前缀）
+        assertThat(result.finalAnswer()).isEqualTo("当前计划阶段与学习反馈不匹配");
+        assertThat(result.finalAnswer()).doesNotContain("建议启动");
+
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getStatus()).isEqualTo("WAITING_WORKFLOW_CONFIRM");
+        assertThat(saved.getContextJson()).contains("pendingWorkflowSuggestion");
+        assertThat(saved.getContextJson()).contains("LEARNING_PROGRESS");
+
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps.get(1).getActionType()).isEqualTo("SUGGEST_WORKFLOW");
+        assertThat(steps.get(1).getStatus()).isEqualTo("SUCCESS");
+    }
+
+    @Test
+    void forbiddenWorkflowTypeFailsRun() {
+        // V2.1：建议文章类 Workflow 不在 allowlist → FAILED
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WORKFLOW)
+                        .withInput(Map.of("workflowType", "CREATE_ARTICLE", "reason", "想写文章")));
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "帮我写文章");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getErrorMessage()).contains("不在允许范围内");
+    }
+
+    @Test
+    void emitterReceivesStepEventsInOrder() {
+        // V2.3：思考面板事件序列——动作 RUNNING → SUCCESS，终态 SUCCESS
+        // V3.10：thoughtSummary 携带断言——决策 1 带思考摘要，事件 RUNNING/SUCCESS 同一句（D4），
+        // 终态 FINAL_ANSWER 无摘要 → null
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(new AgentStepDecision(AgentStepActionType.QUERY_LEARNING_DASHBOARD,
+                        Map.of(), "先看看你今天的学习计划"))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "建议继续学 Redis")));
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("找到 1 个活跃计划"));
+
+        List<String[]> events = new java.util.ArrayList<>();
+        runtime.run(100L, 200L, "帮我安排今天学什么",
+                (stepNo, actionType, status, message, thoughtSummary) ->
+                        events.add(new String[]{String.valueOf(stepNo), actionType, status, message,
+                                thoughtSummary}));
+
+        assertThat(events).hasSize(3);
+        // 第 1 步：查询 RUNNING → SUCCESS
+        assertThat(events.get(0)[0]).isEqualTo("1");
+        assertThat(events.get(0)[1]).isEqualTo("QUERY_LEARNING_DASHBOARD");
+        assertThat(events.get(0)[2]).isEqualTo("RUNNING");
+        assertThat(events.get(1)[0]).isEqualTo("1");
+        assertThat(events.get(1)[1]).isEqualTo("QUERY_LEARNING_DASHBOARD");
+        assertThat(events.get(1)[2]).isEqualTo("SUCCESS");
+        // V3.10：RUNNING/SUCCESS 同一句 thoughtSummary（行文本跨状态稳定）
+        assertThat(events.get(0)[4]).isEqualTo("先看看你今天的学习计划");
+        assertThat(events.get(1)[4]).isEqualTo("先看看你今天的学习计划");
+        // 第 2 步：终态 FINAL_ANSWER SUCCESS（无思考摘要 → null）
+        assertThat(events.get(2)[0]).isEqualTo("2");
+        assertThat(events.get(2)[1]).isEqualTo("FINAL_ANSWER");
+        assertThat(events.get(2)[2]).isEqualTo("SUCCESS");
+        assertThat(events.get(2)[4]).isNull();
+        // V3.10：落库与事件同源——执行步与终态步都落 thoughtSummary
+        //（DB 每步只 insert 一次，RUNNING → SUCCESS 是同一条 step 的状态更新，故 2 行）
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps).hasSize(2);
+        assertThat(steps.get(0).getThoughtSummary()).isEqualTo("先看看你今天的学习计划");
+        assertThat(steps.get(1).getThoughtSummary()).isNull();
+    }
+
+    @Test
+    void writeProposalWithObservationMarksWaitingWriteConfirm() {
+        // V2.4：先查询（有观察）再提案写动作 → WAITING_WRITE_CONFIRM + proposal 透出
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                        .withInput(Map.of(
+                                "taskTitle", "缓存击穿",
+                                "stageTitle", "阶段一",
+                                "done", "true")));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划。\n目标计划《Redis 学习计划》\n- 阶段《阶段一》：缓存击穿；"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "帮我把缓存击穿勾掉");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.WAITING_WRITE_CONFIRM);
+        assertThat(result.pendingWriteAction()).isNotNull();
+        assertThat(result.pendingWriteAction().taskTitle()).isEqualTo("缓存击穿");
+        assertThat(result.pendingWriteAction().done()).isTrue();
+
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getStatus()).isEqualTo("WAITING_WRITE_CONFIRM");
+        assertThat(saved.getContextJson()).contains("pendingWriteAction");
+        assertThat(saved.getContextJson()).contains("缓存击穿");
+    }
+
+    @Test
+    void writeProposalTerminalStepKeepsDecisionTokenUsage() {
+        Usage suggestUsage = mockUsage(150, 15, 165);
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
+                .thenAnswer(inv -> {
+                    inv.getArgument(4, TokenUsageAccumulator.class).add(suggestUsage);
+                    return AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                            .withInput(Map.of(
+                                    "taskTitle", "缓存击穿",
+                                    "stageTitle", "阶段一",
+                                    "done", "true"));
+                });
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划。\n- 阶段《阶段一》：缓存击穿；"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "帮我把缓存击穿勾掉");
+
+        assertThat(result.totalTokens()).isEqualTo(165);
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps).hasSize(2);
+        assertThat(steps.get(1).getActionType()).isEqualTo("SUGGEST_WRITE");
+        assertThat(steps.get(1).getInputTokens()).isEqualTo(150);
+        assertThat(steps.get(1).getOutputTokens()).isEqualTo(15);
+    }
+
+    @Test
+    void addTaskProposalWithObservationMarksWaitingWriteConfirm() {
+        // V3.1：内层 actionType=ADD_LEARNING_TASK（外层仍是 SUGGEST_WRITE，双层同名字段分层语义）
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                        .withInput(Map.of(
+                                "actionType", "ADD_LEARNING_TASK",
+                                "planRef", "Redis 学习计划",
+                                "stageTitle", "第二阶段",
+                                "taskTitle", "缓存雪崩防护")));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划。\n目标计划《Redis 学习计划》\n- 阶段《第二阶段》：缓存穿透；"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "给 Redis 计划第二阶段加一个缓存雪崩防护任务");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.WAITING_WRITE_CONFIRM);
+        assertThat(result.pendingWriteAction()).isNotNull();
+        assertThat(result.pendingWriteAction().actionType()).isEqualTo("ADD_LEARNING_TASK");
+        assertThat(result.pendingWriteAction().taskTitle()).isEqualTo("缓存雪崩防护");
+
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getContextJson()).contains("ADD_LEARNING_TASK");
+    }
+
+    @Test
+    void addTaskProposalRejectedWhenDuplicateTaskExists() {
+        // V3.1 补充：目标阶段已存在同名任务 → 提案前预检拒绝（FAILED step）→ LLM 直接告知，
+        // 不弹确认卡（原来 confirm 才报「已存在」，用户确认了个寂寞）
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                        .withInput(Map.of(
+                                "actionType", "ADD_LEARNING_TASK",
+                                "planRef", "Redis 学习计划",
+                                "stageTitle", "阶段二",
+                                "taskTitle", "缓存雪崩防护")))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "这个任务已经在你的阶段二里了，不用重复添加。")));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划。\n- 阶段《阶段二》：缓存穿透；缓存雪崩防护；"));
+        when(learningPlansService.listByUser(100L)).thenReturn(List.of(activePlan(1L, "Redis 学习计划")));
+        when(learningPlansService.matchPlansByMessage(100L, "Redis 学习计划"))
+                .thenReturn(List.of(activePlan(1L, "Redis 学习计划")));
+        when(learningPlansService.getDetail(1L, 100L)).thenReturn(
+                detailWithStages(stageWithTasks(11L, "阶段二", "缓存雪崩防护")));
+
+        AgentRunResult result = runtime.run(100L, 200L, "给 Redis 计划第二阶段加一个缓存雪崩防护任务");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.finalAnswer()).contains("已经在你的阶段二里");
+        assertThat(result.pendingWriteAction()).isNull();
+        // 提案被拒：SUGGEST_WRITE step 记 FAILED（第 2 步），observation 进上下文让 LLM 收尾
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps).hasSize(3);
+        assertThat(steps.get(1).getActionType()).isEqualTo("SUGGEST_WRITE");
+        assertThat(steps.get(1).getStatus()).isEqualTo("FAILED");
+        assertThat(steps.get(1).getErrorMessage()).contains("已存在同名任务");
+    }
+
+    @Test
+    void renameProposalWithObservationMarksWaitingWriteConfirm() {
+        // V3.3：内层 actionType=UPDATE_LEARNING_TASK → proposal 带 taskTitle(旧名) + newTitle(新名)，done 恒 false
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                        .withInput(Map.of(
+                                "actionType", "UPDATE_LEARNING_TASK",
+                                "planRef", "Redis 学习计划",
+                                "stageTitle", "第二阶段",
+                                "taskTitle", "缓存击穿",
+                                "newTitle", "缓存击穿防护")));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划。\n- 阶段《第二阶段》：缓存击穿；"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "把缓存击穿任务改名为缓存击穿防护");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.WAITING_WRITE_CONFIRM);
+        assertThat(result.pendingWriteAction()).isNotNull();
+        assertThat(result.pendingWriteAction().actionType()).isEqualTo("UPDATE_LEARNING_TASK");
+        assertThat(result.pendingWriteAction().taskTitle()).isEqualTo("缓存击穿");
+        assertThat(result.pendingWriteAction().newTitle()).isEqualTo("缓存击穿防护");
+        assertThat(result.pendingWriteAction().done()).isFalse();
+
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getContextJson()).contains("UPDATE_LEARNING_TASK");
+        assertThat(saved.getContextJson()).contains("缓存击穿防护");
+    }
+
+    @Test
+    void renameProposalRejectedWhenNewTitleAlreadyExists() {
+        // V3.3：新名与阶段内其他任务撞名 → 提案前预检拒绝（FAILED step）→ LLM 直接告知，不弹确认卡
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                        .withInput(Map.of(
+                                "actionType", "UPDATE_LEARNING_TASK",
+                                "planRef", "Redis 学习计划",
+                                "stageTitle", "阶段二",
+                                "taskTitle", "缓存击穿",
+                                "newTitle", "缓存雪崩防护")))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "阶段二里已经有缓存雪崩防护这个任务了，换个名字吧。")));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划。\n- 阶段《阶段二》：缓存击穿；缓存雪崩防护；"));
+        when(learningPlansService.listByUser(100L)).thenReturn(List.of(activePlan(1L, "Redis 学习计划")));
+        when(learningPlansService.matchPlansByMessage(100L, "Redis 学习计划"))
+                .thenReturn(List.of(activePlan(1L, "Redis 学习计划")));
+        when(learningPlansService.getDetail(1L, 100L)).thenReturn(
+                detailWithStages(stageWithTasks(11L, "阶段二", "缓存击穿", "缓存雪崩防护")));
+
+        AgentRunResult result = runtime.run(100L, 200L, "把缓存击穿改名为缓存雪崩防护");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.finalAnswer()).contains("换个名字吧");
+        assertThat(result.pendingWriteAction()).isNull();
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps).hasSize(3);
+        assertThat(steps.get(1).getActionType()).isEqualTo("SUGGEST_WRITE");
+        assertThat(steps.get(1).getStatus()).isEqualTo("FAILED");
+        assertThat(steps.get(1).getErrorMessage()).contains("已存在同名任务");
+    }
+
+    @Test
+    void renameProposalRejectedWhenNewTitleSameAsOld() {
+        // V3.3 边界：同名改名（newTitle == taskTitle）——precheck 排除自身必漏，调用点显式拒绝
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                        .withInput(Map.of(
+                                "actionType", "UPDATE_LEARNING_TASK",
+                                "stageTitle", "阶段一",
+                                "taskTitle", "缓存击穿",
+                                "newTitle", "缓存击穿")))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "新名字和原来一样，不用改。")));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划。\n- 阶段《阶段一》：缓存击穿；"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "把缓存击穿改名为缓存击穿");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.finalAnswer()).contains("不用改");
+        assertThat(result.pendingWriteAction()).isNull();
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps.get(1).getActionType()).isEqualTo("SUGGEST_WRITE");
+        assertThat(steps.get(1).getStatus()).isEqualTo("FAILED");
+        assertThat(steps.get(1).getErrorMessage()).contains("与原任务名相同");
+    }
+
+    @Test
+    void renameProposalWithUnknownActionTypeFailsRun() {
+        // V3.3（Codex 评审收紧）：非空但不认识的 actionType（模型幻觉 DELETE/MOVE 等）→ FAILED 不生成提案，
+        // 绝不回落 UPDATE_TASK_DONE（回落 + done 缺省 true = 误勾选任务）
+        Usage rejectedUsage = mockUsage(170, 17, 187);
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
+                .thenAnswer(invocation -> {
+                    invocation.getArgument(4, TokenUsageAccumulator.class).add(rejectedUsage);
+                    return AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                            .withInput(Map.of(
+                                    "actionType", "DELETE_LEARNING_TASK",
+                                    "taskTitle", "缓存击穿"));
+                });
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "把缓存击穿任务删掉");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
+        assertThat(result.totalTokens()).isEqualTo(187);
+        assertThat(result.usedSteps()).isEqualTo(2);
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getErrorMessage()).contains("不支持的写动作类型");
+        // C0.2：模型给的内部协议值只进日志，不进用户可见文案（原先这里断言的是"含 actionType 原文"）
+        assertThat(saved.getErrorMessage()).doesNotContain("DELETE_LEARNING_TASK");
+        assertThat(result.pendingWriteAction()).isNull();
+        // markFailed 终局：run 落 FAILED，不再产出 WAITING_WRITE_CONFIRM 提案（无 pendingWriteAction 落库）
+        assertThat(saved.getContextJson()).doesNotContain("pendingWriteAction");
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps).hasSize(2);
+        assertThat(steps.get(1).getStatus()).isEqualTo("FAILED");
+        assertThat(steps.get(1).getInputTokens()).isEqualTo(170);
+        assertThat(steps.get(1).getOutputTokens()).isEqualTo(17);
+    }
+
+    private LearningPlans activePlan(Long id, String title) {
+        LearningPlans plan = new LearningPlans();
+        plan.setId(id);
+        plan.setTitle(title);
+        plan.setStatus(LearningPlans.STATUS_ACTIVE);
+        return plan;
+    }
+
+    private LearningPlansDetailVO detailWithStages(LearningPlansDetailVO.StageProgress... stages) {
+        LearningPlansDetailVO vo = new LearningPlansDetailVO();
+        vo.setStages(List.of(stages));
+        return vo;
+    }
+
+    private LearningPlansDetailVO.StageProgress stageWithTasks(Long id, String title, String... taskTitles) {
+        LearningPlansDetailVO.StageProgress stage = new LearningPlansDetailVO.StageProgress();
+        stage.setId(id);
+        stage.setTitle(title);
+        stage.setTasks(java.util.Arrays.stream(taskTitles).map(t -> {
+            LearningPlansDetailVO.TaskItem item = new LearningPlansDetailVO.TaskItem();
+            item.setTitle(t);
+            item.setDone(false);
+            return item;
+        }).toList());
+        return stage;
+    }
+
+    @Test
+    void writeProposalWithoutTaskTitleFailsRun() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_LEARNING_DASHBOARD))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                        .withInput(Map.of("stageTitle", "阶段一")));
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("学习计划总览：共 1 个计划"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "帮我把任务勾掉");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getErrorMessage()).contains("taskTitle");
+    }
+
+    @Test
+    void zeroObservationWriteProposalRejectedThenContinues() {
+        // V2.4：首轮零观察 SUGGEST_WRITE 被拒，循环继续
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                        .withInput(Map.of("taskTitle", "缓存击穿")))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "我先看一下你的学习计划")));
+
+        AgentRunResult result = runtime.run(100L, 200L, "帮我把缓存击穿勾掉");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps.get(0).getActionType()).isEqualTo("SUGGEST_WRITE");
+        assertThat(steps.get(0).getStatus()).isEqualTo("FAILED");
+        assertThat(steps.get(0).getErrorMessage()).contains("零观察");
+    }
+
+    @Test
+    void createRunCancelsStalePendingSuggestions() {
+        // V2.1：新 run 创建时把同 session 旧的 WAITING_WORKFLOW_CONFIRM 置 CANCELLED
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "好的")));
+
+        runtime.run(100L, 200L, "继续学");
+
+        ArgumentCaptor<AiAgentRun> patchCaptor = ArgumentCaptor.forClass(AiAgentRun.class);
+        verify(runMapper).update(patchCaptor.capture(), any());
+        assertThat(patchCaptor.getValue().getStatus()).isEqualTo("CANCELLED");
+    }
+
+    @Test
+    void executorFailureContinuesLoopAndFailsStep() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SEARCH_RAG))
+                .thenReturn(
+                        AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                                .withInput(Map.of("answer", "RAG 失败但计划信息足够，建议继续"))
+                );
+        when(executor.execute(any(), any(), any())).thenThrow(new RuntimeException("ES 连接失败"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "Redis 怎么学");
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.finalAnswer()).isEqualTo("RAG 失败但计划信息足够，建议继续");
+
+        // 失败 step 记 FAILED，observation 带失败原因进上下文
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps.get(0).getActionType()).isEqualTo("SEARCH_RAG");
+        assertThat(steps.get(0).getStatus()).isEqualTo("FAILED");
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getContextJson()).contains("动作执行失败");
+    }
+
+    // V4.x 补口：会话学习计划锚注入 goal——用户省略主语时，决策器手里终于有"刚才聊的是哪个"的依据，
+    // 不再只能列一串候选反问"是哪个计划"（实测：上一轮刚分析完 RocketMQ 计划，下一句照样反问）
+    @Test
+    void sessionPlanAnchorInjectedIntoGoal() {
+        LearningPlans anchor = new LearningPlans();
+        anchor.setId(9L);
+        anchor.setTitle("RocketMQ 30天入门学习计划");
+        when(learningPlanAnchorService.resolve(200L, 100L)).thenReturn(anchor);
+
+        AtomicReference<String> seenGoal = new AtomicReference<>();
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any())).thenAnswer(inv -> {
+            seenGoal.set(inv.getArgument(0));
+            return AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                    .withInput(Map.of("answer", "好的"));
+        });
+
+        runtime.run(100L, 200L, "帮我看看我的计划怎么样");
+
+        assertThat(seenGoal.get())
+                .contains("【会话最近讨论的学习计划】")
+                .contains("RocketMQ 30天入门学习计划");
+    }
+
+    // 无锚也要显式标注"无"（与文章域同构）：决策器据此知道确实没有线索可选，
+    // 而不是"系统忘了给"——前者该 ASK_USER，后者会诱发模型自己编一个计划名
+    @Test
+    void missingAnchorMarkedAsNoneInGoal() {
+        when(learningPlanAnchorService.resolve(200L, 100L)).thenReturn(null);
+
+        AtomicReference<String> seenGoal = new AtomicReference<>();
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any())).thenAnswer(inv -> {
+            seenGoal.set(inv.getArgument(0));
+            return AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                    .withInput(Map.of("answer", "好的"));
+        });
+
+        runtime.run(100L, 200L, "帮我看看我的计划怎么样");
+
+        assertThat(seenGoal.get()).contains("【会话最近讨论的学习计划】无");
+    }
+
+    private AiAgentRun captureRun() {
+        ArgumentCaptor<AiAgentRun> captor = ArgumentCaptor.forClass(AiAgentRun.class);
+        verify(runMapper, atLeastOnce()).updateById(captor.capture());
+        return captor.getValue();
+    }
+
+    private List<AiAgentStep> captureSteps() {
+        ArgumentCaptor<AiAgentStep> captor = ArgumentCaptor.forClass(AiAgentStep.class);
+        verify(stepMapper, atLeastOnce()).insert(captor.capture());
+        return captor.getAllValues();
+    }
+
+    private static Usage mockUsage(int prompt, int completion, int total) {
+        Usage usage = mock(Usage.class);
+        when(usage.getPromptTokens()).thenReturn(prompt);
+        when(usage.getCompletionTokens()).thenReturn(completion);
+        when(usage.getTotalTokens()).thenReturn(total);
+        return usage;
+    }
+}

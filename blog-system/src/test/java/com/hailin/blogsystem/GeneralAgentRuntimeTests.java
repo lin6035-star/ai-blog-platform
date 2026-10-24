@@ -1,0 +1,370 @@
+package com.hailin.blogsystem;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
+import com.hailin.blogsystem.ai.agent.AgentRunResult;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
+import com.hailin.blogsystem.ai.agent.AgentStepDecision;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
+import com.hailin.blogsystem.ai.agent.AgentStepEmitter;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
+import com.hailin.blogsystem.ai.agent.GeneralAgentActionExecutor;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
+import com.hailin.blogsystem.ai.agent.GeneralAgentRuntime;
+import com.hailin.blogsystem.ai.agent.AgentActionResult;
+import com.hailin.blogsystem.ai.agent.GeneralAgentStepDecider;
+import com.hailin.blogsystem.entity.AiAgentRun;
+import com.hailin.blogsystem.entity.AiAgentStep;
+import com.hailin.blogsystem.entity.AiMessages;
+import com.hailin.blogsystem.entity.dto.AiAgentRunStatus;
+import com.hailin.blogsystem.entity.dto.AgentStepActionType;
+import com.hailin.blogsystem.mapper.AiAgentRunMapper;
+import com.hailin.blogsystem.mapper.AiAgentStepMapper;
+import com.hailin.blogsystem.service.AiConversationMemoryService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+
+import java.util.List;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+/**
+ * 通用域 Agent 核心循环测试（V3 通用思考模式）。
+ * 决策器和执行器全部 mock，验证通用域白名单 / maxSteps=3 / 直接回答优先 / 循环骨架。
+ */
+class GeneralAgentRuntimeTests {
+
+    private GeneralAgentStepDecider decider;
+    private GeneralAgentActionExecutor executor;
+    private AiAgentRunMapper runMapper;
+    private AiAgentStepMapper stepMapper;
+    private AiConversationMemoryService conversationMemoryService;
+    private GeneralAgentRuntime runtime;
+
+    @BeforeEach
+    void setUp() {
+        decider = mock(GeneralAgentStepDecider.class);
+        executor = mock(GeneralAgentActionExecutor.class);
+        runMapper = mock(AiAgentRunMapper.class);
+        stepMapper = mock(AiAgentStepMapper.class);
+        conversationMemoryService = mock(AiConversationMemoryService.class);
+
+        // MyBatis-Plus ASSIGN_ID 在 mock 下不生效，insert 时手动赋 id
+        when(runMapper.insert(any(AiAgentRun.class))).thenAnswer(inv -> {
+            AiAgentRun run = inv.getArgument(0);
+            run.setId(1L);
+            return 1;
+        });
+
+        runtime = new GeneralAgentRuntime(
+                decider, executor, runMapper, stepMapper, new ObjectMapper(),
+                conversationMemoryService
+        );
+    }
+
+    // ===================== 会话历史注入（2026-10-19） =====================
+
+    private static AiMessages message(String role, String content) {
+        AiMessages message = new AiMessages();
+        message.setRole(role);
+        message.setContent(content);
+        return message;
+    }
+
+    /**
+     * 「我们这个会话聊了什么」必须在决策上下文里看到**本会话最近对话**。
+     *
+     * <p>为什么这条要在 Runtime 层锁住：通用 Agent 的只读白名单只有 QUERY_MEMORY / SEARCH_RAG，
+     * 上下文里不注入会话历史时，模型只能查长期记忆 → 实测答的全部是用户画像/偏好，
+     * 跟当前会话无关。执行器/决策器测试都覆盖不到这条注入。
+     */
+    @Test
+    void injectsRecentConversationIntoDecisionContext() {
+        when(conversationMemoryService.getRecentMessagesForUser(200L, 100L, 10))
+                .thenReturn(List.of(
+                        message("user", "有没有关于 Redis 的文章？"),
+                        message("ai", "找到了 3 篇 Redis 相关文章")));
+        java.util.concurrent.atomic.AtomicReference<String> capturedContext =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenAnswer(inv -> {
+                    capturedContext.set(inv.getArgument(1, String.class));
+                    return AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                            .withInput(Map.of("answer", "这个会话里我们查了 Redis 文章"));
+                });
+
+        AgentRunResult result = runtime.run(100L, 200L, "我们这个会话聊了什么",
+                null, AgentStepEmitter.noop());
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(capturedContext.get())
+                .contains("【本会话最近对话】")
+                .contains("有没有关于 Redis 的文章？")
+                .contains("找到了 3 篇 Redis 相关文章");
+    }
+
+    /** fail-open：读会话历史失败不影响本次回答（退化成改前行为） */
+    @Test
+    void historyReadFailureDoesNotBreakRun() {
+        when(conversationMemoryService.getRecentMessagesForUser(any(), any(), anyInt()))
+                .thenThrow(new IllegalStateException("db down"));
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "直接回答")));
+
+        AgentRunResult result = runtime.run(100L, 200L, "随便问问", null, AgentStepEmitter.noop());
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.finalAnswer()).isEqualTo("直接回答");
+    }
+
+    /** 没有会话（游客 / 无 sessionId）不查历史，上下文保持原样 */
+    @Test
+    void noHistoryInjectedWithoutSession() {
+        java.util.concurrent.atomic.AtomicReference<String> capturedContext =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenAnswer(inv -> {
+                    capturedContext.set(inv.getArgument(1, String.class));
+                    return AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                            .withInput(Map.of("answer", "回答"));
+                });
+
+        runtime.run(100L, null, "随便问问", null, AgentStepEmitter.noop());
+
+        assertThat(capturedContext.get()).doesNotContain("【本会话最近对话】");
+        verify(conversationMemoryService, never()).getRecentMessagesForUser(any(), any(), anyInt());
+    }
+
+    @Test
+    void queryMemoryThenFinalAnswerCompletesRun() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY)
+                        .withInput(Map.of("question", "最近学习进展")))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "结合你的记忆，建议继续深入缓存部分")));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("记忆摘要：\n- 语义记忆(USER_PREFERENCE)：正在学 Redis 缓存"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "你觉得我现在这套方案还有什么问题",
+                null, AgentStepEmitter.noop());
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.finalAnswer()).isEqualTo("结合你的记忆，建议继续深入缓存部分");
+        assertThat(result.usedSteps()).isEqualTo(2);
+
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getContextJson()).contains("记忆摘要");
+    }
+
+    /**
+     * 2026-10-16：QUERY_MEMORY 的 input 必须由后端并入 run 原始目标（userGoal）。
+     *
+     * <p>为什么这条要在 Runtime 层锁住：执行器测试是直接构造 input 的，
+     * 「注入」这一环被删掉时它照样绿——而线上表现就是"AI 说记忆里没有记录，其实记忆就在库里"。
+     * 同时锁边界：只注入 QUERY_MEMORY，不污染 SEARCH_RAG 的 input。
+     */
+    @Test
+    void queryMemoryInputCarriesRunGoalButRagInputDoesNot() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY)
+                        .withInput(Map.of("question", "之前决定的RAG使用方法及原因")))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SEARCH_RAG)
+                        .withInput(Map.of("keyword", "RAG 检索")))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "结论")));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("记忆摘要"))
+                .thenReturn(AgentActionResult.of("站内检索结果"));
+
+        String goal = "还记得我们之前决定的，RAG使用什么方法吗，为什么使用这个方法";
+        runtime.run(100L, 200L, goal, null, AgentStepEmitter.noop());
+
+        ArgumentCaptor<AgentStepDecision> captor = ArgumentCaptor.forClass(AgentStepDecision.class);
+        verify(executor, times(2)).execute(captor.capture(), any(), any());
+        List<AgentStepDecision> decisions = captor.getAllValues();
+
+        assertThat(decisions.get(0).input()).containsEntry("userGoal", goal);
+        assertThat(decisions.get(0).memoryQuery()).isEqualTo(goal);
+        // 原话只给 QUERY_MEMORY：SEARCH_RAG 用的是自己的 keyword，不该被塞进无关的整句
+        assertThat(decisions.get(1).input()).doesNotContainKey("userGoal");
+    }
+
+    @Test
+    void directFinalAnswerWithoutAnyQuery() {
+        // 「能不查就不查」：已有信息足够时直接终态回答，执行器零调用
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "这个是纯概念问题，直接回答")));
+
+        AgentRunResult result = runtime.run(100L, 200L, "什么是缓存穿透",
+                null, AgentStepEmitter.noop());
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.finalAnswer()).isEqualTo("这个是纯概念问题，直接回答");
+        assertThat(result.usedSteps()).isEqualTo(1);
+        verify(executor, never()).execute(any(), any(), any());
+    }
+
+    @Test
+    void searchRagAsEvidenceAfterMemory() {
+        // 记忆为主、RAG 补证据：QUERY_MEMORY → SEARCH_RAG → FINAL_ANSWER
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SEARCH_RAG)
+                        .withInput(Map.of("keyword", "缓存设计")))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "结合记忆和站内文章，结论如下")));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("记忆摘要：\n- 语义记忆(USER_PREFERENCE)：正在学 Redis"))
+                .thenReturn(AgentActionResult.of("站内文章知识检索结果（hybrid）：\n1. 《Redis缓存设计》(1)：缓存击穿防护"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "结合我现在的情况，给个建议",
+                null, AgentStepEmitter.noop());
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.finalAnswer()).isEqualTo("结合记忆和站内文章，结论如下");
+        assertThat(result.usedSteps()).isEqualTo(3);
+    }
+
+    @Test
+    void askUserWhenInfoMissing() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.ASK_USER)
+                        .withInput(Map.of("question", "你想了解或解决什么？")));
+
+        AgentRunResult result = runtime.run(100L, 200L, "帮我看看",
+                null, AgentStepEmitter.noop());
+
+        // ASK_USER 终态：等用户补充信息（WAITING_USER），非 COMPLETED
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.WAITING_USER);
+        assertThat(result.finalAnswer()).isEqualTo("你想了解或解决什么？");
+    }
+
+    @Test
+    void suggestWorkflowRejectedByWhitelist() {
+        // 通用域白名单无 SUGGEST_WORKFLOW：非法动作直接 FAILED（无域内 Workflow 可建议）
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WORKFLOW)
+                        .withInput(Map.of("workflowType", "OPTIMIZE_ARTICLE")));
+
+        AgentRunResult result = runtime.run(100L, 200L, "帮我优化",
+                null, AgentStepEmitter.noop());
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getErrorMessage()).contains("非法动作");
+        assertThat(saved.getErrorMessage()).doesNotContain("SUGGEST_WORKFLOW");
+    }
+
+    @Test
+    void suggestWriteRejectedByWhitelist() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.SUGGEST_WRITE)
+                        .withInput(Map.of("taskTitle", "缓存击穿")));
+
+        AgentRunResult result = runtime.run(100L, 200L, "帮我把任务勾掉",
+                null, AgentStepEmitter.noop());
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.FAILED);
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getErrorMessage()).contains("非法动作");
+        assertThat(saved.getErrorMessage()).doesNotContain("SUGGEST_WRITE");
+    }
+
+    @Test
+    void emitterReceivesStepEventsInOrder() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "已结合你的情况回答")));
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("记忆摘要：\n- 语义记忆(USER_PREFERENCE)：正在学 Redis"));
+
+        List<String[]> events = new java.util.ArrayList<>();
+        runtime.run(100L, 200L, "结合我的情况给个建议",
+                null, (stepNo, actionType, status, message, thoughtSummary) ->
+                        events.add(new String[]{String.valueOf(stepNo), actionType, status, message}));
+
+        assertThat(events).hasSize(3);
+        assertThat(events.get(0)[1]).isEqualTo("QUERY_MEMORY");
+        assertThat(events.get(0)[2]).isEqualTo("RUNNING");
+        assertThat(events.get(1)[2]).isEqualTo("SUCCESS");
+        assertThat(events.get(2)[1]).isEqualTo("FINAL_ANSWER");
+        assertThat(events.get(2)[2]).isEqualTo("SUCCESS");
+        // 通用域 FINAL_ANSWER 文案（中性化，跨域一致）
+        assertThat(events.get(2)[3]).isEqualTo("已生成最终回答");
+    }
+
+    @Test
+    void maxStepsReachedProducesSummaryAtThree() {
+        // 通用域 maxSteps=3（比学习/文章域 5 收紧）：到顶汇总，不再多轮决策
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY));
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("第 X 条观察数据"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "结合我的情况给个建议",
+                null, AgentStepEmitter.noop());
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.usedSteps()).isEqualTo(3);
+        assertThat(result.finalAnswer()).contains("根据已有信息");
+    }
+
+    @Test
+    void createRunCancelsStalePendingSuggestions() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "好的")));
+
+        runtime.run(100L, 200L, "继续",
+                null, AgentStepEmitter.noop());
+
+        ArgumentCaptor<AiAgentRun> patchCaptor = ArgumentCaptor.forClass(AiAgentRun.class);
+        verify(runMapper).update(patchCaptor.capture(), any());
+        assertThat(patchCaptor.getValue().getStatus()).isEqualTo("CANCELLED");
+    }
+
+    @Test
+    void executorFailureContinuesLoopAndFailsStep() {
+        // 临时故障（非终局失败）：FAILED step 落库，循环继续由下一轮决策收尾
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_MEMORY))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.FINAL_ANSWER)
+                        .withInput(Map.of("answer", "记忆查询失败，但先这样回答")));
+        when(executor.execute(any(), any(), any())).thenThrow(new IllegalArgumentException("ES 暂时不可用"));
+
+        AgentRunResult result = runtime.run(100L, 200L, "结合我的情况给个建议",
+                null, AgentStepEmitter.noop());
+
+        assertThat(result.status()).isEqualTo(AiAgentRunStatus.COMPLETED);
+        assertThat(result.finalAnswer()).isEqualTo("记忆查询失败，但先这样回答");
+
+        List<AiAgentStep> steps = captureSteps();
+        assertThat(steps.get(0).getActionType()).isEqualTo("QUERY_MEMORY");
+        assertThat(steps.get(0).getStatus()).isEqualTo("FAILED");
+        AiAgentRun saved = captureRun();
+        assertThat(saved.getContextJson()).contains("动作执行失败");
+    }
+
+    private AiAgentRun captureRun() {
+        ArgumentCaptor<AiAgentRun> captor = ArgumentCaptor.forClass(AiAgentRun.class);
+        verify(runMapper, atLeastOnce()).updateById(captor.capture());
+        return captor.getValue();
+    }
+
+    private List<AiAgentStep> captureSteps() {
+        ArgumentCaptor<AiAgentStep> captor = ArgumentCaptor.forClass(AiAgentStep.class);
+        verify(stepMapper, atLeastOnce()).insert(captor.capture());
+        return captor.getAllValues();
+    }
+}

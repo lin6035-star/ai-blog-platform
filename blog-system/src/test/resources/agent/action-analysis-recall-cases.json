@@ -1,0 +1,58 @@
+[
+  {
+    "name": "口语化：点个赞 + 咋样",
+    "message": "帮我点个赞，再看看这篇写得咋样",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestedActionsContains": ["likeArticle"]
+  },
+  {
+    "name": "然后 + 评价评价",
+    "message": "收藏一下，然后评价评价这篇文章",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestedActionsContains": ["favoriteArticle"]
+  },
+  {
+    "name": "顺便 + 分析分析",
+    "message": "点个赞，顺便分析分析它的优缺点",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestedActionsContains": ["likeArticle"]
+  },
+  {
+    "name": "关注作者 + 分析",
+    "message": "关注这个作者，再看看他写得怎么样",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestedActionsContains": ["followAuthor"]
+  },
+  {
+    "name": "同时 + 内容质量",
+    "message": "点赞这篇文章，同时评价一下内容质量",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestedActionsContains": ["likeArticle"]
+  },
+  {
+    "name": "并且 + 值不值得读",
+    "message": "收藏这篇文章，并且分析一下值不值得读",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestedActionsContains": ["favoriteArticle"]
+  },
+  {
+    "name": "多动作 + 分析",
+    "message": "点赞加收藏，顺便分析一下",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestedActionsContains": ["likeArticle", "favoriteArticle"]
+  },
+  {
+    "name": "给个赞 + 说说",
+    "message": "给个赞吧，再说说这篇写得如何",
+    "pageType": "article-detail",
+    "pageArticleId": "12",
+    "expectedRequestedActionsContains": ["likeArticle"]
+  }
+]

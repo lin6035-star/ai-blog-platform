@@ -1,0 +1,155 @@
+package com.hailin.blogsystem;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hailin.blogsystem.ai.agent.AgentStepDecision;
+import com.hailin.blogsystem.ai.AiJudgeModelSupport;
+import com.hailin.blogsystem.ai.agent.GeneralAgentStepDecider;
+import com.hailin.blogsystem.entity.dto.AgentStepActionType;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.model.Generation;
+
+import java.lang.reflect.Method;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+/**
+ * 通用域决策器测试（V3 通用思考模式）。
+ * mock ChatClient 返回固定 JSON，验证 QUERY_MEMORY / SEARCH_RAG 解析、修复，
+ * 以及 prompt 中的「能不查就不查」「SEARCH_RAG 不是默认第一步」约束。
+ *
+ * 2026-09-17 token 统计改造：stub 从 content() 换成 chatResponse()，
+ * 响应对象用 thenAnswer 延迟构造（理由见 ArticleAgentStepDeciderTests）。
+ */
+class GeneralAgentStepDeciderTests {
+
+    private ChatClient.Builder builder;
+    private ChatClient chatClient;
+    private ChatClient.ChatClientRequestSpec requestSpec;
+    private ChatClient.CallResponseSpec callSpec;
+    private GeneralAgentStepDecider decider;
+
+    @BeforeEach
+    void setUp() {
+        builder = mock(ChatClient.Builder.class);
+        chatClient = mock(ChatClient.class);
+        requestSpec = mock(ChatClient.ChatClientRequestSpec.class);
+        callSpec = mock(ChatClient.CallResponseSpec.class);
+
+        when(builder.build()).thenReturn(chatClient);
+        when(chatClient.prompt()).thenReturn(requestSpec);
+        when(requestSpec.system(anyString())).thenReturn(requestSpec);
+        when(requestSpec.user(anyString())).thenReturn(requestSpec);
+        when(requestSpec.options(any())).thenReturn(requestSpec);
+        when(requestSpec.call()).thenReturn(callSpec);
+
+        decider = new GeneralAgentStepDecider(builder, new ObjectMapper(), new AiJudgeModelSupport(""));
+    }
+
+    /** 只带文本的响应：metadata 为 null，验证 usage 取值对 null 安全。 */
+    private static ChatResponse textResponse(String text) {
+        ChatResponse response = mock(ChatResponse.class);
+        when(response.getResult())
+                .thenReturn(new Generation(new AssistantMessage(text == null ? "" : text)));
+        return response;
+    }
+
+    @Test
+    void parsesQueryMemoryDecision() {
+        when(callSpec.chatResponse()).thenAnswer(inv -> textResponse(
+                "{\"actionType\":\"QUERY_MEMORY\",\"input\":{\"question\":\"用户最近情况\"}}"
+        ));
+
+        AgentStepDecision decision = decider.decide("结合我的情况给个建议", "", 1, 3, null);
+
+        assertThat(decision).isNotNull();
+        assertThat(decision.actionType()).isEqualTo(AgentStepActionType.QUERY_MEMORY);
+        assertThat(decision.input()).containsEntry("question", "用户最近情况");
+    }
+
+    @Test
+    void parsesSearchRagDecision() {
+        when(callSpec.chatResponse()).thenAnswer(inv -> textResponse(
+                "{\"actionType\":\"SEARCH_RAG\",\"input\":{\"keyword\":\"缓存穿透\"}}"
+        ));
+
+        AgentStepDecision decision = decider.decide("缓存穿透怎么防", "记忆摘要：...", 2, 3, null);
+
+        assertThat(decision.actionType()).isEqualTo(AgentStepActionType.SEARCH_RAG);
+        assertThat(decision.input()).containsEntry("keyword", "缓存穿透");
+    }
+
+    @Test
+    void repairsOnceWhenFirstOutputIsInvalidJson() {
+        when(callSpec.chatResponse())
+                .thenAnswer(inv -> textResponse("我不是 JSON"))
+                .thenAnswer(inv -> textResponse("{\"actionType\":\"FINAL_ANSWER\",\"input\":{\"answer\":\"直接回答\"}}"));
+
+        AgentStepDecision decision = decider.decide("什么是缓存穿透", "", 1, 3, null);
+
+        assertThat(decision).isNotNull();
+        assertThat(decision.actionType()).isEqualTo(AgentStepActionType.FINAL_ANSWER);
+    }
+
+    @Test
+    void returnsNullWhenBothAttemptsFail() {
+        when(callSpec.chatResponse())
+                .thenAnswer(inv -> textResponse("还是不是 JSON"))
+                .thenAnswer(inv -> textResponse("依旧不是 JSON"));
+
+        AgentStepDecision decision = decider.decide("什么是缓存穿透", "", 1, 3, null);
+
+        assertThat(decision).isNull();
+    }
+
+    @Test
+    void summarizeReturnsText() {
+        when(callSpec.chatResponse()).thenAnswer(inv -> textResponse("结合你的记忆，建议继续深入缓存部分。"));
+
+        String summary = decider.summarize("结合我的情况给个建议", "记忆摘要：...", null);
+
+        assertThat(summary).contains("缓存部分");
+    }
+
+    @Test
+    void promptForbidsUnnecessaryLookups() throws Exception {
+        // 延迟双闸门的 prompt 侧约束：能不查就不查、SEARCH_RAG 只作证据补充
+        Method method = GeneralAgentStepDecider.class.getDeclaredMethod("buildSystemPrompt", boolean.class);
+        method.setAccessible(true);
+        String prompt = (String) method.invoke(decider, false);
+
+        assertThat(prompt).contains("能不查就不查");
+        assertThat(prompt).contains("能直接答直接答");
+        assertThat(prompt).contains("SEARCH_RAG 只是证据补充");
+        assertThat(prompt).contains("不是默认第一步");
+        assertThat(prompt).contains("先 QUERY_MEMORY");
+        assertThat(prompt).doesNotContain("SUGGEST_WORKFLOW");
+        assertThat(prompt).doesNotContain("SUGGEST_WRITE");
+        assertThat(prompt).doesNotContain("QUERY_ARTICLE");
+        assertThat(prompt).doesNotContain("QUERY_LEARNING_DASHBOARD");
+    }
+
+    /**
+     * 2026-10-19：问「本会话聊了什么」时，模型必须知道上下文里有【本会话最近对话】，
+     * 且不能拿 QUERY_MEMORY（长期记忆）顶替——实测 bug：回答全是几周前的项目状态/偏好。
+     */
+    @Test
+    void promptRoutesSessionQuestionsToInjectedHistory() throws Exception {
+        Method method = GeneralAgentStepDecider.class.getDeclaredMethod("buildSystemPrompt", boolean.class);
+        method.setAccessible(true);
+        String prompt = (String) method.invoke(decider, false);
+
+        assertThat(prompt).contains("【本会话最近对话】");
+        assertThat(prompt).contains("不要用 QUERY_MEMORY 代替");
+        assertThat(prompt).contains("长期记忆是用户画像/偏好，不是会话内容");
+        // 长期记忆的定位改成「长期情况」，避免"历史情况"继续误导到会话历史
+        assertThat(prompt).contains("目标依赖用户**长期情况**");
+    }
+}

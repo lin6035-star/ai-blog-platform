@@ -1,0 +1,130 @@
+# 生产环境配置
+# 启动方式：./mvnw spring-boot:run -Dspring-boot.run.profiles=prod
+#   或：java -jar blog-system.jar --spring.profiles.active=prod
+#
+# 本 profile 的约定：**敏感项一律无默认值**（写 ${VAR} 而不是 ${VAR:default}）——
+# 缺了就启动失败，不允许静默退回 application.yml 里的开发默认值。
+# Redis 密码例外，见下方说明。
+#
+# 需要设置的环境变量（完整清单见 deploy/blog-system.env.example）：
+#   DB_PASSWORD              — MySQL 密码                       （必须）
+#   JWT_SECRET               — JWT 签名密钥（≥32 字符随机串）    （必须）
+#   GITHUB_OAUTH_CLIENT_ID   — GitHub OAuth 应用 ID             （必须）
+#   GITHUB_OAUTH_CLIENT_SECRET — GitHub OAuth 应用密钥           （必须）
+#   GITHUB_OAUTH_REDIRECT_URI — OAuth 回调地址（须与 GitHub 应用登记一致）（必须）
+#   APP_FRONTEND_URL         — 前端地址，OAuth 登录后跳回这里    （必须）
+#   ALIYUN_API_KEY           — 阿里云百炼 API Key（在 application.yml 中引用）（必须）
+#   REDIS_PASSWORD           — Redis 密码（Redis 无密码时留空）  （有密码时必填）
+#   REDIS_USERNAME           — Redis ACL 账号名（留空 = default 用户）（配了 ACL 时必填）
+#   AI_CHAT_MODEL / AI_JUDGE_MODEL — 生成链 / 判断链模型        （可选，有默认）
+#   ALIYUN_WORKSPACE_ID      — RAG rerank 工作空间              （可选，空则降级）
+#   OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET — 阿里云 OSS 凭证（可选，由 SDK 直读，
+#                             变量名见 aliyun-sdk-oss 的 EnvironmentVariableCredentialsProvider）
+
+server:
+  port: 8080
+  servlet:
+    context-path: /
+
+spring:
+  datasource:
+    # 2026-10-17：地址参数化（部署审计 P2-10）。Docker 部署时后端在容器里、MySQL 是另一个容器，
+    # 写死 localhost 会连不上；默认值仍是「单机裸机」形态，不设 env 时行为与改造前一致。
+    url: ${DB_URL:jdbc:mysql://localhost:3306/blog_system?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=utf-8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true}
+    username: ${DB_USERNAME:myRoot}
+    password: ${DB_PASSWORD}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 同 application.yml：必须明显大于 AI 准入 workerCount（默认 8）。
+    # 每个走准入的 Workflow 任务在 @Transactional 里跑 LLM，会长时间占住一个连接；
+    # 默认的 10 会让 8 个长任务挤掉几乎整个池，普通请求拿不到连接。
+    hikari:
+      maximum-pool-size: 20
+  data:
+    redis:
+      # Docker / 多机部署用 REDIS_HOST/REDIS_PORT 覆盖；默认本机
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # ACL 账号名：配了 ACL 就填（deploy/redis.conf.example 里的 blog-app）。
+      # 留空 = default 用户，即「只有密码、没有按账号限权」——危险命令仍然全开。
+      username: ${REDIS_USERNAME:}
+      # 空默认值是刻意的：Redis 没有密码是合法状态（此时客户端不发 AUTH），
+      # 强制 fail-fast 会逼着"无密码 Redis"的部署去设一个空变量，没有意义。
+      # 反过来说：生产 Redis 若设了密码，这里必须给值，否则连不上。
+      password: ${REDIS_PASSWORD:}
+  # Elasticsearch：站内搜索 + RAG 向量索引。Docker 部署时指向 es 服务名
+  # （ES_URI=http://es:9200）；不设则沿用 application.yml 的 localhost:19200。
+  elasticsearch:
+    uris: ${ES_URI:http://localhost:19200}
+  mail:
+    # 生产：**无默认值**（与其它敏感项一致）。少一个就启动失败，
+    # 不允许静默退回 application.yml 里的 QQ 邮箱默认值。
+    host: ${MAIL_HOST}
+    port: ${MAIL_PORT}
+    username: ${MAIL_USERNAME}
+    password: ${MAIL_PASSWORD}
+    default-encoding: UTF-8
+    properties:
+      mail.smtp.ssl.enable: true
+      mail.smtp.connectiontimeout: 5000
+      mail.smtp.timeout: 5000
+      mail.smtp.writetimeout: 5000
+
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 10MB
+
+mybatis-plus:
+  type-aliases-package: com.hailin.blogsystem.entity
+  global-config:
+    db-config:
+      id-type: auto
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.nologging.NoLoggingImpl  # 生产关掉 SQL 日志
+
+jwt:
+  secret: ${JWT_SECRET}
+
+github:
+  oauth:
+    client-id: ${GITHUB_OAUTH_CLIENT_ID}
+    client-secret: ${GITHUB_OAUTH_CLIENT_SECRET}
+    redirect-uri: ${GITHUB_OAUTH_REDIRECT_URI}
+
+# 前端地址：OAuth 回调后跳回这里。生产不写默认值——若留 localhost，
+# 线上点 GitHub 登录会被跳到用户自己的电脑（改造前该 bug 实际存在）
+app:
+  frontend-url: ${APP_FRONTEND_URL}
+
+aliyun:
+  oss:
+    endpoint: https://oss-cn-beijing.aliyuncs.com
+    bucketName: blog-system-26
+    region: cn-beijing
+
+# ============================================================
+# 生产环境差异（2026-10-18 部署前核对）
+# ============================================================
+
+# 日志：容器内绝对路径（compose 把 ./logs 挂到 /app/logs）。
+# application.yml 里写的是相对路径 logs/blog-system.log —— 容器的工作目录不一定是 /app，
+# 相对路径会落到容器根目录，日志随容器重建而丢失。
+logging:
+  file:
+    name: /app/logs/blog-system.log
+
+blog:
+  ai:
+    # 开发者只读面板：生产关闭。
+    # application.yml 里那份白名单是开发机雪花 ID，线上没有任何意义，也不该暴露该端点。
+    inspection:
+      enabled: false
+      allowed-user-ids: []
+    rag:
+      rebuild:
+        # 不继承开发机白名单。首次初始化 RAG 索引时，用**外部配置**临时开启：
+        #   /opt/blog/backend/config/application.yml
+        #   blog.ai.rag.rebuild.allowed-user-ids: [你的管理员 userId]
+        # 初始化完成（alias 出现）后删掉该文件并重启 backend。
+        allowed-user-ids: []

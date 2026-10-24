@@ -1,0 +1,61 @@
+package com.hailin.blogsystem.controller;
+
+import com.hailin.blogsystem.entity.vo.PageVO;
+import com.hailin.blogsystem.service.ArticlesService;
+import com.hailin.blogsystem.constants.BlogConstants;
+import com.hailin.blogsystem.utils.ClientIpUtils;
+import com.hailin.blogsystem.utils.PageParamUtils;
+import com.hailin.blogsystem.utils.Result;
+import com.hailin.blogsystem.entity.vo.ArticleDetailVO;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.*;
+
+@RestController()
+@RequestMapping("/api")
+@RequiredArgsConstructor
+public class ArticlesController {
+
+    private final ArticlesService articlesService;
+
+    @GetMapping("/articles")  //1.获取公开文章列表（游标分页，语义见 ArticlesService#getArticles）
+    public Result<PageVO<ArticleDetailVO>> getArticles(@RequestParam(required = false) String cursor,
+                                                       @RequestParam(defaultValue = "10") Long pageSize,
+                                                       @RequestParam(required = false) String keyword,
+                                                       @RequestParam(required = false) Long categoryId,
+                                                       @RequestParam(defaultValue = "latest") String sort){
+        // 公开接口：pageSize 必须在入口归一化——MP 对 size<0 会跳过所有分页（全表查询）
+        pageSize = PageParamUtils.clampPageSize(pageSize, 10);
+        PageVO<ArticleDetailVO> data = articlesService.getArticles(cursor,pageSize,keyword,categoryId,sort);
+
+        return Result.success(data);
+    }
+
+    @GetMapping("/articles/{id}")  //2.获取公开文章详情
+    public Result getArticlesById(@PathVariable Long id, HttpServletRequest request){
+        // 游客的 UV 统计需要 IP；登录用户的身份在 Service 层从 UserContext 取
+        ArticleDetailVO article = articlesService.getPublicArticleById(id, ClientIpUtils.getClientIp(request));
+        if (article == null) {
+            return Result.error(BlogConstants.ErrorCode.NOT_FOUND, "article not found");
+        }
+
+        return Result.success(article);
+    }
+
+    @GetMapping("/articles/hot")  //3.获取热度前十的文章
+    public Result<PageVO<ArticleDetailVO>> getHotArticles(@RequestParam(defaultValue = "1") Long page,
+                                                          @RequestParam(defaultValue = "10") Long pageSize){
+        // 公开接口：page/pageSize 归一化（负数会让 MP 不分页，直接把热度榜全表读进内存）
+        page = PageParamUtils.clampPage(page);
+        pageSize = PageParamUtils.clampPageSize(pageSize, 10);
+        PageVO<ArticleDetailVO> data = articlesService.getHotArticles(page, pageSize);
+        return Result.success(data);
+    }
+
+    @PostMapping("/articles/{id}/share")  //收藏文章
+    public Result shareArticle(@PathVariable Long id){
+        articlesService.shareArticle(id);
+
+        return Result.success();
+    }
+}
