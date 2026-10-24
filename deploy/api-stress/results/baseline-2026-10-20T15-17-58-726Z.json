@@ -1,0 +1,61 @@
+{
+  "startedAt": "2026-10-20T15:17:28.581Z",
+  "base": "http://127.0.0.1:8080",
+  "mode": "baseline",
+  "model": "closed-loop fixed concurrency",
+  "durationSec": 20,
+  "warmupSec": 10,
+  "timeoutMs": 10000,
+  "levels": [
+    50
+  ],
+  "ab": null,
+  "scenarios": [
+    {
+      "name": "health",
+      "path": "/actuator/health",
+      "expect": "http200"
+    }
+  ],
+  "environment": {
+    "capturedAt": "2026-10-20T15:17:27.303Z",
+    "node": "v22.22.2",
+    "platform": "win32 10.0.26200",
+    "cpu": "13th Gen Intel(R) Core(TM) i7-13650HX",
+    "cores": 20,
+    "totalMemGB": 23.8,
+    "gitHead": null,
+    "javaProcesses": 5,
+    "fingerprint": {
+      "path": "blog-system/src/main/java/com/hailin/blogsystem/search/ArticleSearchService.java",
+      "bytes": 19911,
+      "sha256Prefix": "28ba32d601db",
+      "mtime": "2026-10-19T15:34:54.609Z"
+    }
+  },
+  "results": [
+    {
+      "scenario": "health",
+      "concurrency": 50,
+      "measuredAt": "2026-10-20T15:17:38.635Z",
+      "requests": 8776,
+      "successes": 8776,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 438.8,
+      "latencyMs": {
+        "p50": 110,
+        "p95": 153,
+        "p99": 189,
+        "max": 693
+      },
+      "failedLatencyMs": null,
+      "httpStatus": {
+        "200": 8776
+      },
+      "businessCode": {
+        "UNKNOWN": 8776
+      }
+    }
+  ]
+}

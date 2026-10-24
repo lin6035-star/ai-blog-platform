@@ -1,0 +1,33 @@
+# 构建产物
+target/
+dist/
+deploy-package/
+*.jar
+*.war
+
+# 依赖
+node_modules/
+
+# 日志与运行时产物
+logs/
+output/
+*.log
+
+# 本地敏感配置（含真实密钥，绝不入库）
+**/config/application.yml
+*.local.yml
+
+# 工具与临时目录
+.idea/
+.vscode/
+*.iml
+.claude/
+.codex/
+.agents/
+.playwright-cli/
+.tmp-*
+*.corrupt-bak
+
+# 系统文件
+.DS_Store
+Thumbs.db

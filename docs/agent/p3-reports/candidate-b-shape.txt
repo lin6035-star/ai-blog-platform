@@ -1,0 +1,15 @@
+=== 候选 B：第二段（Extractor）prompt 字符数 ===
+参考：现状 FULL = 25626 字符
+
+域组合                               字符数
+CHAT                            11437
+ARTICLE                         14336
+ARTICLE+ARTICLE_SEARCH          15127
+ARTICLE+NAVIGATE                15024
+LEARNING                        17060
+OPTIMIZE_ARTICLE                13974
+WALLET                          11794
+EDITOR                          12080
+CREATE_ARTICLE                  12089
+
+注：纯闲聊（CHAT）不会走到第二段——它由第一段直接收口。

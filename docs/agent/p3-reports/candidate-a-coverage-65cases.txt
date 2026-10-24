@@ -1,0 +1,72 @@
+=== 候选 A 离线覆盖检查（65 条数据驱动样例）===
+判据：期望值 → 必需块的人工映射，只抓「整块没装」的结构性缺口。
+
+样例                                           兜底       缺失块
+点名计划阶段求拆解进入 LEARNING_ASSIST                  -        -
+状态依赖句 GENERAL_CHAT 需思考                       FULL     -
+纯概念问答不思考                                     FULL     -
+分界：点名任务名走 LEARNING_AGENT 而非拆解 Workflow       -        -
+回归：点名计划压缩保留 planRef 摘录                       -        -
+回归：点名计划拆解保留 planRef 摘录                       -        -
+分界：点名计划阶段任务名走受控写                             -        -
+回归：多行消息加任务不降级普通聊天                            -        -
+分界：点名任务改名走 LEARNING_AGENT 受控写                -        -
+回归：整体调整诉求不漂移到受控写                             FULL     -
+分界：详情页点名完整新标题走 ARTICLE_AGENT 受控写             FULL     -
+回归：文章页泛泛改标题诉求不漂移到受控写                         FULL     -
+分界：详情页隐藏当前文章走 ARTICLE_AGENT 受控写              -        -
+回归：文章页内容修改指令不漂移到受控写                          -        -
+V3.8 分界：首页近指隐藏走 ARTICLE_AGENT 会话锚兜底          -        -
+V3.8 分界：标题指代受控操作走 ARTICLE_AGENT（定位不到澄清）      -        -
+V3.9 首页近指文章内容问走 ARTICLE_DETAIL_QA            FULL     -
+V3.9 首页近指总结走 ARTICLE_DETAIL_QA               FULL     -
+V3.9 回归：首页纯概念问不升级 ARTICLE_DETAIL_QA          FULL     -
+V3.9 分界：标题指代内容问走 ARTICLE_DETAIL_QA（定位不到澄清）   FULL     -
+V3.9 分界：找站内文章走 ARTICLE_SEARCH 不漂移到 QA        FULL     -
+V3.9 详情页近指文章内容问走 ARTICLE_DETAIL_QA           FULL     -
+V4 第一刀：单节内容评价走 ARTICLE_DETAIL_QA             FULL     -
+V4 第一刀：多子目标读文走 ARTICLE_AGENT                 FULL     -
+V4 第一刀：多子目标检查章节走 ARTICLE_AGENT               FULL     -
+V4 第一刀：结合写作偏好走 ARTICLE_AGENT                 FULL     -
+V4 第一刀：单目标开头评价走 ARTICLE_DETAIL_QA            FULL     -
+分界：分析计划内容走 LEARNING_AGENT 而非 PLAN_QUERY      -        -
+分界：评价计划安排合理性走 LEARNING_AGENT                 -        -
+分界：计划求改进建议走 LEARNING_AGENT                   -        -
+分界：非计划页分析计划仍走 LEARNING_AGENT（防页面依赖）          -        -
+分界：计划详情页分析计划走 LEARNING_AGENT                 -        -
+回归：问计划进度仍走 LEARNING_PLAN_QUERY               -        -
+回归：问有哪些计划仍走 LEARNING_PLAN_QUERY              -        -
+回归：列计划清单仍走 LEARNING_PLAN_QUERY               -        -
+充值进入 WALLET_AGENT（2026-09-21）                -        -
+中文数字充值也进 WALLET_AGENT                        -        -
+反例：问余额带数字，不能漂成充值                             -        -
+反例：问充值比例不等于要充值                               -        -
+复合目标：动作在前 + 分析在后（核心支持句；第四步起两项都要进 taskGoals）  -        -
+第三刀：写动作 + 客户端导航（第一刀验收句 1；intent 两轮实测稳定但非本样例… -        -
+第三刀：写动作 + 站内检索（第一刀验收句 2；实测 intent 在 ACTION/… -        -
+复合目标：扩展表达（顺便）                                -        -
+反例：讨论点赞机制不得误判为复合目标                           -        -
+反例：单动作不得带分析证据                                -        -
+反例：纯分析请求不得判成文章动作                             FULL     -
+5a：优化文章——新协议 WORKFLOW_HANDOFF + 旧字段双写        -        -
+5a：写新文章——CREATE_ARTICLE                      -        -
+5a：制定学习计划——LEARNING_PLAN                     -        -
+5a：调整计划阶段——LEARNING_PROGRESS                 -        -
+5a：攻坚难点——LEARNING_ASSIST                     -        -
+5a：口语变体「优化下」也要认成优化文章的 Workflow               -        -
+5a：边界——「调整计划」不能漂成攻坚难点                        -        -
+5a：复合目标——点赞 + 优化文章，两个目标都要拆出来                 -        -
+5a：复合目标——优化 + 搜索                             -        -
+5a：复合目标——优化 + 导航                             -        -
+5a：两个 Workflow 目标（优化 + 写新文章）                 -        -
+5a 反例：文章分析不是 Workflow                        FULL     -
+5a 反例：讨论 Workflow 概念不能被拆成任务目标                FULL     -
+5a 反例：页面缺文章上下文时不许硬编 articleId                -        -
+5a：多个学习计划但没有点名——不能瞎猜 planRef                 -        -
+编辑器：编辑器页保存草稿                                 -        -
+编辑器：编辑器页发布文章                                 -        -
+编辑器：非编辑器页说保存草稿仍判 EDITOR_ACTION               -        -
+编辑器：非编辑器页说发布仍判 EDITOR_ACTION                 -        -
+
+缺口：0 / 65 条样例存在缺失块
+结论：A 在评测集上没有结构性漏装；剩下的只能靠在线硬门验证语义正确性。

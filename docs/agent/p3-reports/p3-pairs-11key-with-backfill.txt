@@ -1,0 +1,40 @@
+=== P3 候选配对测量（FULL = 现状 / ON_DEMAND = 候选 A）===
+缩样：写一篇,单动作
+口径：两侧走同一条测试侧同构链路（ClassifierCandidateRunner），唯一变量是 system prompt。
+      条内顺序交替（偶数条 FULL→候选、奇数条候选→FULL），两侧调用间退避 4000ms。
+      **绝对值只在本表内可比**（测试侧链路 ≠ 生产链路），可相减的是配对差值。
+
+样例                                FULL输入       A输入      Δ输入      Δ%   FULL门      A门   FULLms     A ms
+文章动作：单动作不得带分析证据                     8417      4511     3906   46.4%    FAIL    PASS     4537     4025
+Workflow：写一篇新文章                     8404      3623     4781   56.9%    PASS    FAIL     3718     2899
+
+配对汇总（两侧均无硬门失败：0 / 共 2 条）
+  输入 token     FULL 0 → A 0      配对降幅 0.0%
+  输出 token     FULL 0 → A 0
+  调用次数       FULL 0 → A 0
+  延迟 P50/P95   FULL 0/0 ms      A 0/0 ms
+  异常落点       FULL 0 条         A 0 条
+  硬门 PASS      FULL 1/2           A 1/2
+
+候选 A 掉门（FULL 没掉）—— 一条就足以淘汰：
+  - Workflow：写一篇新文章
+      硬门：
+Expecting ListN:
+  []
+to contain:
+  ["WORKFLOW_HANDOFF"]
+but could not find the following element(s):
+  ["WORKFLOW_HANDOFF"]
+
+      FULL 输出：intent=CREATE_ARTICLE_WORKFLOW action=WORKFLOW wf=CREATE_ARTICLE kind=TASK goals=[WORKFLOW_HANDOFF(CREATE_ARTICLE)] evidence=null reason=用户明确要求创建文章
+      候选输出：intent=CREATE_ARTICLE_WORKFLOW action=WORKFLOW wf=CREATE_ARTICLE kind=null goals=[] evidence=null reason=用户明确要求创建文章
+
+逐条模型输出（复盘用：能看出旧字段兜底改写了什么、模型有没有幻觉出 WORKFLOW_HANDOFF）
+  文章动作：单动作不得带分析证据
+    FULL：intent=ARTICLE_ACTION action=CHAT wf=null kind=null goals=[] evidence=null reason=用户要求点赞当前文章
+    候选：intent=ARTICLE_ACTION action=CHAT wf=null kind=TASK goals=[ARTICLE_WRITE] evidence=null reason=用户明确要求点赞当前文章
+  Workflow：写一篇新文章
+    FULL：intent=CREATE_ARTICLE_WORKFLOW action=WORKFLOW wf=CREATE_ARTICLE kind=TASK goals=[WORKFLOW_HANDOFF(CREATE_ARTICLE)] evidence=null reason=用户明确要求创建文章
+    候选：intent=CREATE_ARTICLE_WORKFLOW action=WORKFLOW wf=CREATE_ARTICLE kind=null goals=[] evidence=null reason=用户明确要求创建文章
+
+结论：淘汰候选 A —— 有 1 条样例在 A 下判错（正确性不过硬门，不再看它省了多少 Token）

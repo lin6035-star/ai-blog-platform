@@ -1,0 +1,57 @@
+=== P3 候选配对测量（FULL = 现状 / ON_DEMAND = 候选 A）===
+口径：两侧走同一条测试侧同构链路（ClassifierCandidateRunner），唯一变量是 system prompt。
+      条内顺序交替（偶数条 FULL→候选、奇数条候选→FULL），两侧调用间退避 8000ms。
+      **绝对值只在本表内可比**（测试侧链路 ≠ 生产链路），可相减的是配对差值。
+
+样例                                FULL输入       A输入      Δ输入      Δ%   FULL门      A门   FULLms     A ms
+闲聊：纯概念问答                            8399      8554     -155   -1.8%    PASS    PASS     3930     2534
+闲聊：状态依赖建议                           8403      8558     -155   -1.8%    PASS    PASS     2859     3198
+文章问答：单节内容评价                         8426      8581     -155   -1.8%    PASS    PASS     3103     4243
+文章问答：详情页近指内容问                       8420      8575     -155   -1.8%    PASS    PASS     3027     2848
+文章动作：单动作不得带分析证据                     8417      4665     3752   44.6%    PASS    PASS     3525     3034
+文章动作：详情页隐藏当前文章                      8424      4672     3752   44.5%    PASS    PASS     3934     3150
+复合：动作在前 + 分析在后（核心支持句）               8425      4673     3752   44.5%    PASS    PASS     4309     3775
+复合：扩展表达（顺便）                         8425      4673     3752   44.5%    PASS    PASS     4129     2843
+Workflow：优化当前文章                     8418      4542     3876   46.0%    PASS    PASS     3913     2597
+Workflow：写一篇新文章                     8404      3776     4628   55.1%    PASS    PASS     3690     3023
+Workflow：制定学习计划                     8403      5524     2879   34.3%    PASS    PASS     3609     2961
+Workflow：调整计划阶段                     8406      5527     2879   34.2%    PASS    PASS     5462     2781
+Workflow：攻坚难点                       8408      5529     2879   34.2%    PASS    PASS     3986     3755
+Workflow复合：点赞 + 优化文章                8422      5618     2804   33.3%    PASS    PASS     4152     4623
+Workflow复合：优化 + 搜索                  8427      4804     3623   43.0%    PASS    PASS     4370     3124
+Workflow复合：优化 + 导航                  8424      4739     3685   43.7%    PASS    PASS     4281     4721
+学习域：分析计划内容                          8405      5526     2879   34.3%    PASS    PASS     3042     2345
+学习域：问计划进度                           8402      5523     2879   34.3%    PASS    PASS     3030     2220
+页面动作：钱包充值                           8400      3727     4673   55.6%    PASS    FAIL     2962     3397
+页面动作：写动作 + 客户端导航                    8427      4866     3561   42.3%    PASS    PASS     5410     3441
+计划定位：两个相似计划中选中 C++（最坏三调用链）         16815     17125     -310   -1.8%    PASS    PASS     7879     7561
+计划定位：未点名计划时不得猜                      8404      8559     -155   -1.8%    PASS    PASS     3791     4461
+编辑器：编辑器页保存草稿                        8416      3811     4605   54.7%    PASS    PASS     3831     2417
+编辑器：编辑器页发布文章                        8415      3810     4605   54.7%    PASS    PASS     3613     2647
+编辑器：非编辑器页保存草稿                       8398      3793     4605   54.8%    PASS    PASS     2733     2488
+编辑器：非编辑器页发布                         8397      3792     4605   54.8%    PASS    PASS     3127     2546
+
+配对汇总（两侧均无硬门失败：25 / 共 26 条）
+  输入 token     FULL 218730 → A 149815      配对降幅 31.5%
+  输出 token     FULL 6413 → A 4922
+  调用次数       FULL 26 → A 26
+  延迟 P50/P95   FULL 3831/5462 ms      A 3023/4721 ms
+  异常落点       FULL 0 条         A 0 条
+  硬门 PASS      FULL 26/26           A 25/26
+
+候选 A 掉门（FULL 没掉）—— 一条就足以淘汰：
+  - 页面动作：钱包充值
+      硬门：[用例 充值进入 WALLET_AGENT（2026-09-21）：workflowType 必须是已登记值] 
+Expecting actual:
+  "WALLET_RECHARGE"
+to be in:
+  ["CREATE_ARTICLE",
+    "OPTIMIZE_ARTICLE",
+    "LEARNING_PLAN",
+    "LEARNING_PROGRESS",
+    "LEARNING_ASSIST"]
+
+      FULL 输出：intent=WALLET_AGENT action=AGENT wf=null kind=TASK goals=[WALLET_RECHARGE] evidence=null reason=用户明确要求充值
+      候选输出：intent=WALLET_AGENT action=AGENT wf=null kind=TASK goals=[WORKFLOW_HANDOFF] evidence=null reason=用户明确要求充值
+
+结论：淘汰候选 A —— 有 1 条样例在 A 下判错（正确性不过硬门，不再看它省了多少 Token）

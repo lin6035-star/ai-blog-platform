@@ -1,0 +1,41 @@
+{
+  "startedAt": "2026-10-19T15:33:55.436Z",
+  "base": "http://127.0.0.1:8080",
+  "model": "closed-loop fixed concurrency",
+  "durationSec": 20,
+  "warmupSec": 5,
+  "timeoutMs": 10000,
+  "levels": [
+    50
+  ],
+  "scenarios": [
+    {
+      "name": "article-search",
+      "path": "/api/articles?keyword=Redis&pageSize=10"
+    }
+  ],
+  "results": [
+    {
+      "scenario": "article-search",
+      "concurrency": 50,
+      "measuredAt": "2026-10-19T15:34:00.669Z",
+      "requests": 1699,
+      "successes": 1699,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 84.95,
+      "latencyMs": {
+        "p50": 607,
+        "p95": 764,
+        "p99": 813,
+        "max": 915
+      },
+      "httpStatus": {
+        "200": 1699
+      },
+      "businessCode": {
+        "0": 1699
+      }
+    }
+  ]
+}

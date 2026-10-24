@@ -1,0 +1,140 @@
+{
+  "startedAt": "2026-10-20T15:01:46.436Z",
+  "base": "http://127.0.0.1:8080",
+  "mode": "ab-logger",
+  "model": "closed-loop fixed concurrency",
+  "durationSec": 10,
+  "warmupSec": 10,
+  "timeoutMs": 10000,
+  "levels": [
+    50
+  ],
+  "ab": {
+    "logger": "com.hailin.blogsystem.search.ArticleSearchService",
+    "levels": [
+      "DEBUG",
+      "INFO"
+    ],
+    "rounds": 1
+  },
+  "scenarios": [
+    {
+      "name": "article-search",
+      "path": "/api/articles?keyword=Redis&pageSize=10",
+      "expect": "business"
+    }
+  ],
+  "environment": {
+    "capturedAt": "2026-10-20T15:01:45.043Z",
+    "node": "v22.22.2",
+    "platform": "win32 10.0.26200",
+    "cpu": "13th Gen Intel(R) Core(TM) i7-13650HX",
+    "cores": 20,
+    "totalMemGB": 23.8,
+    "gitHead": null,
+    "javaProcesses": 5,
+    "fingerprint": {
+      "path": "blog-system/src/main/java/com/hailin/blogsystem/search/ArticleSearchService.java",
+      "bytes": 19911,
+      "sha256Prefix": "28ba32d601db",
+      "mtime": "2026-10-19T15:34:54.609Z"
+    }
+  },
+  "results": [
+    {
+      "round": 1,
+      "variant": "A",
+      "level": "DEBUG",
+      "scenario": "article-search",
+      "concurrency": 50,
+      "measuredAt": "2026-10-20T15:01:56.627Z",
+      "requests": 2232,
+      "successes": 2232,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 223.2,
+      "latencyMs": {
+        "p50": 225,
+        "p95": 266,
+        "p99": 277,
+        "max": 292
+      },
+      "failedLatencyMs": null,
+      "httpStatus": {
+        "200": 2232
+      },
+      "businessCode": {
+        "0": 2232
+      }
+    },
+    {
+      "round": 1,
+      "variant": "B",
+      "level": "INFO",
+      "scenario": "article-search",
+      "concurrency": 50,
+      "measuredAt": "2026-10-20T15:02:06.834Z",
+      "requests": 2135,
+      "successes": 2135,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 213.5,
+      "latencyMs": {
+        "p50": 234,
+        "p95": 301,
+        "p99": 354,
+        "max": 388
+      },
+      "failedLatencyMs": null,
+      "httpStatus": {
+        "200": 2135
+      },
+      "businessCode": {
+        "0": 2135
+      }
+    }
+  ],
+  "abSummary": {
+    "A": {
+      "level": "DEBUG",
+      "rounds": 1,
+      "throughputRps": {
+        "values": [
+          223.2
+        ],
+        "median": 223.2,
+        "min": 223.2,
+        "max": 223.2
+      },
+      "spreadPct": 0,
+      "p95Ms": {
+        "values": [
+          266
+        ],
+        "median": 266
+      }
+    },
+    "B": {
+      "level": "INFO",
+      "rounds": 1,
+      "throughputRps": {
+        "values": [
+          213.5
+        ],
+        "median": 213.5,
+        "min": 213.5,
+        "max": 213.5
+      },
+      "spreadPct": 0,
+      "p95Ms": {
+        "values": [
+          301
+        ],
+        "median": 301
+      }
+    },
+    "throughputDeltaPct": -4.3,
+    "maxWithinGroupSpreadPct": 0,
+    "conclusive": true
+  }
+}

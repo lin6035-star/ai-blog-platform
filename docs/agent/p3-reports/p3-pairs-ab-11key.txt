@@ -1,0 +1,72 @@
+=== P3 候选配对测量 ===
+左 = ON_DEMAND　右 = ROUTE_EXTRACTOR　缩样：纯概念问答,单节内容评价,单动作,动作在前,优化当前文章,优化 + 搜索,分析计划内容,钱包,选中 C++,编辑器页保存草稿
+口径：两侧走同一条测试侧同构链路（ClassifierCandidateRunner），差别只在候选方案本身。
+      条内顺序交替（偶数条 左→右、奇数条 右→左），两侧调用间退避 8000ms。
+      **绝对值只在本表内可比**（测试侧链路 ≠ 生产链路），可相减的是配对差值。
+
+样例                             ON_DEMAND ROUTE_EX…      Δ输入      Δ%     左硬门     右硬门     左 ms     右 ms
+闲聊：纯概念问答                            8399       664     7735   92.1%    PASS    PASS     5283     2151
+文章问答：单节内容评价                         8426      5211     3215   38.2%    PASS    PASS     5081     6565
+文章动作：单动作不得带分析证据                     4511      5193     -682  -15.1%    PASS    PASS     4501     6284
+复合：动作在前 + 分析在后（核心支持句）               4519      5209     -690  -15.3%    PASS    PASS     5319     7501
+Workflow：优化当前文章                     4388      5071     -683  -15.6%    PASS    PASS     4335     6632
+Workflow复合：优化 + 搜索                  4650      5342     -692  -14.9%    PASS    PASS     4665     7758
+学习域：分析计划内容                          5372      6042     -670  -12.5%    PASS    PASS     6030     7127
+页面动作：钱包充值                           3574      4239     -665  -18.6%    PASS    PASS     3111     5220
+计划定位：两个相似计划中选中 C++（最坏三调用链）         16815      6044    10771   64.1%    FAIL    FAIL    10116     7451
+编辑器：编辑器页保存草稿                        3658      4339     -681  -18.6%    PASS    PASS     3590     5670
+编辑器：非编辑器页保存草稿                       3640      4303     -663  -18.2%    PASS    PASS     3455     5200
+
+配对汇总（两侧均无硬门失败：10 / 共 11 条）
+  输入 token     ON_DEMAND 51137 → ROUTE_EXTRACTOR 45613      配对降幅 10.8%
+  输出 token     ON_DEMAND 1365 → ROUTE_EXTRACTOR 1860
+  调用次数       ON_DEMAND 10 → ROUTE_EXTRACTOR 19
+  延迟 P50/P95   ON_DEMAND 4501/6030 ms      ROUTE_EXTRACTOR 6284/7758 ms
+  异常落点       ON_DEMAND 0 条         ROUTE_EXTRACTOR 0 条
+  硬门 PASS      ON_DEMAND 10/11           ROUTE_EXTRACTOR 10/11
+
+ROUTE_EXTRACTOR 掉门（ON_DEMAND 没掉）：
+  （无）
+
+ON_DEMAND 掉门（ROUTE_EXTRACTOR 没掉）：
+  （无）
+
+两侧都掉门（样例本身不稳定，不作为淘汰证据）：
+  - 计划定位：两个相似计划中选中 C++（最坏三调用链）
+
+逐条模型输出（复盘用：能看出旧字段兜底改写了什么、模型有没有幻觉出 WORKFLOW_HANDOFF）
+  闲聊：纯概念问答
+    ON_DEMAND：intent=GENERAL_CHAT action=CHAT wf=null kind=null goals=[] evidence=null reason=纯概念问答，不依赖上下文  roles=FIRST_PASS
+    ROUTE_EXTRACTOR：intent=GENERAL_CHAT action=CHAT wf=null kind=null goals=[] evidence=null reason=用户询问‘什么是缓存穿透’，属于纯概念性技术问答，不涉及文章操作、学习计划、页面跳转等其他领域  roles=ROUTE
+  文章问答：单节内容评价
+    ON_DEMAND：intent=ARTICLE_DETAIL_QA action=CHAT wf=null kind=null goals=[] evidence=null reason=用户对当前文章的特定章节进行内容评价，属于文章内容问答  roles=FIRST_PASS
+    ROUTE_EXTRACTOR：intent=ARTICLE_DETAIL_QA action=CHAT wf=null kind=null goals=[] evidence=null reason=用户对当前文章中特定章节进行评价，属于内容问答类意图  roles=ROUTE+EXTRACTOR
+  文章动作：单动作不得带分析证据
+    ON_DEMAND：intent=ARTICLE_ACTION action=CHAT wf=null kind=TASK goals=[ARTICLE_WRITE] evidence=null reason=用户明确要求点赞当前文章  roles=FIRST_PASS
+    ROUTE_EXTRACTOR：intent=ARTICLE_ACTION action=CHAT wf=null kind=TASK goals=[ARTICLE_WRITE] evidence=null reason=用户明确要求对当前文章执行点赞动作  roles=ROUTE+EXTRACTOR
+  复合：动作在前 + 分析在后（核心支持句）
+    ON_DEMAND：intent=ARTICLE_ACTION action=CHAT wf=null kind=TASK goals=[ARTICLE_WRITE, ARTICLE_ANALYSIS] evidence=分析一下它写得怎么样 reason=用户要求点赞并分析当前文章  roles=FIRST_PASS
+    ROUTE_EXTRACTOR：intent=ARTICLE_ACTION action=CHAT wf=null kind=TASK goals=[ARTICLE_WRITE, ARTICLE_ANALYSIS] evidence=分析一下它写得怎么样 reason=用户明确要求点赞并分析当前文章  roles=ROUTE+EXTRACTOR
+  Workflow：优化当前文章
+    ON_DEMAND：intent=OPTIMIZE_ARTICLE_WORKFLOW action=WORKFLOW wf=OPTIMIZE_ARTICLE kind=TASK goals=[WORKFLOW_HANDOFF(OPTIMIZE_ARTICLE)] evidence=null reason=用户明确要求优化当前文章  roles=FIRST_PASS
+    ROUTE_EXTRACTOR：intent=OPTIMIZE_ARTICLE_WORKFLOW action=WORKFLOW wf=OPTIMIZE_ARTICLE kind=TASK goals=[WORKFLOW_HANDOFF(OPTIMIZE_ARTICLE)] evidence=null reason=用户明确要求优化当前文章  roles=ROUTE+EXTRACTOR
+  Workflow复合：优化 + 搜索
+    ON_DEMAND：intent=OPTIMIZE_ARTICLE_WORKFLOW action=WORKFLOW wf=OPTIMIZE_ARTICLE kind=TASK goals=[ARTICLE_SEARCH, WORKFLOW_HANDOFF(OPTIMIZE_ARTICLE)] evidence=null reason=用户明确要求搜索 Redis 相关文章  roles=FIRST_PASS
+    ROUTE_EXTRACTOR：intent=OPTIMIZE_ARTICLE_WORKFLOW action=WORKFLOW wf=OPTIMIZE_ARTICLE kind=TASK goals=[ARTICLE_SEARCH, WORKFLOW_HANDOFF(OPTIMIZE_ARTICLE)] evidence=null reason=用户明确要求搜索 Redis 相关文章  roles=ROUTE+EXTRACTOR
+  学习域：分析计划内容
+    ON_DEMAND：intent=LEARNING_AGENT action=AGENT wf=null kind=null goals=[] evidence=null reason=用户明确要求分析已有学习计划内容，判断合理性与潜在问题  roles=FIRST_PASS
+    ROUTE_EXTRACTOR：intent=LEARNING_AGENT action=AGENT wf=null kind=null goals=[] evidence=null reason=用户明确要求分析已有学习计划内容，判断合理性与潜在问题  roles=ROUTE+EXTRACTOR
+  页面动作：钱包充值
+    ON_DEMAND：intent=WALLET_AGENT action=AGENT wf=null kind=null goals=[] evidence=null reason=用户明确表达充值意图  roles=FIRST_PASS
+    ROUTE_EXTRACTOR：intent=WALLET_AGENT action=AGENT wf=null kind=null goals=[] evidence=null reason=用户明确表达充值意图  roles=ROUTE+EXTRACTOR
+  计划定位：两个相似计划中选中 C++（最坏三调用链）
+    ON_DEMAND：intent=LEARNING_PROGRESS action=WORKFLOW wf=LEARNING_PROGRESS kind=TASK goals=[WORKFLOW_HANDOFF(LEARNING_PROGRESS)] evidence=null reason=用户要求压缩已有学习计划的阶段内容  roles=FIRST_PASS+PLAN_LOCATOR
+    ROUTE_EXTRACTOR：intent=LEARNING_ASSIST action=WORKFLOW wf=LEARNING_ASSIST kind=TASK goals=[WORKFLOW_HANDOFF(LEARNING_ASSIST)] evidence=null reason=用户明确要求对已有学习计划的特定阶段进行任务拆解（浓缩为四个小任务），属于受控写提案类诉求  roles=ROUTE+EXTRACTOR
+  编辑器：编辑器页保存草稿
+    ON_DEMAND：intent=EDITOR_ACTION action=CHAT wf=null kind=null goals=[] evidence=null reason=用户在编辑器页面明确要求保存草稿  roles=FIRST_PASS
+    ROUTE_EXTRACTOR：intent=EDITOR_ACTION action=CHAT wf=null kind=null goals=[] evidence=null reason=用户在编辑器页面明确要求保存草稿  roles=ROUTE+EXTRACTOR
+  编辑器：非编辑器页保存草稿
+    ON_DEMAND：intent=EDITOR_ACTION action=CHAT wf=null kind=null goals=[] evidence=null reason=用户在编辑器页面要求保存草稿  roles=FIRST_PASS
+    ROUTE_EXTRACTOR：intent=EDITOR_ACTION action=CHAT wf=null kind=null goals=[] evidence=null reason=用户在编辑器页面要求保存草稿  roles=ROUTE+EXTRACTOR
+
+结论：两者没有明显差距（硬门 10/11 持平，输入降幅差 10.8% < 15%）——需要更多样本，或结合调用次数与 P95 再定

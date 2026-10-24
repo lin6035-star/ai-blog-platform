@@ -1,0 +1,41 @@
+{
+  "startedAt": "2026-10-19T15:10:08.810Z",
+  "base": "http://127.0.0.1:8080",
+  "model": "closed-loop fixed concurrency",
+  "durationSec": 3,
+  "warmupSec": 1,
+  "timeoutMs": 5000,
+  "levels": [
+    1
+  ],
+  "scenarios": [
+    {
+      "name": "article-list",
+      "path": "/api/articles?pageSize=10"
+    }
+  ],
+  "results": [
+    {
+      "scenario": "article-list",
+      "concurrency": 1,
+      "measuredAt": "2026-10-19T15:10:09.819Z",
+      "requests": 496,
+      "successes": 496,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 165.33,
+      "latencyMs": {
+        "p50": 6,
+        "p95": 9,
+        "p99": 12,
+        "max": 20
+      },
+      "httpStatus": {
+        "200": 496
+      },
+      "businessCode": {
+        "0": 496
+      }
+    }
+  ]
+}

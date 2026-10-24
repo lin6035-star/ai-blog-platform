@@ -1,0 +1,570 @@
+{
+  "startedAt": "2026-10-19T15:10:46.811Z",
+  "base": "http://127.0.0.1:8080",
+  "model": "closed-loop fixed concurrency",
+  "durationSec": 15,
+  "warmupSec": 5,
+  "timeoutMs": 10000,
+  "levels": [
+    1,
+    10,
+    30,
+    50
+  ],
+  "scenarios": [
+    {
+      "name": "article-list",
+      "path": "/api/articles?pageSize=10"
+    },
+    {
+      "name": "article-detail",
+      "path": "/api/articles/2085208555163787287"
+    },
+    {
+      "name": "article-hot",
+      "path": "/api/articles/hot"
+    },
+    {
+      "name": "article-comments",
+      "path": "/api/articles/2085208555163787287/comments?page=1&pageSize=10"
+    },
+    {
+      "name": "user-search",
+      "path": "/api/users/search?keyword=012&page=1&pageSize=10"
+    },
+    {
+      "name": "article-search",
+      "path": "/api/articles?keyword=Redis&pageSize=10"
+    }
+  ],
+  "results": [
+    {
+      "scenario": "article-list",
+      "concurrency": 1,
+      "measuredAt": "2026-10-19T15:10:51.820Z",
+      "requests": 2350,
+      "successes": 2350,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 156.67,
+      "latencyMs": {
+        "p50": 6,
+        "p95": 10,
+        "p99": 15,
+        "max": 23
+      },
+      "httpStatus": {
+        "200": 2350
+      },
+      "businessCode": {
+        "0": 2350
+      }
+    },
+    {
+      "scenario": "article-list",
+      "concurrency": 10,
+      "measuredAt": "2026-10-19T15:11:11.833Z",
+      "requests": 19570,
+      "successes": 19570,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 1304.67,
+      "latencyMs": {
+        "p50": 8,
+        "p95": 10,
+        "p99": 13,
+        "max": 27
+      },
+      "httpStatus": {
+        "200": 19570
+      },
+      "businessCode": {
+        "0": 19570
+      }
+    },
+    {
+      "scenario": "article-list",
+      "concurrency": 30,
+      "measuredAt": "2026-10-19T15:11:31.856Z",
+      "requests": 29322,
+      "successes": 29322,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 1954.8,
+      "latencyMs": {
+        "p50": 15,
+        "p95": 20,
+        "p99": 24,
+        "max": 33
+      },
+      "httpStatus": {
+        "200": 29322
+      },
+      "businessCode": {
+        "0": 29322
+      }
+    },
+    {
+      "scenario": "article-list",
+      "concurrency": 50,
+      "measuredAt": "2026-10-19T15:11:51.899Z",
+      "requests": 24709,
+      "successes": 24709,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 1647.27,
+      "latencyMs": {
+        "p50": 30,
+        "p95": 40,
+        "p99": 48,
+        "max": 71
+      },
+      "httpStatus": {
+        "200": 24709
+      },
+      "businessCode": {
+        "0": 24709
+      }
+    },
+    {
+      "scenario": "article-detail",
+      "concurrency": 1,
+      "measuredAt": "2026-10-19T15:12:11.925Z",
+      "requests": 3213,
+      "successes": 3213,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 214.2,
+      "latencyMs": {
+        "p50": 4,
+        "p95": 7,
+        "p99": 10,
+        "max": 14
+      },
+      "httpStatus": {
+        "200": 3213
+      },
+      "businessCode": {
+        "0": 3213
+      }
+    },
+    {
+      "scenario": "article-detail",
+      "concurrency": 10,
+      "measuredAt": "2026-10-19T15:12:31.938Z",
+      "requests": 26186,
+      "successes": 26186,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 1745.73,
+      "latencyMs": {
+        "p50": 5,
+        "p95": 8,
+        "p99": 11,
+        "max": 21
+      },
+      "httpStatus": {
+        "200": 26186
+      },
+      "businessCode": {
+        "0": 26186
+      }
+    },
+    {
+      "scenario": "article-detail",
+      "concurrency": 30,
+      "measuredAt": "2026-10-19T15:12:51.957Z",
+      "requests": 34479,
+      "successes": 34479,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 2298.6,
+      "latencyMs": {
+        "p50": 12,
+        "p95": 21,
+        "p99": 26,
+        "max": 43
+      },
+      "httpStatus": {
+        "200": 34479
+      },
+      "businessCode": {
+        "0": 34479
+      }
+    },
+    {
+      "scenario": "article-detail",
+      "concurrency": 50,
+      "measuredAt": "2026-10-19T15:13:11.988Z",
+      "requests": 36158,
+      "successes": 36158,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 2410.53,
+      "latencyMs": {
+        "p50": 20,
+        "p95": 31,
+        "p99": 38,
+        "max": 58
+      },
+      "httpStatus": {
+        "200": 36158
+      },
+      "businessCode": {
+        "0": 36158
+      }
+    },
+    {
+      "scenario": "article-hot",
+      "concurrency": 1,
+      "measuredAt": "2026-10-19T15:13:32.031Z",
+      "requests": 1176,
+      "successes": 1176,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 78.4,
+      "latencyMs": {
+        "p50": 12,
+        "p95": 19,
+        "p99": 27,
+        "max": 37
+      },
+      "httpStatus": {
+        "200": 1176
+      },
+      "businessCode": {
+        "0": 1176
+      }
+    },
+    {
+      "scenario": "article-hot",
+      "concurrency": 10,
+      "measuredAt": "2026-10-19T15:13:52.051Z",
+      "requests": 9904,
+      "successes": 9904,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 660.27,
+      "latencyMs": {
+        "p50": 15,
+        "p95": 19,
+        "p99": 26,
+        "max": 56
+      },
+      "httpStatus": {
+        "200": 9904
+      },
+      "businessCode": {
+        "0": 9904
+      }
+    },
+    {
+      "scenario": "article-hot",
+      "concurrency": 30,
+      "measuredAt": "2026-10-19T15:14:12.081Z",
+      "requests": 14704,
+      "successes": 14704,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 980.27,
+      "latencyMs": {
+        "p50": 30,
+        "p95": 39,
+        "p99": 50,
+        "max": 204
+      },
+      "httpStatus": {
+        "200": 14704
+      },
+      "businessCode": {
+        "0": 14704
+      }
+    },
+    {
+      "scenario": "article-hot",
+      "concurrency": 50,
+      "measuredAt": "2026-10-19T15:14:32.131Z",
+      "requests": 14647,
+      "successes": 14647,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 976.47,
+      "latencyMs": {
+        "p50": 50,
+        "p95": 65,
+        "p99": 75,
+        "max": 145
+      },
+      "httpStatus": {
+        "200": 14647
+      },
+      "businessCode": {
+        "0": 14647
+      }
+    },
+    {
+      "scenario": "article-comments",
+      "concurrency": 1,
+      "measuredAt": "2026-10-19T15:14:52.175Z",
+      "requests": 9494,
+      "successes": 9494,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 632.93,
+      "latencyMs": {
+        "p50": 1,
+        "p95": 3,
+        "p99": 4,
+        "max": 8
+      },
+      "httpStatus": {
+        "200": 9494
+      },
+      "businessCode": {
+        "0": 9494
+      }
+    },
+    {
+      "scenario": "article-comments",
+      "concurrency": 10,
+      "measuredAt": "2026-10-19T15:15:12.179Z",
+      "requests": 41735,
+      "successes": 41735,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 2782.33,
+      "latencyMs": {
+        "p50": 3,
+        "p95": 6,
+        "p99": 9,
+        "max": 23
+      },
+      "httpStatus": {
+        "200": 41735
+      },
+      "businessCode": {
+        "0": 41735
+      }
+    },
+    {
+      "scenario": "article-comments",
+      "concurrency": 30,
+      "measuredAt": "2026-10-19T15:15:32.208Z",
+      "requests": 43819,
+      "successes": 43819,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 2921.27,
+      "latencyMs": {
+        "p50": 10,
+        "p95": 15,
+        "p99": 20,
+        "max": 56
+      },
+      "httpStatus": {
+        "200": 43819
+      },
+      "businessCode": {
+        "0": 43819
+      }
+    },
+    {
+      "scenario": "article-comments",
+      "concurrency": 50,
+      "measuredAt": "2026-10-19T15:15:52.236Z",
+      "requests": 60458,
+      "successes": 60458,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 4030.53,
+      "latencyMs": {
+        "p50": 12,
+        "p95": 17,
+        "p99": 24,
+        "max": 49
+      },
+      "httpStatus": {
+        "200": 60458
+      },
+      "businessCode": {
+        "0": 60458
+      }
+    },
+    {
+      "scenario": "user-search",
+      "concurrency": 1,
+      "measuredAt": "2026-10-19T15:16:12.274Z",
+      "requests": 3588,
+      "successes": 3588,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 239.2,
+      "latencyMs": {
+        "p50": 4,
+        "p95": 6,
+        "p99": 9,
+        "max": 17
+      },
+      "httpStatus": {
+        "200": 3588
+      },
+      "businessCode": {
+        "0": 3588
+      }
+    },
+    {
+      "scenario": "user-search",
+      "concurrency": 10,
+      "measuredAt": "2026-10-19T15:16:32.282Z",
+      "requests": 23958,
+      "successes": 23958,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 1597.2,
+      "latencyMs": {
+        "p50": 6,
+        "p95": 9,
+        "p99": 12,
+        "max": 22
+      },
+      "httpStatus": {
+        "200": 23958
+      },
+      "businessCode": {
+        "0": 23958
+      }
+    },
+    {
+      "scenario": "user-search",
+      "concurrency": 30,
+      "measuredAt": "2026-10-19T15:16:52.311Z",
+      "requests": 23548,
+      "successes": 23548,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 1569.87,
+      "latencyMs": {
+        "p50": 18,
+        "p95": 26,
+        "p99": 35,
+        "max": 168
+      },
+      "httpStatus": {
+        "200": 23548
+      },
+      "businessCode": {
+        "0": 23548
+      }
+    },
+    {
+      "scenario": "user-search",
+      "concurrency": 50,
+      "measuredAt": "2026-10-19T15:17:12.345Z",
+      "requests": 27989,
+      "successes": 27989,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 1865.93,
+      "latencyMs": {
+        "p50": 26,
+        "p95": 32,
+        "p99": 43,
+        "max": 67
+      },
+      "httpStatus": {
+        "200": 27989
+      },
+      "businessCode": {
+        "0": 27989
+      }
+    },
+    {
+      "scenario": "article-search",
+      "concurrency": 1,
+      "measuredAt": "2026-10-19T15:17:32.407Z",
+      "requests": 539,
+      "successes": 539,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 35.93,
+      "latencyMs": {
+        "p50": 26,
+        "p95": 37,
+        "p99": 45,
+        "max": 235
+      },
+      "httpStatus": {
+        "200": 539
+      },
+      "businessCode": {
+        "0": 539
+      }
+    },
+    {
+      "scenario": "article-search",
+      "concurrency": 10,
+      "measuredAt": "2026-10-19T15:17:52.448Z",
+      "requests": 2803,
+      "successes": 2803,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 186.87,
+      "latencyMs": {
+        "p50": 50,
+        "p95": 78,
+        "p99": 96,
+        "max": 133
+      },
+      "httpStatus": {
+        "200": 2803
+      },
+      "businessCode": {
+        "0": 2803
+      }
+    },
+    {
+      "scenario": "article-search",
+      "concurrency": 30,
+      "measuredAt": "2026-10-19T15:18:12.619Z",
+      "requests": 2990,
+      "successes": 2990,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 199.33,
+      "latencyMs": {
+        "p50": 149,
+        "p95": 199,
+        "p99": 229,
+        "max": 274
+      },
+      "httpStatus": {
+        "200": 2990
+      },
+      "businessCode": {
+        "0": 2990
+      }
+    },
+    {
+      "scenario": "article-search",
+      "concurrency": 50,
+      "measuredAt": "2026-10-19T15:18:33.145Z",
+      "requests": 3295,
+      "successes": 3295,
+      "errors": 0,
+      "errorRate": 0,
+      "throughputRps": 219.67,
+      "latencyMs": {
+        "p50": 222,
+        "p95": 294,
+        "p99": 338,
+        "max": 368
+      },
+      "httpStatus": {
+        "200": 3295
+      },
+      "businessCode": {
+        "0": 3295
+      }
+    }
+  ]
+}

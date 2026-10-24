@@ -1,0 +1,58 @@
+# RocketMQ 本地开发编排（NameServer + Broker 单机）
+#
+# 与 broker.conf 配套：
+#   namesrvAddr = rmqnamesrv:9876        → 本文件的服务名/容器名
+#   brokerIP1   = 192.168.65.1          → Docker Desktop 在宿主机上的网关地址
+#
+# 启动：
+#   cd deploy/rocketmq && docker compose up -d
+#
+# ⚠️ brokerIP1 不是随便填的。Broker 会把 brokerIP1 注册到 NameServer，宿主机的客户端
+#    拿到这个地址去连；填容器内网 IP（172.x）宿主机连不上，报错还很误导
+#    （"connect to 172.17.0.2:10911 failed"）。
+#    - Windows / macOS Docker Desktop：用宿主机在 Docker 网桥上的网关地址，
+#      本机实测 192.168.65.1（可用 `ipconfig` 看 "vEthernet (WSL)" 或 Docker 网卡的 IPv4；
+#      换机器/Docker 重启后可能变化，变了就改 broker.conf 再 restart）
+#    - Linux 生产：后端与 MQ 在同一个 compose 网络时，填 Broker 的服务名（如 rocketmq-broker）
+#      —— 客户端也是容器，能解析服务名；宿主机客户端才需要宿主机 IP。
+#
+# 生产请参考 README.md 里的 compose 片段（要调小 JVM 堆 + 关闭自动建 topic）。
+
+name: rocketmq
+
+services:
+  rmqnamesrv:
+    image: apache/rocketmq:5.3.1
+    container_name: rmqnamesrv
+    command: sh mqnamesrv
+    environment:
+      # 本地开发压小堆：默认 4G 会在这台 2C8G 的机器上和 ES/MySQL 抢内存
+      JAVA_OPT_EXT: "-Xms256m -Xmx256m -Xmn128m"
+    ports:
+      - "9876:9876"
+    networks:
+      - rmq-net
+
+  rmqbroker:
+    image: apache/rocketmq:5.3.1
+    container_name: rmqbroker
+    depends_on:
+      - rmqnamesrv
+    command: sh mqbroker -c /home/rocketmq/conf/broker.conf
+    environment:
+      JAVA_OPT_EXT: "-Xms512m -Xmx512m -Xmn256m"
+    volumes:
+      - ./broker.conf:/home/rocketmq/conf/broker.conf:ro
+      - ./store:/home/rocketmq/store
+    ports:
+      - "10909:10909"
+      - "10911:10911"
+      - "10912:10912"
+    networks:
+      - rmq-net
+
+networks:
+  rmq-net:
+    # 固定网络名：broker.conf 的 namesrvAddr 与其它容器加入的是同一个网络
+    name: rmq-net
+    driver: bridge
