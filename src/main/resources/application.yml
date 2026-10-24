@@ -167,7 +167,10 @@ mybatis-plus:
     # 开启下划线转驼峰（核心配置）
   configuration:
     map-underscore-to-camel-case: true
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl # 可选：打印SQL，方便调试
+    # SQL 走 logback（这样能按 logger 粒度过滤）。StdOutImpl 是直接刷控制台、绕过日志级别，
+    # 只能全开或全关；秒杀生命周期每 5 秒 3 条查询会把本地刷满，而其他 SQL 还是想看的。
+    # 所以这里用 Slf4jImpl + mapper 包 DEBUG，再单独把 SeckillActivityMapper 调到 INFO（见 logging.level）。
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
 
 # JWT
 jwt:
@@ -269,6 +272,12 @@ logging:
   pattern:
     correlation: "[${spring.application.name:},%X{traceId:-},%X{spanId:-}] "
   include-application-name: false
+  level:
+    # SQL 日志全开（看得到日常 SQL），但秒杀活动表是 5 秒一轮的高频轮询：
+    # SeckillLifecycleTask 每轮 3 条 select（到期 DRAFT / 结束 ACTIVE / 到点激活 DRAFT），
+    # 不单独静音就会把控制台刷满。只把这个 mapper 调到 INFO，其他 SQL 照常打印。
+    com.hailin.blogsystem.mapper: debug
+    com.hailin.blogsystem.mapper.SeckillActivityMapper: info
   # 落文件：控制台日志会随进程结束丢失，AgentDecisionTrace / traceId 排查需要可回溯的日志
   file:
     name: logs/blog-system.log
@@ -432,6 +441,19 @@ blog:
         max-size: 2
         queue-capacity: 30
         thread-name-prefix: memory-extract-
+    article-index:
+      # 第二批（文章索引同步）：默认 false，行为与现在一致；打开后走 DB outbox → RocketMQ 顺序消费
+      # 设计稿：docs/mq/文章索引同步MQ迁移设计.md
+      use-mq: ${AI_ARTICLE_INDEX_USE_MQ:false}
+      topic: ${ARTICLE_INDEX_TOPIC:article-index-sync}
+      consumer-group: ${ROCKETMQ_ARTICLE_INDEX_CONSUMER_GROUP:blog-article-index-consumer}
+      # 日对账时间（cron 6 段）；只在 use-mq=true 时启用 ArticleIndexConsistencyTask
+      reconcile-cron: ${ARTICLE_INDEX_RECONCILE_CRON:0 0 4 * * *}
+      relay:
+        interval-ms: 2000
+        batch-size: 20
+        lease-seconds: 60
+        max-attempts: 20
     rag:
       # 文章 corpus 已完成隔离重建和 alias 原子切换；Memory 迁移仍保留旧共享索引。
       # initialize-schema 必须关闭：Spring AI 不支持把 alias 当作待建物理索引处理。

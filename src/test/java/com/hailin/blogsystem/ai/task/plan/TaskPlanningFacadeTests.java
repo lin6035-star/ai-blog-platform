@@ -631,6 +631,58 @@ class TaskPlanningFacadeTests {
     }
 
     @Test
+    void uncoveredAfterHandoffCtaExplainsInUserLanguage() {
+        // 2026-10-23 线上原话：点赞 + 收藏 + 优化 + 搜索 + 比较。
+        // 比较（ARTICLE_ANALYSIS）落在 handoff 之后，5b 第一版按未覆盖处理；
+        // CTA 不能再说「有一部分我暂时做不到」，要按真实步骤生成人话。
+        String message = "点赞并收藏这篇文章，再帮我优化一下，再搜一下 RAG相关文章，并比较各篇文章";
+        AiIntent intent = intent("TASK",
+                goal("ARTICLE_WRITE", Map.of("action", "likeArticle"), "点赞并收藏这篇文章"),
+                goal("ARTICLE_WRITE", Map.of("action", "favoriteArticle"), "点赞并收藏这篇文章"),
+                handoffGoal("OPTIMIZE_ARTICLE", "再帮我优化一下"),
+                goal("ARTICLE_SEARCH", Map.of("query", "RAG"), "再搜一下 RAG相关文章"),
+                goal("ARTICLE_ANALYSIS", Map.of(), "并比较各篇文章"));
+        intent.setIntent("OPTIMIZE_ARTICLE_WORKFLOW");
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setSuggestedWorkflowType("OPTIMIZE_ARTICLE");
+
+        TaskRoute route = facadeWithFullHandoff.decide(message, intent, 1L);
+
+        assertThat(route.route()).isEqualTo(TaskRoute.Route.CTA);
+        assertThat(route.reason())
+                .contains("点赞", "收藏", "优化文章", "搜索文章", "分析文章", "拆成两句")
+                .doesNotContain("ARTICLE_ANALYSIS", "WORKFLOW_HANDOFF", "先不动手——能拆开");
+    }
+
+    @Test
+    void uncoveredCtaAdaptsToAnotherWorkflow() {
+        // 5b 白名单当前只开放 OPTIMIZE_ARTICLE；换「创建文章」时它落在未覆盖里，
+        // 文案也要说人话（从 suggestedWorkflowType 取名），不能只显示"需要确认的流程"
+        String message = "点赞这篇文章，再帮我创建一篇新文章，再比较各篇文章";
+        AiIntent intent = intent("TASK",
+                goal("ARTICLE_WRITE", Map.of("action", "likeArticle"), "点赞这篇文章"),
+                handoffGoal("CREATE_ARTICLE", "再帮我创建一篇新文章"),
+                goal("ARTICLE_ANALYSIS", Map.of(), "再比较各篇文章"));
+        intent.setIntent("CREATE_ARTICLE_WORKFLOW");
+        intent.setSuggestedAction("WORKFLOW");
+        intent.setSuggestedWorkflowType("CREATE_ARTICLE");
+
+        TaskRoute route = facadeWithFullHandoff.decide(message, intent, 1L);
+
+        assertThat(route.route()).isEqualTo(TaskRoute.Route.CTA);
+        assertThat(route.reason())
+                .contains("创建文章", "分析文章")
+                .doesNotContain("优化文章", "WORKFLOW_HANDOFF", "需要确认的流程");
+    }
+
+    /** handoff 目标的证据必须取自用户原话，所以由调用方传入，避免复用固定文案。 */
+    private Map<String, Object> handoffGoal(String workflowType, String evidence) {
+        return Map.of("type", "WORKFLOW_HANDOFF",
+                "params", Map.of("workflowType", workflowType),
+                "goalEvidence", List.of(evidence));
+    }
+
+    @Test
     void actionPlusUnknownTypeBecomesCta() {
         TaskRoute route = facade.decide(MESSAGE,
                 intent("TASK",

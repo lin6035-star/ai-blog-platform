@@ -1,6 +1,8 @@
 package com.hailin.blogsystem;
 
 
+import com.hailin.blogsystem.ai.index.ArticleIndexOutbox;
+import com.hailin.blogsystem.ai.index.ArticleIndexOutboxService;
 import com.hailin.blogsystem.ai.rag.ArticleRagConsistencyService;
 import com.hailin.blogsystem.ai.rag.ArticleRagController;
 import com.hailin.blogsystem.ai.rag.ArticleRagRetrieveService;
@@ -33,6 +35,7 @@ class ArticleRagControllerTests {
     private final ArticleRagConsistencyService articleRagConsistencyService = mock(ArticleRagConsistencyService.class);
     private final ArticleRagRebuildService articleRagRebuildService = mock(ArticleRagRebuildService.class);
     private final ArticleRagIndexHealthService articleRagIndexHealthService = mock(ArticleRagIndexHealthService.class);
+    private final ArticleIndexOutboxService articleIndexOutboxService = mock(ArticleIndexOutboxService.class);
     private final BlogAiProperties blogAiProperties = mock(BlogAiProperties.class);
     // 用真实 guard + mock 配置：既测接口行为，也顺带验证 allowlist 边界本身生效
     private final ArticleRagController controller = new ArticleRagController(
@@ -40,7 +43,8 @@ class ArticleRagControllerTests {
             articleRagConsistencyService,
             articleRagRebuildService,
             articleRagIndexHealthService,
-            new IndexManagementAccessGuard(blogAiProperties)
+            new IndexManagementAccessGuard(blogAiProperties),
+            articleIndexOutboxService
     );
     private final MockMvc mockMvc = MockMvcBuilders.standaloneSetup(controller).build();
 
@@ -112,6 +116,21 @@ class ArticleRagControllerTests {
 
         UserContext.set(99L);
         mockMvc.perform(get("/api/ai/rag/articles/health"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(403));
+    }
+
+    @Test
+    void exposesOutboxStatsAndReusesRebuildAllowlist() throws Exception {
+        when(articleIndexOutboxService.countByStatus(ArticleIndexOutbox.STATUS_PENDING)).thenReturn(2L);
+
+        mockMvc.perform(get("/api/ai/rag/articles/index-outbox/stats"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.pending").value(2));
+
+        UserContext.set(99L);
+        mockMvc.perform(get("/api/ai/rag/articles/index-outbox/stats"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(403));
     }

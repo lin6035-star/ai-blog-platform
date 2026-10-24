@@ -8,8 +8,8 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.hailin.blogsystem.ai.index.ArticleIndexMutationPublisher;
 import com.hailin.blogsystem.ai.rag.ArticleRagIndexService;
-import com.hailin.blogsystem.ai.rag.ArticleRagSyncService;
 import com.hailin.blogsystem.component.DelayedCacheEvictor;
 import com.hailin.blogsystem.component.CacheTtlSupport;
 import com.hailin.blogsystem.component.RedisKeyScanner;
@@ -34,6 +34,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -152,7 +153,10 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
     private final ArticleLikesMapper articleLikesMapper;
     private final ArticleFavoritesMapper articleFavoritesMapper;
     private final CommentsMapper commentsMapper;
-    private final ArticleRagSyncService articleRagSyncService;
+    /** 索引变更统一入口：use-mq=true 落 outbox，false 走 after-commit 旧链路 */
+    private final ArticleIndexMutationPublisher articleIndexMutationPublisher;
+    /** 只包住「文章写库 + 落索引事件」的事务，不把缓存/活跃度统计卷进来 */
+    private final TransactionTemplate transactionTemplate;
 
     private final ObjectMapper objectMapper;
 
@@ -962,12 +966,17 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
         articles.setPublishedAt(null);
         syncPublishedAt(articles);
 
-        save(articles);
+        Long articleId = transactionTemplate.execute(status -> {
+            save(articles);
+            // 索引事件与文章写同事务：草稿也发事件，消费端回查发现未发布 → 删索引，天然正确
+            articleIndexMutationPublisher.articleChanged(articles.getId());
+            return articles.getId();
+        });
+
         if(Objects.equals(articles.getStatus(), BlogConstants.ArticlesStatus.PUBLISHED)){
             deleteArticleListCache();
-            safelyIndexArticleRag(articles.getId());  //发布文章是自动同步RAG索引
         }
-        return articles.getId();
+        return articleId;
     }
 
 
@@ -991,24 +1000,12 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
         articles.setPublishedAt(previousPublishedAt);
         syncPublishedAt(articles);
 
-        updateById(articles);
+        transactionTemplate.executeWithoutResult(status -> {
+            updateById(articles);
+            articleIndexMutationPublisher.articleChanged(id);
+        });
 
         evictArticleCaches(id);
-
-        syncArticleRagIndex(articles);  //更新文章之后要判断文章的状态，是否隐藏
-    }
-    private void syncArticleRagIndex(Articles article){
-        if (article == null || article.getId() == null) {
-            return;
-        }
-
-        //发布状态 -》 写入/刷新RAG
-        if(Objects.equals(article.getStatus(),BlogConstants.ArticlesStatus.PUBLISHED)){
-            safelyIndexArticleRag(article.getId());
-        }
-        else{  //隐藏 -》 从RAG删除
-            safelyDeleteArticleRagIndex(article.getId());
-        }
     }
 
 
@@ -1043,7 +1040,7 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
         }
 
         evictArticleCaches(id);
-        syncArticleRagIndex(articles);  // 状态取自更新前行（改名不动状态）：已发布 → 重刷 RAG doc（含标题）
+        articleIndexMutationPublisher.articleChanged(id);  // 状态取自更新前行：已发布→重刷（含标题）
     }
 
     /**
@@ -1089,11 +1086,7 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
         }
 
         evictArticleCaches(id);
-        if (Objects.equals(targetStatus, BlogConstants.ArticlesStatus.PUBLISHED)) {
-            safelyIndexArticleRag(id);      // 公开：建 RAG 索引（对齐 publishArticle）
-        } else {
-            safelyDeleteArticleRagIndex(id); // 隐藏：删 RAG 索引（对齐 hideArticle）
-        }
+        articleIndexMutationPublisher.articleChanged(id);  // 消费端/旧链路统一按回查后的状态决定 index/delete
     }
 
 
@@ -1108,10 +1101,12 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
             throw new IllegalArgumentException("无权操作该文章");
         }
 
-        removeById(id);
+        transactionTemplate.executeWithoutResult(status -> {
+            removeById(id);
+            articleIndexMutationPublisher.articleChanged(id);
+        });
 
         evictArticleCaches(id);
-        safelyDeleteArticleRagIndex(id);  //删除时自动同步 RAG 索引。
     }
 
 
@@ -1130,11 +1125,12 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
         articles.setStatus(BlogConstants.ArticlesStatus.HIDDEN);
         articles.setUpdatedAt(LocalDateTime.now());
 
-        updateById(articles);
+        transactionTemplate.executeWithoutResult(status -> {
+            updateById(articles);
+            articleIndexMutationPublisher.articleChanged(id);
+        });
 
         evictArticleCaches(id);
-
-        safelyDeleteArticleRagIndex(id);  //隐藏时自动同步 RAG 索引。
     }
 
 
@@ -1154,11 +1150,12 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
         articles.setUpdatedAt(LocalDateTime.now());
         articles.setPublishedAt(LocalDateTime.now());
 
-        updateById(articles);
+        transactionTemplate.executeWithoutResult(status -> {
+            updateById(articles);
+            articleIndexMutationPublisher.articleChanged(id);
+        });
 
         evictArticleCaches(id);
-
-        safelyIndexArticleRag(id);  //发布文章时自动同步 RAG 索引。
 
         // 发布是强活跃信号（比浏览更能说明"这个人在用这个站"），与浏览、评论一起构成活跃口径
         userActivityTracker.markActiveToday();
@@ -1663,56 +1660,5 @@ public class ArticlesServiceImpl extends ServiceImpl<ArticlesMapper, Articles> i
         // 连带卡住同实例上的限流、分布式锁与其它缓存。
         // SCAN 的失败日志在 RedisKeyScanner 内部
         delayedCacheEvictor.evictPattern(RedisConstants.ARTICLE_LIST_KEY_PREFIX + "*");
-    }
-
-    //但如果 ES 没开、Embedding API 超时、额度没了，现在可能会导致“文章发布失败”
-    //这不合理，最多影响AI检索，不影响用户正常发布文章
-    private void safelyIndexArticleRag(Long articleId){
-        try{
-            articleRagSyncService.indexArticle(articleId);
-        } catch (Exception e) {
-            log.warn("文章 RAG 索引同步失败，articleId={}",articleId,e);
-        }
-        // 站内搜索索引与 RAG 索引共用触发点，就地同步（见 safelyIndexArticleSearch 注释）
-        safelyIndexArticleSearch(articleId);
-    }
-    private void safelyDeleteArticleRagIndex(Long articleId){
-        try{
-            articleRagSyncService.deleteArticleIndex(articleId);
-        } catch (Exception e) {
-            log.warn("文章 RAG 索引删除失败，articleId={}",articleId,e);
-        }
-        try{
-            articleSearchService.deleteArticle(articleId);
-        } catch (Exception e) {
-            log.warn("文章搜索索引删除失败，articleId={}",articleId,e);
-        }
-    }
-
-    /**
-     * 站内搜索索引同步。
-     *
-     * <p><b>为什么挂在这里而不是每个业务方法各加一次</b>：发布 / 更新 / 删除 / 隐藏 / 改可见性 /
-     * 创建这 6 个触发点**全都已经调 {@code safelyIndexArticleRag}**，在它内部顺带做，
-     * 调用点零改动；将来新增触发点也不会漏掉搜索索引。
-     *
-     * <p><b>失败只 warn</b>：搜索是增强功能，索引缺一篇不该让「发布文章」整个失败——
-     * 真漏了可以用重建接口补回来。
-     *
-     * <p>非 PUBLISHED 状态**主动删索引**（而不是不管）：文章从公开改为隐藏时，
-     * 索引里那份必须消失——虽然检索期还有一道 status 过滤兜底，但两道防线各司其职。
-     */
-    private void safelyIndexArticleSearch(Long articleId) {
-        try {
-            Articles article = getById(articleId);
-            if (article == null
-                    || !Objects.equals(article.getStatus(), BlogConstants.ArticlesStatus.PUBLISHED)) {
-                articleSearchService.deleteArticle(articleId);
-                return;
-            }
-            articleSearchService.indexArticle(article);
-        } catch (Exception e) {
-            log.warn("文章搜索索引同步失败，articleId={}", articleId, e);
-        }
     }
 }

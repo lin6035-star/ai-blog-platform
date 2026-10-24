@@ -1,8 +1,10 @@
 package com.hailin.blogsystem.ai.mq;
 
 import org.apache.rocketmq.client.producer.SendResult;
+import org.apache.rocketmq.common.message.MessageConst;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.messaging.Message;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -72,10 +74,14 @@ class MemoryExtractionEventTests {
                 .withMessage("userId");
     }
 
+    /**
+     * tag 必须通过 destination（topic:tag）发送：RocketMQTemplate 不认 Message header 里的 TAGS，
+     * 之前实际发出去的消息 Tags=[null]，被消费端 selector 全部过滤（offset 照涨、无日志无死信）。
+     */
     @Test
-    void publisherUsesEventTypeTagAndStableMessageKey() {
+    void publisherUsesEventTypeTagInDestinationAndStableMessageKey() {
         RocketMQTemplate template = mock(RocketMQTemplate.class);
-        when(template.syncSend(eq("test-memory-topic"), any(Message.class)))
+        when(template.syncSend(eq("test-memory-topic:CANDIDATE"), any(Message.class)))
                 .thenReturn(mock(SendResult.class));
 
         RocketMqMemoryExtractionPublisher publisher = new RocketMqMemoryExtractionPublisher(template);
@@ -85,6 +91,9 @@ class MemoryExtractionEventTests {
                 1L, 2L, 3L, "用户消息", "AI 回复");
         publisher.publish(event);
 
-        verify(template).syncSend(eq("test-memory-topic"), any(Message.class));
+        ArgumentCaptor<Message> captor = ArgumentCaptor.forClass(Message.class);
+        verify(template).syncSend(eq("test-memory-topic:CANDIDATE"), captor.capture());
+        assertThat(captor.getValue().getHeaders().get(MessageConst.PROPERTY_KEYS))
+                .isEqualTo(event.eventId());
     }
 }

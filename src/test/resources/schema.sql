@@ -547,3 +547,25 @@ CREATE INDEX IF NOT EXISTS idx_receiver_created ON notifications (receiver_id, c
 CREATE INDEX IF NOT EXISTS idx_receiver_read_created ON notifications (receiver_id, is_read, created_at);
 -- 保留期清理用（不带 receiver_id，上面两条覆盖不到）
 CREATE INDEX IF NOT EXISTS idx_created_at ON notifications (created_at);
+
+-- ============================================
+-- 文章索引同步 outbox（设计稿：docs/mq/文章索引同步MQ迁移设计.md）
+-- 与 db/init.sql 第 30 节保持一致；这里是 H2 语法（无 COMMENT/ENGINE，DATETIME→TIMESTAMP）
+-- 注意：这块在 S1 只是建表，业务写入要等 S2 的 ArticleIndexMutationPublisher 接入后才会发生
+-- ============================================
+CREATE TABLE IF NOT EXISTS article_index_outbox (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    article_id BIGINT NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+    attempts INT NOT NULL DEFAULT 0,
+    next_retry_at TIMESTAMP NOT NULL,
+    locked_until TIMESTAMP NULL,
+    sent_at TIMESTAMP NULL,
+    trace_id VARCHAR(64) NULL,
+    last_error VARCHAR(500) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbox_due ON article_index_outbox (status, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_outbox_article ON article_index_outbox (article_id, id);

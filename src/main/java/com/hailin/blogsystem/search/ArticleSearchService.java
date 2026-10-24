@@ -147,6 +147,53 @@ public class ArticleSearchService {
         }
     }
 
+    /**
+     * 严格写入：失败抛异常。
+     *
+     * <p>给 MQ 消费端用——宽松版（{@link #indexArticle}）吞异常只打日志，消费者感知不到失败，
+     * 消息会被 ACK 掉、索引永久缺这篇。这里让异常冒到 listener，交给 RocketMQ 重试。</p>
+     */
+    public void indexArticleStrict(Articles article) {
+        if (article == null || article.getId() == null) {
+            throw new IllegalArgumentException("article / articleId 不能为空");
+        }
+        try {
+            esClient.index(i -> i
+                    .index(INDEX_NAME)
+                    .id(String.valueOf(article.getId()))
+                    .document(toDocument(article))
+            );
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "写入站内搜索索引失败: articleId=" + article.getId(), e);
+        }
+    }
+
+    /**
+     * 严格删除：失败抛异常，但**文档不存在（404）视为成功**。
+     *
+     * <p>消费端语义是"把这篇从搜索里删掉"，本来就没有文档时结果已经达成；
+     * 把 404 当失败会让一条永远成功的消息反复重试进死信。</p>
+     */
+    public void deleteArticleStrict(Long articleId) {
+        if (articleId == null) {
+            throw new IllegalArgumentException("articleId 不能为空");
+        }
+        try {
+            esClient.delete(d -> d.index(INDEX_NAME).id(String.valueOf(articleId)));
+        } catch (co.elastic.clients.elasticsearch._types.ElasticsearchException e) {
+            if (e.status() == 404) {
+                log.info("[SEARCH-INDEX] 文档不存在，删除视为成功 articleId={}", articleId);
+                return;
+            }
+            throw new IllegalStateException(
+                    "删除站内搜索索引失败: articleId=" + articleId, e);
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "删除站内搜索索引失败: articleId=" + articleId, e);
+        }
+    }
+
     private Map<String, Object> toDocument(Articles article) {
         Map<String, Object> doc = new HashMap<>();
         doc.put("title", article.getTitle());

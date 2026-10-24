@@ -228,7 +228,136 @@ public class TaskPlanningFacade {
 
         log.info("[TASK-PLAN] 多目标含未迁移部分，拒绝而不是执行一半: uncoveredTypes={}",
                 safeTypes(plan));
-        return TaskRoute.cta("这个请求里有一部分我暂时做不到，先不动手——能拆开一句一句说吗？");
+        return TaskRoute.cta(uncoveredCtaReason(plan, intent));
+    }
+
+    /**
+     * 多目标含未迁移部分时的 CTA 文案（2026-10-23）。
+     *
+     * <p>这句不能再写成固定的「先不动手——能拆开一句一句说吗」：用户看不懂是哪一段做不了，
+     * 换一个 Workflow 或换一个任务时更是完全对不上。文案改为**按计划里真实的步骤和
+     * workflowType 生成**：
+     * <ul>
+     *   <li>能拆出来的步骤 → 用户语言（点赞 / 收藏 / 创建文章 / 搜索文章 / 分析文章…）；</li>
+     *   <li>做不了的未覆盖类型 → 同一套用户语言；</li>
+     *   <li>只有一条固定边界需要说明：需要确认的流程完成之后，目前只能继续做站内搜索。</li>
+     * </ul>
+     *
+     * <p>所以换 Workflow（OPTIMIZE_ARTICLE / CREATE_ARTICLE / 学习类）或换任务
+     * （分析 / 导航 / 读取）时，句子会跟着变；查不到类型时退化成「流程 / 其他操作」，
+     * **绝不把枚举名或模型原始值暴露给用户**。
+     */
+    private String uncoveredCtaReason(TaskPlan plan, AiIntent intent) {
+        String covered = plan.steps().stream()
+                .map(step -> stepUserLabel(step, intent))
+                .distinct()
+                .collect(Collectors.joining("、"));
+        if (covered.isBlank()) {
+            covered = "前面能做的部分";
+        }
+        String uncovered = uncoveredUserLabel(plan, intent);
+
+        TaskStep handoff = plan.steps().stream()
+                .filter(step -> step.type() == StepType.WORKFLOW_HANDOFF)
+                .findFirst()
+                .orElse(null);
+        if (handoff == null) {
+            return "这条我先不动手：我拆出来的是「" + covered + "」；但「" + uncovered
+                    + "」目前没有可靠的能力承接。建议把「" + uncovered + "」单独再说一次。";
+        }
+
+        String workflow = workflowUserLabel(handoff, intent);
+        List<String> beforeHandoff = new ArrayList<>();
+        for (TaskStep step : plan.steps()) {
+            if (step.type() == StepType.WORKFLOW_HANDOFF) {
+                break;
+            }
+            beforeHandoff.add(stepUserLabel(step, intent));
+        }
+        String beforeText = beforeHandoff.stream()
+                .distinct()
+                .collect(Collectors.joining("、"));
+        return "这条我先不动手：我拆出来的是「" + covered + "」；但「" + uncovered + "」排在「"
+                + workflow + "」（需要你确认）之后，流程确认完成后目前只能继续做站内搜索，不能接着做「"
+                + uncovered + "」。建议拆成两句：① 先"
+                + (beforeText.isBlank() ? "做前面能做的部分" : beforeText)
+                + "；② 等「" + workflow + "」确认完成后再单独说「" + uncovered + "」。";
+    }
+
+    /** 把计划步骤翻成用户语言；未知步骤类型不暴露枚举名。 */
+    private String stepUserLabel(TaskStep step, AiIntent intent) {
+        return switch (step.type()) {
+            case ARTICLE_WRITE -> articleWriteUserLabel(step);
+            case WORKFLOW_HANDOFF -> workflowUserLabel(step, intent);
+            case ARTICLE_SEARCH -> "搜索文章";
+            case ARTICLE_ANALYSIS -> "分析文章";
+            case ARTICLE_QUERY -> "读取文章";
+            case NAVIGATE -> "页面跳转";
+        };
+    }
+
+    /** 写动作按 action 参数取名；参数缺失或越界时用泛化名，不泄露模型原始值。 */
+    private String articleWriteUserLabel(TaskStep step) {
+        Object action = step.input().get("action");
+        String value = action == null ? "" : String.valueOf(action);
+        return switch (value) {
+            case "likeArticle" -> "点赞";
+            case "favoriteArticle" -> "收藏";
+            case "followAuthor" -> "关注作者";
+            case "unlikeArticle" -> "取消点赞";
+            case "unfavoriteArticle" -> "取消收藏";
+            case "unfollowAuthor" -> "取消关注";
+            default -> "文章操作";
+        };
+    }
+
+    /**
+     * Workflow 的用户语言：优先取步骤参数里的 workflowType（分类器原样带上来的），
+     * 缺失时回退到分类器的 suggestedWorkflowType；两者都没有就只说「流程」。
+     * 新增 Workflow 时在这里补一个中文名——**不补也不会把枚举名漏给用户**。
+     */
+    private String workflowUserLabel(TaskStep step, AiIntent intent) {
+        Object fromStep = step.input().get("workflowType");
+        String raw = fromStep != null
+                ? String.valueOf(fromStep)
+                : (intent == null ? null : intent.getSuggestedWorkflowType());
+        return workflowTypeUserLabel(raw, "流程");
+    }
+
+    /** 未覆盖目标的用户语言；类型列表缺失时给一句泛化说明，不拼模型原文。 */
+    private String uncoveredUserLabel(TaskPlan plan, AiIntent intent) {
+        List<String> labels = plan.uncoveredTypes().stream()
+                .map(type -> typeUserLabel(type, intent))
+                .distinct()
+                .toList();
+        return labels.isEmpty() ? "剩下那部分" : String.join("、", labels);
+    }
+
+    private String typeUserLabel(String type, AiIntent intent) {
+        String value = type == null ? "" : type.trim().toUpperCase(Locale.ROOT);
+        return switch (value) {
+            case "ARTICLE_WRITE" -> "文章操作";
+            case "WORKFLOW_HANDOFF" -> workflowTypeUserLabel(
+                    intent == null ? null : intent.getSuggestedWorkflowType(), "需要确认的流程");
+            case "ARTICLE_SEARCH" -> "搜索文章";
+            case "ARTICLE_ANALYSIS" -> "分析文章";
+            case "ARTICLE_QUERY" -> "读取文章";
+            case "NAVIGATE" -> "页面跳转";
+            default -> "其他操作";
+        };
+    }
+
+    /** 归一化后的 workflowType → 用户语言；查不到时用 fallback（当前 5b 只开放 OPTIMIZE_ARTICLE）。 */
+    private String workflowTypeUserLabel(String raw, String fallback) {
+        String type = raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
+        return switch (type) {
+            case "OPTIMIZE_ARTICLE" -> "优化文章";
+            case "CREATE_ARTICLE" -> "创建文章";
+            case "LEARNING_PLAN" -> "制定学习计划";
+            case "LEARNING_PROGRESS" -> "调整学习进度";
+            case "LEARNING_ASSIST" -> "学习难点攻坚";
+            default -> fallback;
+        };
     }
 
     /**

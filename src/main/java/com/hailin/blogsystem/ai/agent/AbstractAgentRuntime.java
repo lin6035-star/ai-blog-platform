@@ -344,6 +344,32 @@ public abstract class AbstractAgentRuntime {
                 + "。请先补充查询再回答，不要编造。";
     }
 
+    /**
+     * 证据门 NEED_MORE 时给用户看的思考流文案（2026-10-23）。
+     *
+     * <p>原来固定写「回答被拦截：证据不足」：一是"拦截/不足"像报错，二是缺口明明
+     * 可能来自文章正文、记忆、站内资料或其他，文案却永远一样。现在按
+     * {@link Verdict.MissingEvidence} 分类说明"正在补什么"，未知类别用
+     * {@code OTHER} 的泛化句兜底——**新增缺口类别时 switch 会编译失败**，
+     * 强制在这里补一句用户能看懂的话，而不是悄悄沿用旧文案。
+     *
+     * <p>{@code hasReadArticle} 用于区分"文章还没读"和"读了但不够细"：两者都缺正文，
+     * 但用户需要知道系统下一步是首读还是补读（否则会看到两条一模一样的提示）。
+     */
+    static String verifierBlockedMessage(Verdict verdict, boolean hasReadArticle) {
+        if (verdict == null || verdict.missingEvidence() == null) {
+            return "再核对一下依据，然后继续回答";
+        }
+        return switch (Verdict.MissingEvidence.from(verdict.missingEvidence())) {
+            case ARTICLE_CONTENT -> hasReadArticle
+                    ? "再补读文章相关章节，再继续回答"
+                    : "先读取文章正文，再继续回答";
+            case MEMORY -> "先补充相关记忆，再继续回答";
+            case RAG -> "先补充站内资料，再继续回答";
+            case OTHER -> "再核对一下依据，然后继续回答";
+        };
+    }
+
     /** 决策循环步数上限（学习/文章域默认 5；通用域收紧到 3 控延迟）。 */
     protected int maxSteps() {
         return DEFAULT_MAX_STEPS;
@@ -625,7 +651,10 @@ public abstract class AbstractAgentRuntime {
                                 + "）：" + (verdict.reason() == null || verdict.reason().isBlank()
                                 ? "证据不足以支撑该回答" : verdict.reason());
                         emitter.emit(nextStepNo, "FINAL_ANSWER", "FAILED",
-                                "回答被拦截：证据不足", null);
+                                verifierBlockedMessage(verdict,
+                                        successfulActions != null
+                                                && successfulActions.contains(AgentStepActionType.QUERY_ARTICLE)),
+                                null);
                         recordRejectedStep(run, decision, nextStepNo, rejectReason, stepUsage,
                                 stepTimer.elapsedMillis());
                         String verifierHint = verifierRejectHint(verdict);

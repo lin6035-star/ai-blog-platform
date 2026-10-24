@@ -28,6 +28,8 @@ import com.hailin.blogsystem.service.ArticlesService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
@@ -146,6 +148,76 @@ class ArticleAgentRuntimeVerifierTests {
         AiAgentRun saved = captureRun();
         assertThat(saved.getContextJson()).contains("回答依据不足");
         assertThat(saved.getContextJson()).contains("缓存击穿");
+    }
+
+    /**
+     * 思考流里的拦截文案必须按缺口类别变化（2026-10-23）。
+     *
+     * <p>原来固定「回答被拦截：证据不足」，用户看到像报错；现在按
+     * {@link Verdict.MissingEvidence} 说明"正在补什么"，未知类别也有泛化兜底。
+     * 这条锁的是 emitter 实际发出去的 message，不是内部 errorMessage。
+     */
+    @ParameterizedTest
+    @EnumSource(Verdict.MissingEvidence.class)
+    void verifierBlockedThoughtMessageExplainsWhatIsBeingSupplemented(Verdict.MissingEvidence missing) {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(finalAnswer("草案"))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
+                .thenReturn(finalAnswer("补查后的回答"));
+        when(executor.execute(any(), any(), any()))
+                .thenReturn(AgentActionResult.of("当前文章分析：正文片段"));
+        when(verifier.verify(any(), any(), any(), any(), any()))
+                .thenReturn(Verdict.needMore(missing, "缺口原因"))
+                .thenReturn(Verdict.sufficient());
+
+        List<String> blockedMessages = new ArrayList<>();
+        AgentStepEmitter emitter = (stepNo, actionType, status, message, thoughtSummary) -> {
+            if ("FINAL_ANSWER".equals(actionType) && "FAILED".equals(status)) {
+                blockedMessages.add(message);
+            }
+        };
+
+        runtime.run(100L, 200L, "分析这篇文章", articleContext("12"), emitter);
+
+        String expected = switch (missing) {
+            case ARTICLE_CONTENT -> "先读取文章正文，再继续回答";
+            case MEMORY -> "先补充相关记忆，再继续回答";
+            case RAG -> "先补充站内资料，再继续回答";
+            case OTHER -> "再核对一下依据，然后继续回答";
+        };
+        assertThat(blockedMessages).containsExactly(expected);
+    }
+
+    /**
+     * 同一个缺口类别在不同阶段要说不同的话：文章还没读 → 首读；读了但不够细 → 补读。
+     * 否则用户会在思考流里看到两条一模一样的提示，还是分不清系统在干什么。
+     */
+    @Test
+    void verifierBlockedMessageSwitchesToFocusedReadAfterArticleWasRead() {
+        when(decider.decide(any(), any(), anyInt(), anyInt(), any()))
+                .thenReturn(finalAnswer("第一版草案"))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
+                .thenReturn(finalAnswer("第二版草案"))
+                .thenReturn(AgentStepDecision.of(AgentStepActionType.QUERY_ARTICLE))
+                .thenReturn(finalAnswer("补读后的回答"));
+        when(executor.execute(any(), any(), any())).thenReturn(AgentActionResult.of("文章正文"));
+        when(verifier.verify(any(), any(), any(), any(), any()))
+                .thenReturn(Verdict.needMore(Verdict.MissingEvidence.ARTICLE_CONTENT, "还没读"))
+                .thenReturn(Verdict.needMore(Verdict.MissingEvidence.ARTICLE_CONTENT, "细节不够"))
+                .thenReturn(Verdict.sufficient());
+
+        List<String> blockedMessages = new ArrayList<>();
+        AgentStepEmitter emitter = (stepNo, actionType, status, message, thoughtSummary) -> {
+            if ("FINAL_ANSWER".equals(actionType) && "FAILED".equals(status)) {
+                blockedMessages.add(message);
+            }
+        };
+
+        runtime.run(100L, 200L, "分析这篇文章", articleContext("12"), emitter);
+
+        assertThat(blockedMessages).containsExactly(
+                "先读取文章正文，再继续回答",
+                "再补读文章相关章节，再继续回答");
     }
 
     /**
