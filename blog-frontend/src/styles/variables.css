@@ -1,0 +1,12 @@
+:root {
+  --color-page: #f2f4f5;
+  --color-surface: #ffffff;
+  --color-ink: #1f2729;
+  --color-text: #354346;
+  --color-muted: #728083;
+  --color-border: #dfe7e4;
+  --color-forest: #2f6f73;
+  --color-mint: #e3f4ed;
+  --color-coral: #d94e3f;
+  --shadow-soft: 0 14px 32px rgba(31, 39, 41, 0.07);
+}
